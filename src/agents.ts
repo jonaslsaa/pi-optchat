@@ -14,6 +14,7 @@ import { textContent } from './transcript.ts';
 import { Type } from 'typebox';
 import { result } from './tools.ts';
 import type { HandoffEvidence } from './handoff.ts';
+import { bridgeEnabled, bridgePrompt, registerBridge, usesBridge } from './claude-bridge.ts';
 
 export interface LiveRun {
   session: AgentSession; info: RunInfo; updated: number; streaming?: AgentMessage;
@@ -122,13 +123,16 @@ export class Children {
         const loader = new DefaultResourceLoader({ cwd: directory, agentDir: getAgentDir(), settingsManager,
           noPromptTemplates: true,
           extensionsOverride: base => ({ ...base, extensions: base.extensions.filter(e => !isOptchat(e.resolvedPath)) }),
-          extensionFactories: [pi => {
+          extensionFactories: [async pi => {
+            if (bridgeEnabled()) await registerBridge(pi);
             const provider = this.registry.getRegisteredProviderConfig(selected.provider);
             if (provider) pi.registerProvider(selected.provider, provider);
             // Same prompt as the main agent (AGENTS.md files, skills, cwd); only the OptChat preamble differs.
             pi.on('before_agent_start', event => {
-              event.systemPromptOptions.customPrompt = `${SUBAGENT}\n\n${VIEW_DOC}`;
-              event.systemPromptOptions.sections.instructions = instructions;
+              const preamble = `${SUBAGENT}\n\n${VIEW_DOC}`;
+              event.systemPromptOptions.customPrompt = usesBridge(model) ? bridgePrompt(preamble, instructions) : preamble;
+              if (!usesBridge(model)) event.systemPromptOptions.sections.instructions = instructions;
+              else delete event.systemPromptOptions.sections.instructions;
             });
             pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
           }],

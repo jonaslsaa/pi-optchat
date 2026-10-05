@@ -5,6 +5,7 @@ import { COMPACT } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
 import { cachePayload } from './cache.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
+import { summaryMessages, summaryCache } from './claude-bridge.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
 const scaleBase = 'user: Keep work and personal memory separate; use a binary summary tree and inspect original messages before acting. talk: Implemented the append-only log with durable writes and a stable view. echo: Checked caching, chronological summaries, cancellation, and profile locks. user: Main agent uses Opus; compactor uses Sonnet at medium effort. work: Worker completed the parser; tests cover invalid records and repeated imports. talk: The browser opens original messages, preserving dates and sources.';
@@ -19,8 +20,8 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
     const tries: string[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
-      const reply = await registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
-        reasoning: selected.thinking === 'off' ? undefined : selected.thinking, signal, cacheRetention: 'short',
+      const reply = await registry.streamSimple(model, { systemPrompt: COMPACT, messages: summaryMessages(messages, model) }, {
+        reasoning: selected.thinking === 'off' ? undefined : selected.thinking, signal, cacheRetention: summaryCache(model),
         onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload) : payload,
       }).result();
       onUsage(reply);

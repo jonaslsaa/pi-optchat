@@ -29,11 +29,13 @@ import { serveWindows } from './window-bridge.ts';
 import { openConnectedWindow, registerConnectedRenderer } from './connected-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
+import { bridgeEnabled, bridgePrompt, contextPrompt, registerBridge, usesBridge } from './claude-bridge.ts';
 
 const binding = 'optchat.profile';
 interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
-export default function optchat(pi: ExtensionAPI) {
+export default async function optchat(pi: ExtensionAPI) {
+  if (bridgeEnabled()) await registerBridge(pi);
   let active: Active | undefined;
   let remote: Awaited<ReturnType<typeof openConnectedWindow>> | undefined;
   let closeWindows: (() => Promise<void>) | undefined;
@@ -239,8 +241,11 @@ export default function optchat(pi: ExtensionAPI) {
     startRun(ctx);
     const a = required();
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
-    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.`;
-    event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
+    const preamble = `${MASTER}\n\n${VIEW_DOC}\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.`;
+    const rules = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
+    event.systemPromptOptions.customPrompt = usesBridge(ctx.model) ? bridgePrompt(preamble, rules) : preamble;
+    if (!usesBridge(ctx.model)) event.systemPromptOptions.sections.instructions = rules;
+    else delete event.systemPromptOptions.sections.instructions;
     prompt = event.systemPrompt;
   });
   pi.on('message_end', (event, ctx) => {
@@ -275,7 +280,7 @@ export default function optchat(pi: ExtensionAPI) {
         view = a.memory.render(); // Capture old history before logging the new input.
         flush(); ctx.ui.setWorkingMessage();
       }
-      return { messages: buildContext(event.messages, run, view, prompt, previous) };
+      return { messages: buildContext(event.messages, run, view, contextPrompt(event.messages, prompt, ctx.model), previous) };
     } catch (error) {
       // Pi catches extension errors. Explicitly abort so it cannot fall back to old context.
       ctx.abort();

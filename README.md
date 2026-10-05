@@ -63,6 +63,17 @@ Subagent and compactor settings are saved per profile and do not follow the main
 
 Compression and subagents make extra model requests with your provider credentials.
 
+### Experimental Claude Code backend (draft branch only)
+
+This branch includes an opt-in `pi-claude-bridge` integration, enabled with
+`OPTCHAT_CLAUDE_BRIDGE=1`. It uses the official Claude Code/Agent SDK backend for
+main agents, children and summaries; existing providers and profile defaults do
+not change. Do not load a separate bridge extension at the same time.
+
+See the [experiment and test results](docs/claude-bridge-experiment.md) before
+trying it in a disposable profile. Functional tests pass, but subscription versus
+Extra Usage billing has **not** been verified. This is not in the npm release.
+
 ## Subagents
 
 Ask in plain words, for example: "Spawn an agent to investigate this repository and report back."

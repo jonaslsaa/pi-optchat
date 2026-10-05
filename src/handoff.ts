@@ -4,6 +4,7 @@ import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { ModelChoice } from './compactor.ts';
 import type { RunInfo } from './runs.ts';
 import { textContent } from './transcript.ts';
+import { summaryCache, usesBridge } from './claude-bridge.ts';
 
 export interface HandoffEvidence { run: RunInfo; messages: AgentMessage[]; transcriptError?: string }
 
@@ -53,7 +54,7 @@ export function createHandoffSummarizer(registry: ModelRegistry, choice: () => M
       const reply = await registry.streamSimple(model, {
         systemPrompt: SYSTEM,
         messages: [{ role: 'user', timestamp: Date.now(), content: prefix + transcript.subarray(offset, end).toString('utf8') }],
-      }, { reasoning: selected.thinking === 'off' ? undefined : selected.thinking, maxTokens, signal: AbortSignal.timeout(300_000) }).result();
+      }, { reasoning: selected.thinking === 'off' ? undefined : selected.thinking, maxTokens, cacheRetention: usesBridge(model) ? summaryCache(model) : undefined, signal: AbortSignal.timeout(300_000) }).result();
       usage(reply);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? reply.stopReason);
       if (reply.stopReason === 'length') throw new Error('Handoff hit the model output limit before finishing');
