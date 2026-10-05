@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, getAgentDir, type AgentSession, type AgentSessionEvent, type ModelRegistry } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, getAgentDir, type AgentSession, type AgentSessionEvent, type ExtensionAPI, type InlineExtension, type ModelRegistry } from '@earendil-works/pi-coding-agent';
+import * as sdk from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { SUBAGENT, VIEW_DOC } from './prompts.ts';
 import { memoryTools } from './tools.ts';
@@ -22,6 +23,8 @@ export interface LiveRun {
   pendingReports: string[]; pendingGuidance: string[]; wake?: () => void; completion?: Promise<void>;
 }
 interface Options { parentSession?: string; usage?: UsageLedger; createSession?: typeof createAgentSession;
+  /** Names of the built-in extensions the main session loaded (see `loadedBuiltins`). */
+  builtins?: () => Iterable<string>;
   summarizeHandoff?: (run: RunInfo, messages: AgentMessage[], descendants?: HandoffEvidence[]) => Promise<string> }
 
 // Subagents load the user's installed extensions, except any copy of OptChat itself: they get memory tools directly and must not open a profile.
@@ -40,6 +43,19 @@ export const taskDirectory = (cwd: string, path = '.', windows = process.platfor
   resolve(cwd, path.replace(windows ? /^~(?=$|[\\/])/ : /^~(?=$|\/)/, homedir()));
 export const CWD_DOC = 'Project directory the subagent works in (~ allowed); its AGENTS.md files load from there. Defaults to your current directory.';
 const isOptchat = (path: string) => packageName(path) === 'pi-optchat';
+
+// Pi's CLI adds its built-in extensions (MCP, codemode, tool search) to its own session; SDK sessions such as
+// subagents must add them. Pi versions that do not export a factory simply do not get that extension.
+const BUILTINS: Record<string, string> = { mcp: 'createMcpExtension', codemode: 'createCodemodeExtension', 'tool-search': 'createToolSearchExtension' };
+const PREFIX = 'builtin:';
+/** The built-in extensions a session loaded: `--no-mcp`, `-builtin:<name>` settings and replacing extensions leave them out. */
+export const loadedBuiltins = (pi: Pick<ExtensionAPI, 'getCommands' | 'getAllTools'>) => new Set([...pi.getCommands(), ...pi.getAllTools()]
+  .map(item => item.sourceInfo?.path ?? '').filter(path => path.startsWith(PREFIX) && Object.hasOwn(BUILTINS, path.slice(PREFIX.length))).map(path => path.slice(PREFIX.length)));
+/** Fresh built-in extensions for one session, as `builtin:<name>` resources, so the session's own settings still apply. */
+export const builtinExtensions = (names: Iterable<string>): InlineExtension[] => [...new Set(names)].flatMap(name => {
+  const create = Object.hasOwn(BUILTINS, name) ? (sdk as unknown as Record<string, unknown>)[BUILTINS[name]] : undefined;
+  return typeof create === 'function' ? [{ name, factory: create(), replaceable: true, builtin: true }] : [];
+});
 export class Children {
   private readonly running = new Map<string, LiveRun>();
   readonly history: RunHistory;
@@ -130,7 +146,7 @@ export class Children {
         const loader = new DefaultResourceLoader({ cwd: directory, agentDir: getAgentDir(), settingsManager,
           noPromptTemplates: true,
           extensionsOverride: base => ({ ...base, extensions: base.extensions.filter(e => !isOptchat(e.resolvedPath)) }),
-          extensionFactories: [pi => {
+          extensionFactories: [...builtinExtensions(this.options.builtins?.() ?? []), pi => {
             const provider = this.registry.getRegisteredProviderConfig(selected.provider);
             if (provider) pi.registerProvider(selected.provider, provider);
             // Same prompt as the main agent (AGENTS.md files, skills, cwd); only the OptChat preamble differs.
@@ -159,6 +175,7 @@ export class Children {
       }
     } catch (error) {
       for (const child of launched) {
+        await this.shutdown(child.session); // Extensions such as MCP close their connections and stop their server processes.
         this.dispose(child.session); this.running.delete(child.info.id);
         child.info.state = 'failed'; child.info.ended = Date.now(); child.info.report = `Launch failed: ${String(error)}`;
         if (child.info.connected) child.info.handoff = { reason: signal?.aborted ? 'disconnected' : 'failed' };
@@ -207,6 +224,10 @@ export class Children {
       },
     };
   }
+  private async shutdown(session: AgentSession) {
+    try { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); }
+    catch (error) { this.warn(`Subagent cleanup failed: ${String(error)}`); }
+  }
   private dispose(session: AgentSession) {
     try { session.dispose(); } catch (error) { this.warn(`Subagent cleanup failed: ${String(error)}`); }
   }
@@ -249,8 +270,7 @@ export class Children {
       await Promise.allSettled(children.flatMap(child => child.completion ? [child.completion] : []));
       info.ended = Date.now();
       for (const g of info.guidance) if (g.state === 'queued') g.state = 'undelivered';
-      try { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); }
-      catch (error) { this.warn(`Subagent cleanup failed: ${String(error)}`); }
+      await this.shutdown(session);
       // A failed dispose must neither keep the slot taken nor drop the report below.
       this.dispose(session); this.running.delete(info.id);
     }
