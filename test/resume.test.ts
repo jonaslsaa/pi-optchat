@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, ModelRegistry, ModelRuntime, type AgentSession } from '@earendil-works/pi-coding-agent';
 import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
@@ -26,6 +26,7 @@ async function until(condition: () => boolean) {
 async function setup(prefix: string) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   const releases = new Map<string, () => void>();
+  const hooks: { beforeSession?: () => Promise<void>; opened?: (session: AgentSession) => void } = {};
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider('optchat-test', {
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
@@ -58,13 +59,18 @@ async function setup(prefix: string) {
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const reports: string[] = [], warnings: string[] = [];
   const make = (parentSession: string) => new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { parentSession, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(text); }, text => warnings.push(text), dir, { parentSession, createSession: async options => {
+      await hooks.beforeSession?.();
+      const created = await createAgentSession({ ...options, modelRuntime: runtime });
+      hooks.opened?.(created.session);
+      return created;
+    } });
   const cleanup = async (...all: Children[]) => {
     for (const release of releases.values()) release();
     for (const children of all) await children.close();
     await memory.close(); rmSync(dir, { recursive: true, force: true });
   };
-  return { dir, releases, reports, warnings, make, cleanup };
+  return { dir, releases, hooks, reports, warnings, make, cleanup };
 }
 
 const users = (children: Children, id: string) => children.messages(id).filter(m => m.role === 'user').map(m => textContent(m.content));
@@ -168,5 +174,58 @@ test('resuming refuses connected windows, missing or broken transcripts, and a f
     await children.tell(full, 'now there is room');
     await until(() => !children.active);
     assert.equal(children.history.records.get(full)?.report, 'full resumed after "full first report" heard: now there is room');
+  } finally { await cleanup(children); }
+});
+
+test('a child whose parent stops while it is being resumed does not start', async () => {
+  const { dir, releases, hooks, make, cleanup } = await setup('optchat-resume-cancel-');
+  const children = make('session');
+  try {
+    // The parent is stopped while its child's session is being opened: the child must not start.
+    const [boss] = await children.spawn([{ task: 'boss' }], dir);
+    await until(() => releases.has('boss'));
+    const [worker] = await children.spawn([{ task: 'worker' }], dir, undefined, boss);
+    await until(() => children.history.records.get(worker)?.state === 'completed' && !children.live(worker));
+    let opening!: () => void, opened!: () => void;
+    const started = new Promise<void>(resolve => { opening = resolve; });
+    hooks.beforeSession = () => { opening(); return new Promise<void>(resolve => { opened = resolve; }); };
+    let disposed = 0;
+    hooks.opened = session => { const dispose = session.dispose.bind(session); session.dispose = () => { disposed++; dispose(); }; };
+    const resume = children.tell(worker, 'more', 'manager', boss);
+    await started;
+    await children.stop(boss);
+    hooks.beforeSession = undefined; opened();
+    await assert.rejects(resume, /Parent or profile is stopping/);
+    await until(() => !children.active);
+    assert.equal(children.live(worker), undefined);
+    assert.equal(children.history.records.get(worker)?.state, 'completed');
+    assert.equal(users(children, worker).length, 1, 'the cancelled child never got the message');
+    assert.equal(disposed, 1, 'the opened session is closed');
+  } finally { await cleanup(children); }
+});
+
+test('a resume whose record cannot be saved leaves the child finished and resumable', async () => {
+  const { dir, hooks, reports, make, cleanup } = await setup('optchat-resume-save-');
+  const children = make('session');
+  try {
+    // Saving the resumed record fails: nothing changes, the session is closed, and a later resume works.
+    const [solo] = await children.spawn([{ task: 'solo' }], dir);
+    await until(() => !children.active);
+    const save = children.history.save.bind(children.history);
+    children.history.save = () => { throw new Error('disk full'); };
+    let disposed = 0;
+    hooks.opened = session => { const dispose = session.dispose.bind(session); session.dispose = () => { disposed++; dispose(); }; };
+    await assert.rejects(children.tell(solo, 'more'), /disk full/);
+    children.history.save = save; hooks.opened = undefined;
+    assert.equal(disposed, 1, 'the opened session is closed');
+    assert.equal(children.live(solo), undefined);
+    const record = children.history.records.get(solo)!;
+    assert.equal(record.state, 'completed');
+    assert.equal(typeof record.ended, 'number');
+    assert.deepEqual(record.guidance, []);
+    assert.equal(children.active, false, 'the slot is free again');
+    await children.tell(solo, 'after recovery');
+    await until(() => !children.active);
+    assert.equal(reports.at(-1), `[${solo}] solo resumed after "solo first report" heard: after recovery`);
   } finally { await cleanup(children); }
 });

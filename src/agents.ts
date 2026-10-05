@@ -329,12 +329,18 @@ export class Children {
     try {
       // No thinking level: the session restores the one it ran with.
       const session = await this.open({ id, directory: run.cwd, depth: run.depth, parentId: run.parentId, connected: false, provider, model, sessionManager: manager });
-      if (this.closing) { this.dispose(session); throw new Error('Profile is closing.'); }
-      run.state = 'running'; run.started = Date.now(); delete run.ended;
-      run.parentSession = this.options.parentSession ?? run.parentSession;
-      run.guidance.push({ text, date: Date.now(), state: 'queued', from: 'manager' });
-      const live: LiveRun = { session, info: run, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [] };
-      this.save(run); this.running.set(id, live);
+      // stop() cannot see this child until it is registered, so a parent stopped meanwhile must cancel it here.
+      const parent = run.parentId ? this.running.get(run.parentId) : undefined;
+      if (this.closing || run.parentId && (!parent || !['running', 'waiting'].includes(parent.info.state))) {
+        this.dispose(session); throw new Error('Parent or profile is stopping.');
+      }
+      // The finished record stays untouched (and resumable) unless the new one is saved.
+      const { ended: _ended, ...rest } = run;
+      const info: RunInfo = { ...rest, state: 'running', started: Date.now(), parentSession: this.options.parentSession ?? run.parentSession,
+        guidance: [...run.guidance, { text, date: Date.now(), state: 'queued', from: 'manager' }] };
+      try { this.save(info); } catch (error) { this.history.records.set(id, run); this.dispose(session); throw error; }
+      const live: LiveRun = { session, info, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [] };
+      this.running.set(id, live);
       this.launching--; reserved = false;
       session.subscribe(event => this.observe(live, event));
       const work = this.execute(live, text).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
