@@ -163,7 +163,9 @@ export class Children {
           customTools: [...memoryTools(() => this.memory), ...(depth < 3 ? this.delegationTools(id, directory) : []), this.parentTool(id, parentId, connected)],
           excludeTools: depth < 3 ? [] : ['spawn', 'tell'],
         });
-        await session.bindExtensions({});
+        // Not in `launched` yet, so the rollback below would miss it: clean up here if its extensions fail to start.
+        try { await session.bindExtensions({}); }
+        catch (error) { await this.shutdown(session); this.dispose(session); throw error; }
         const info: RunInfo = { id, task: task.task, cwd: directory, model: `${selected.provider}/${selected.model}`, thinking: session.thinkingLevel,
           parentSession: this.options.parentSession ?? '', parentId, depth, sessionFile: session.sessionFile, started: Date.now(), state: 'running', guidance: [], ...(connected ? { connected: true } : {}) };
         const live: LiveRun = { session, info, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [] };

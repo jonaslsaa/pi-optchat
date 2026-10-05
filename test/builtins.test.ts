@@ -125,3 +125,29 @@ test('a batch that fails mid-launch closes the MCP connections of the children i
     assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n').map(line => line.split(' ')[0]), ['start', 'exit']);
   } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
 });
+
+test('a child whose extensions fail to start still closes its MCP connections', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-builtins-bind-'));
+  const log = join(dir, 'servers.log');
+  writeFileSync(join(agentDir, 'mcp.json'), JSON.stringify({ mcpServers: { fake: { command: process.execPath, args: [server, log], exposure: 'direct' } } }));
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple() { throw new Error('the child never runs'); },
+  });
+  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+    async () => {}, () => {}, dir, { builtins: () => ALL, createSession: async options => {
+      const made = await createAgentSession({ ...options, modelRuntime: runtime }), bind = made.session.bindExtensions.bind(made.session);
+      // Binding starts the MCP connection, then fails.
+      made.session.bindExtensions = async bindings => { await bind(bindings); await until(() => existsSync(log)); throw new Error('binding failed'); };
+      return made;
+    } });
+  try {
+    await assert.rejects(children.spawn([{ task: 'one' }], dir), /binding failed/);
+    await until(() => readFileSync(log, 'utf8').includes('exit'));
+    assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n').map(line => line.split(' ')[0]), ['start', 'exit']);
+    assert.equal(children.active, false, 'the failed child holds no agent slot');
+  } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
+});
