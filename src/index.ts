@@ -321,7 +321,7 @@ export default function optchat(pi: ExtensionAPI) {
       return result(`Started: ${ids.join(', ')}. Reports will arrive automatically.`);
     },
   });
-  pi.registerTool({ name: 'tell', label: 'Tell background agent', description: 'Send a message to a running subagent at its next tool boundary.',
+  pi.registerTool({ name: 'tell', label: 'Tell background agent', description: 'Send a message to a subagent. A running one gets it at its next tool boundary. A finished one you started is resumed with its earlier conversation, and its new report arrives automatically.',
     parameters: Type.Object({ id: Type.String(), message: Type.String() }),
     async execute(_id, args) { return result(await required().children.tell(args.id, args.message)); },
   });

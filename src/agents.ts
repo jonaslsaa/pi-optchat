@@ -4,6 +4,7 @@ import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, getAgentDir, type AgentSession, type AgentSessionEvent, type ModelRegistry } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import type { Api, Model } from '@earendil-works/pi-ai';
 import { SUBAGENT, VIEW_DOC } from './prompts.ts';
 import { memoryTools } from './tools.ts';
 import { type Memory } from './memory.ts';
@@ -46,6 +47,7 @@ export class Children {
   private readonly listeners = new Set<() => void>();
   private closing = false;
   private launching = 0;
+  private readonly resuming = new Set<string>();
   private settling = 0;
   private readonly completions = new Set<Promise<void>>();
   constructor(private readonly memory: Memory, private readonly registry: ModelRegistry,
@@ -122,32 +124,8 @@ export class Children {
         signal?.throwIfAborted();
         if (cancelled()) throw new Error('Parent or profile is stopping.');
         const id = randomUUID().slice(0, 8), directory = taskDirectory(cwd, task.cwd);
-        const delegation = depth < 3 ? 'You may delegate parts of your assigned task with spawn when useful. Child reports arrive automatically after your current run ends; the harness keeps you alive to receive them. Never poll, sleep, or wait in a tool for children. Finish your current work and return; you will be prompted with their results. The profile allows 8 active agents total.' : 'You are at the maximum delegation depth. Complete your task with your own tools.';
-        const instructions = [this.instructions(), delegation, connected ? 'You are speaking directly with the user in a connected window. Continue this conversation across requests. Use tell_parent for questions or findings the main agent needs now. A handoff will be generated when the user completes or disconnects the window.'
-          : 'Use tell_parent only when your parent needs something now (a blocking question, an important early finding, or when asked to). Your final answer is delivered automatically; do not repeat it with tell_parent.'].filter(Boolean).join('\n\n');
-        // The user's settings list their installed packages; a copy in memory keeps the child from writing them back.
-        const settingsManager = SettingsManager.inMemory({ ...SettingsManager.create(directory, getAgentDir()).getSettings(), compaction: { enabled: false }, cacheWarming: 'off' });
-        const loader = new DefaultResourceLoader({ cwd: directory, agentDir: getAgentDir(), settingsManager,
-          noPromptTemplates: true,
-          extensionsOverride: base => ({ ...base, extensions: base.extensions.filter(e => !isOptchat(e.resolvedPath)) }),
-          extensionFactories: [pi => {
-            const provider = this.registry.getRegisteredProviderConfig(selected.provider);
-            if (provider) pi.registerProvider(selected.provider, provider);
-            // Same prompt as the main agent (AGENTS.md files, skills, cwd); only the OptChat preamble differs.
-            pi.on('before_agent_start', event => {
-              event.systemPromptOptions.customPrompt = `${SUBAGENT}\n\n${VIEW_DOC}`;
-              event.systemPromptOptions.sections.instructions = instructions;
-            });
-            pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
-          }],
-        });
-        await loader.reload();
-        const { session } = await (this.options.createSession ?? createAgentSession)({ cwd: directory, resourceLoader: loader, settingsManager,
-          model, thinkingLevel: selected.thinking, sessionManager: SessionManager.create(directory, join(this.profileDirectory, 'runs')),
-          customTools: [...memoryTools(() => this.memory), ...(depth < 3 ? this.delegationTools(id, directory) : []), this.parentTool(id, parentId, connected)],
-          excludeTools: depth < 3 ? [] : ['spawn', 'tell'],
-        });
-        await session.bindExtensions({});
+        const session = await this.open({ id, directory, depth, parentId, connected, provider: selected.provider, model, thinking: selected.thinking,
+          sessionManager: SessionManager.create(directory, join(this.profileDirectory, 'runs')) });
         const info: RunInfo = { id, task: task.task, cwd: directory, model: `${selected.provider}/${selected.model}`, thinking: session.thinkingLevel,
           parentSession: this.options.parentSession ?? '', parentId, depth, sessionFile: session.sessionFile, started: Date.now(), state: 'running', guidance: [], ...(connected ? { connected: true } : {}) };
         const live: LiveRun = { session, info, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [] };
@@ -169,7 +147,7 @@ export class Children {
     } finally { this.launching -= reserved; }
     // Each child reports independently. A slow sibling must not hold back a finished result.
     for (const live of launched) {
-      const work = this.execute(live, view).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
+      const work = this.execute(live, `${view}\n\nYour task:\n${live.info.task}`).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
         .finally(() => { this.completions.delete(work); this.changed(); });
       this.completions.add(work);
       live.completion = work;
@@ -177,15 +155,47 @@ export class Children {
     this.changed();
     return launched.map(c => c.info.id);
   }
+  /** Builds a child session with the same prompt, tools and extensions whether it is new or resumed. */
+  private async open(o: { id: string; directory: string; depth: number; parentId?: string; connected: boolean; provider: string; model: Model<Api>;
+    thinking?: ModelChoice['thinking']; sessionManager: SessionManager }) {
+    const { id, directory, depth, parentId, connected } = o;
+    const delegation = depth < 3 ? 'You may delegate parts of your assigned task with spawn when useful. Child reports arrive automatically after your current run ends; the harness keeps you alive to receive them. Never poll, sleep, or wait in a tool for children. Finish your current work and return; you will be prompted with their results. The profile allows 8 active agents total.' : 'You are at the maximum delegation depth. Complete your task with your own tools.';
+    const instructions = [this.instructions(), delegation, connected ? 'You are speaking directly with the user in a connected window. Continue this conversation across requests. Use tell_parent for questions or findings the main agent needs now. A handoff will be generated when the user completes or disconnects the window.'
+      : 'Use tell_parent only when your parent needs something now (a blocking question, an important early finding, or when asked to). Your final answer is delivered automatically; do not repeat it with tell_parent.'].filter(Boolean).join('\n\n');
+    // The user's settings list their installed packages; a copy in memory keeps the child from writing them back.
+    const settingsManager = SettingsManager.inMemory({ ...SettingsManager.create(directory, getAgentDir()).getSettings(), compaction: { enabled: false }, cacheWarming: 'off' });
+    const loader = new DefaultResourceLoader({ cwd: directory, agentDir: getAgentDir(), settingsManager,
+      noPromptTemplates: true,
+      extensionsOverride: base => ({ ...base, extensions: base.extensions.filter(e => !isOptchat(e.resolvedPath)) }),
+      extensionFactories: [pi => {
+        const provider = this.registry.getRegisteredProviderConfig(o.provider);
+        if (provider) pi.registerProvider(o.provider, provider);
+        // Same prompt as the main agent (AGENTS.md files, skills, cwd); only the OptChat preamble differs.
+        pi.on('before_agent_start', event => {
+          event.systemPromptOptions.customPrompt = `${SUBAGENT}\n\n${VIEW_DOC}`;
+          event.systemPromptOptions.sections.instructions = instructions;
+        });
+        pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
+      }],
+    });
+    await loader.reload();
+    const { session } = await (this.options.createSession ?? createAgentSession)({ cwd: directory, resourceLoader: loader, settingsManager,
+      model: o.model, thinkingLevel: o.thinking, sessionManager: o.sessionManager,
+      customTools: [...memoryTools(() => this.memory), ...(depth < 3 ? this.delegationTools(id, directory) : []), this.parentTool(id, parentId, connected)],
+      excludeTools: depth < 3 ? [] : ['spawn', 'tell'],
+    });
+    await session.bindExtensions({});
+    return session;
+  }
   private delegationTools(parentId: string, cwd: string) {
     return [{ name: 'spawn', label: 'Delegate task', description: 'Delegate parts of your task. Results arrive automatically after this run; never poll or sleep waiting. Maximum depth 3 and 8 active agents per profile.',
       parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1, maxItems: 8 }) }),
       execute: async (_id: string, args: { tasks: { task: string; cwd?: string }[] }, signal?: AbortSignal) => result(`Started: ${(await this.spawn(args.tasks, cwd, signal, parentId)).join(', ')}. Results will arrive automatically.`),
-    }, { name: 'tell', label: 'Guide child', description: 'Send guidance to one of your direct children.',
+    }, { name: 'tell', label: 'Guide child', description: 'Send guidance to one of your direct children. A finished child is resumed with its earlier conversation, and its new report arrives automatically.',
       parameters: Type.Object({ id: Type.String(), message: Type.String() }),
       execute: async (_id: string, args: { id: string; message: string }) => {
         if (this.history.records.get(args.id)?.parentId !== parentId) throw new Error('You can only guide your own children.');
-        return result(await this.tell(args.id, args.message));
+        return result(await this.tell(args.id, args.message, 'manager', parentId));
       },
     }];
   }
@@ -211,12 +221,12 @@ export class Children {
     try { session.dispose(); } catch (error) { this.warn(`Subagent cleanup failed: ${String(error)}`); }
   }
   private directChildren(id: string) { return [...this.running.values()].filter(c => c.info.parentId === id); }
-  private async execute(live: LiveRun, view: string) {
+  private async execute(live: LiveRun, prompt: string) {
     const { session, info } = live;
     try {
       if (info.connected) await this.report(`[${info.id}] User started a connected conversation in ${info.cwd}. That agent is handling this request with the user directly; don't do it yourself. Initial message: ${info.task}\n\nUse tell with this agent ID only if you know something it needs. It stays open between replies and sends a final handoff on completion or disconnect.`);
       if (this.closing || info.handoff) throw new Error('Conversation stopped before its first request.');
-      await session.prompt(`${view}\n\nYour task:\n${info.task}`);
+      await session.prompt(prompt);
       while (info.state !== 'stopping') {
         const last = session.messages.findLast(m => m.role === 'assistant');
         if (last?.role === 'assistant' && (last.stopReason === 'error' || last.stopReason === 'aborted')) break;
@@ -276,9 +286,12 @@ export class Children {
       this.warn(`Subagent report saved but could not wake the parent: ${String(error)}`);
     }
   }
-  async tell(id: string, message: string, source: 'manager' | 'user' = 'manager') {
+  /** `caller` is the agent sending a manager message: undefined for the main agent, else the parent subagent's ID. */
+  async tell(id: string, message: string, source: 'manager' | 'user' = 'manager', caller?: string) {
     const live = this.running.get(id);
-    if (!live || !['running', 'waiting'].includes(live.info.state)) throw new Error(`No running subagent ${id}.`);
+    if (!live && source === 'manager' && this.history.records.has(id)) return this.resume(id, message, caller);
+    if (live && !['running', 'waiting'].includes(live.info.state)) throw new Error(`${id} is finishing. Its report will arrive on its own${live.info.connected || source === 'user' ? '' : '; tell it again after that to resume it'}.`);
+    if (!live) throw new Error(`No running subagent ${id}.`);
     const text = live.info.connected && source === 'manager' ? `[Main agent guidance]\n${message.trim()}` : message.trim(); if (!message.trim()) throw new Error('Message is empty.');
     if (source === 'user') this.memory.append('user', `Direct guidance to subagent [${id}]: ${text}`);
     const guidance: RunInfo['guidance'][number] = { text, date: Date.now(), state: 'queued', from: source };
@@ -289,6 +302,48 @@ export class Children {
     }
     catch (error) { guidance.state = 'undelivered'; this.save(live.info); throw error; }
     return 'Message queued for the next tool boundary.';
+  }
+  /** Reopens a finished child from its saved transcript, same ID, parent and model, and gives it a new message. */
+  private async resume(id: string, message: string, caller: string | undefined) {
+    const run = this.history.records.get(id)!, text = message.trim();
+    if (!text) throw new Error('Message is empty.');
+    if (run.connected) throw new Error(`${id} was a connected conversation with the user. It has ended and its handoff was delivered, so it cannot be resumed. Spawn a new subagent instead.`);
+    if (!['completed', 'failed', 'stopped', 'interrupted'].includes(run.state) || this.resuming.has(id)) throw new Error(`${id} is still finishing. Its report will arrive on its own.`);
+    if (run.parentId !== caller) {
+      if (!run.parentId) throw new Error(`Only the main agent can resume ${id}.`);
+      const parent = this.running.get(run.parentId);
+      throw new Error(parent && ['running', 'waiting'].includes(parent.info.state) ? `Only ${id}'s parent ${run.parentId} can resume it. Ask ${run.parentId} with tell.`
+        : `Only ${id}'s parent ${run.parentId} can resume it, and that parent is no longer running. Resume ${run.parentId} instead, or spawn a new subagent.`);
+    }
+    if (this.closing) throw new Error('Profile is closing.');
+    if (this.running.size + this.launching + 1 > 8) throw new Error(`Profile limit: at most 8 active agents, including parents and descendants. ${id} can be resumed when one finishes.`);
+    let manager: SessionManager | undefined;
+    try { if (run.sessionFile && existsSync(run.sessionFile)) manager = SessionManager.open(run.sessionFile); } catch { manager = undefined; }
+    if (!manager?.getEntries().some(e => e.type === 'message')) throw new Error(`The saved transcript of ${id} is missing or unreadable, so it cannot be resumed. Spawn a fresh subagent and give it the context it needs.`);
+    if (!existsSync(run.cwd) || !statSync(run.cwd).isDirectory()) throw new Error(`${id}'s directory ${run.cwd} no longer exists, so it cannot be resumed. Spawn a fresh subagent instead.`);
+    const slash = run.model.indexOf('/'), provider = run.model.slice(0, slash);
+    const model = slash > 0 ? this.registry.find(provider, run.model.slice(slash + 1)) : undefined;
+    if (!model) throw new Error(`${id}'s model ${run.model} is not available, so it cannot be resumed. Spawn a fresh subagent instead.`);
+    this.launching++; this.resuming.add(id);
+    let reserved = true;
+    try {
+      // No thinking level: the session restores the one it ran with.
+      const session = await this.open({ id, directory: run.cwd, depth: run.depth, parentId: run.parentId, connected: false, provider, model, sessionManager: manager });
+      if (this.closing) { this.dispose(session); throw new Error('Profile is closing.'); }
+      run.state = 'running'; run.started = Date.now(); delete run.ended;
+      run.parentSession = this.options.parentSession ?? run.parentSession;
+      run.guidance.push({ text, date: Date.now(), state: 'queued', from: 'manager' });
+      const live: LiveRun = { session, info: run, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [] };
+      this.save(run); this.running.set(id, live);
+      this.launching--; reserved = false;
+      session.subscribe(event => this.observe(live, event));
+      const work = this.execute(live, text).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
+        .finally(() => { this.completions.delete(work); this.changed(); });
+      this.completions.add(work);
+      live.completion = work;
+    } finally { if (reserved) this.launching--; this.resuming.delete(id); }
+    this.changed();
+    return `${id} had finished, so I resumed it with its earlier conversation. Its new report will come back on its own.`;
   }
   async finish(id: string, reason: FinishReason) {
     const live = this.running.get(id);

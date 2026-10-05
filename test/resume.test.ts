@@ -1,0 +1,172 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
+import { createAgentSession, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { Children } from '../src/agents.ts';
+import { Memory } from '../src/memory.ts';
+import { emptyUsage } from '../src/usage.ts';
+import { textContent } from '../src/transcript.ts';
+
+// Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
+
+async function until(condition: () => boolean) {
+  const deadline = Date.now() + 10000;
+  while (!condition()) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 10)); }
+}
+
+/**
+ * A synthetic model whose replies show what the child remembers: its first reply is "<task> first report";
+ * later replies quote that first reply, so they prove the earlier conversation is back in context.
+ * "resume <id>" makes it call tell on that child. Tasks starting with "hold" or "boss" wait for a release on their first turn.
+ */
+async function setup(prefix: string) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const releases = new Map<string, () => void>();
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple(model, context, options) {
+      const stream = createAssistantMessageEventStream();
+      const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
+      const answers = context.messages.filter(m => m.role === 'assistant');
+      const last = context.messages.at(-1), lastText = textContent(last && 'content' in last ? last.content : '');
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: '' }], api: model.api, provider: model.provider, model: model.id,
+        timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+      if (last?.role === 'user' && lastText.startsWith('resume ')) {
+        message.content = [{ type: 'toolCall', id: `call-${answers.length}`, name: 'tell', arguments: { id: lastText.slice(7), message: `${task} wants more` } }];
+        message.stopReason = 'toolUse';
+      } else message.content = [{ type: 'text', text: last?.role === 'toolResult' ? `asked: ${lastText}`
+        : answers.length === 0 ? `${task} first report` : `${task} resumed after "${textContent(answers[0].content)}" heard: ${lastText}` }];
+      void (async () => {
+        stream.push({ type: 'start', partial: message });
+        if (answers.length === 0 && /^(hold|boss)/.test(task)) await new Promise<void>(resolve => {
+          releases.set(task, resolve); options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+          if (options?.signal?.aborted) resolve();
+        });
+        if (options?.signal?.aborted) { message.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: message }); }
+        else stream.push({ type: 'done', reason: message.stopReason === 'toolUse' ? 'toolUse' : 'stop', message });
+        stream.end();
+      })();
+      return stream;
+    },
+  });
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const reports: string[] = [], warnings: string[] = [];
+  const make = (parentSession: string) => new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+    async text => { reports.push(text); }, text => warnings.push(text), dir, { parentSession, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  const cleanup = async (...all: Children[]) => {
+    for (const release of releases.values()) release();
+    for (const children of all) await children.close();
+    await memory.close(); rmSync(dir, { recursive: true, force: true });
+  };
+  return { dir, releases, reports, warnings, make, cleanup };
+}
+
+const users = (children: Children, id: string) => children.messages(id).filter(m => m.role === 'user').map(m => textContent(m.content));
+
+test('tell resumes a finished child with its earlier conversation, also from an earlier Pi session', async () => {
+  const { dir, reports, warnings, make, cleanup } = await setup('optchat-resume-');
+  const children = make('first-session');
+  let later: Children | undefined;
+  try {
+    const [id] = await children.spawn([{ task: 'remember' }], dir);
+    await until(() => !children.active);
+    assert.deepEqual(reports, [`[${id}] remember first report`]);
+    const before = structuredClone(children.history.records.get(id)!);
+
+    assert.match(await children.tell(id, 'one more thing'), new RegExp(`^${id} had finished, so I resumed it`));
+    const resumed = children.live(id);
+    assert.ok(resumed, 'the resumed child is running again and takes a slot');
+    assert.ok(children.ids.includes(id));
+    assert.equal(children.history.records.get(id)?.state, 'running');
+    await until(() => !children.active);
+    assert.equal(reports[1], `[${id}] remember resumed after "remember first report" heard: one more thing`);
+    const after = children.history.records.get(id)!;
+    assert.equal(after.state, 'completed');
+    assert.equal(after.report, 'remember resumed after "remember first report" heard: one more thing');
+    for (const key of ['id', 'task', 'cwd', 'model', 'depth', 'sessionFile'] as const) assert.equal(after[key], before[key]);
+    assert.equal(after.parentId, undefined);
+    assert.deepEqual(after.guidance.map(g => [g.text, g.state, g.from]), [['one more thing', 'delivered', 'manager']]);
+    assert.equal(users(children, id).length, 2, 'one transcript holds both runs');
+    assert.match(readFileSync(after.sessionFile!, 'utf8'), /one more thing/);
+
+    // A new Pi session only has the run record and transcript on disk.
+    await children.close();
+    later = make('second-session');
+    assert.equal(later.history.records.get(id)?.state, 'completed');
+    await later.tell(id, 'and once more');
+    await until(() => !later!.active);
+    assert.equal(reports[2], `[${id}] remember resumed after "remember first report" heard: and once more`);
+    assert.equal(later.history.records.get(id)?.parentSession, 'second-session', 'usage of the new turns belongs to the session that resumed it');
+    assert.deepEqual(users(later, id).slice(1), ['one more thing', 'and once more']);
+    assert.deepEqual(warnings, []);
+  } finally { await cleanup(children, ...(later ? [later] : [])); }
+});
+
+test('only the parent resumes a nested child, and the resumed child reports to that parent', async () => {
+  const { dir, releases, reports, warnings, make, cleanup } = await setup('optchat-resume-nested-');
+  const children = make('session');
+  try {
+    const [boss] = await children.spawn([{ task: 'boss' }], dir);
+    await until(() => releases.has('boss'));
+    const [worker] = await children.spawn([{ task: 'worker' }], dir, undefined, boss);
+    await until(() => children.history.records.get(worker)?.state === 'completed' && !children.live(worker));
+    await assert.rejects(children.tell(worker, 'from main'), new RegExp(`Only ${worker}'s parent ${boss} can resume it. Ask ${boss} with tell`));
+    releases.get('boss')!();
+    await until(() => !children.active);
+    assert.deepEqual(reports, [`[${boss}] boss resumed after "boss first report" heard: [${worker}] worker first report`]);
+    await assert.rejects(children.tell(worker, 'from main'), /that parent is no longer running\. Resume .* instead, or spawn a new subagent/);
+
+    // The main agent resumes the boss, which resumes its worker with its own tell tool.
+    await children.tell(boss, `resume ${worker}`);
+    await until(() => !children.active);
+    const bossMessages = JSON.stringify(children.messages(boss));
+    assert.ok(bossMessages.includes(`${worker} had finished, so I resumed it`), 'the boss saw the resume result');
+    assert.equal(reports.length, 2, 'the worker reports to the boss, not the main agent');
+    assert.equal(reports[1], `[${boss}] boss resumed after "boss first report" heard: [${worker}] worker resumed after "worker first report" heard: boss wants more`);
+    const record = children.history.records.get(worker)!;
+    assert.equal(record.parentId, boss);
+    assert.equal(record.depth, 2);
+    assert.equal(record.state, 'completed');
+    assert.deepEqual(warnings, []);
+  } finally { await cleanup(children); }
+});
+
+test('resuming refuses connected windows, missing or broken transcripts, and a full profile', async () => {
+  const { dir, releases, make, cleanup } = await setup('optchat-resume-errors-');
+  // A connected conversation from an earlier session: its handoff was already delivered.
+  mkdirSync(join(dir, 'runs'), { recursive: true });
+  writeFileSync(join(dir, 'runs', 'window1.optchat.json'), JSON.stringify({ id: 'window1', task: 'chat', cwd: dir, model: 'optchat-test/child', thinking: 'minimal',
+    parentSession: 'old', depth: 1, started: 1, ended: 2, state: 'completed', guidance: [], connected: true, handoff: { reason: 'complete', text: 'done', delivered: true } }));
+  const children = make('session');
+  try {
+    await assert.rejects(children.tell('window1', 'hello'), /connected conversation with the user\. It has ended and its handoff was delivered/);
+    await assert.rejects(children.tell('nobody', 'hello'), /No running subagent nobody/);
+
+    const [gone, broken, full] = await children.spawn([{ task: 'gone' }, { task: 'broken' }, { task: 'full' }], dir);
+    await until(() => !children.active);
+    await assert.rejects(children.tell(full, '   '), /Message is empty/);
+    rmSync(children.history.records.get(gone)!.sessionFile!);
+    await assert.rejects(children.tell(gone, 'hello'), /transcript of .* is missing or unreadable.*Spawn a fresh subagent/);
+    writeFileSync(children.history.records.get(broken)!.sessionFile!, 'not a session\n');
+    await assert.rejects(children.tell(broken, 'hello'), /missing or unreadable/);
+    assert.equal(readFileSync(children.history.records.get(broken)!.sessionFile!, 'utf8'), 'not a session\n', 'a refused resume does not touch the transcript');
+    assert.equal(children.history.records.get(broken)?.state, 'completed', 'a refused resume leaves the record alone');
+
+    await children.spawn(Array.from({ length: 8 }, (_, i) => ({ task: `hold ${i}` })), dir);
+    await until(() => releases.size === 8);
+    await assert.rejects(children.tell(full, 'hello'), /at most 8 active agents/);
+    assert.equal(children.live(full), undefined);
+    assert.equal(children.history.records.get(full)?.state, 'completed');
+    for (const release of releases.values()) release();
+    await until(() => !children.active);
+    await children.tell(full, 'now there is room');
+    await until(() => !children.active);
+    assert.equal(children.history.records.get(full)?.report, 'full resumed after "full first report" heard: now there is room');
+  } finally { await cleanup(children); }
+});
