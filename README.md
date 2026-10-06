@@ -124,7 +124,9 @@ Set a different shortcut with `OPTCHAT_INSPECT_KEY=ctrl+shift+a pi`. If another 
 
 | Key | Action |
 | --- | --- |
-| **Escape** or **Ctrl+C** | Clear a draft, else back to the main chat |
+| **Escape** | Clear a draft, else back to the main chat |
+| **Ctrl+C** | Clear a draft, else interrupt: abort the agent's current step and hand it your queued messages at once; with none queued, stop it (its parent can resume it with `tell`) |
+| **Up** (empty input) | Take your newest queued message back to edit; send it again, or clear it to drop it |
 | **Ctrl+X** twice | Stop this agent and the agents it started |
 | **Page Up/Down**, mouse wheel | Scroll; back at the bottom it follows again. The wheel needs Pi's default fullscreen mode |
 | **Ctrl+O** | Expand tool output (Pi's own toggle) |

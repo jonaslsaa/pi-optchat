@@ -226,12 +226,19 @@ export class AgentView implements Component, Focusable {
     if (this.ended) return;
     const { children, id } = this.options;
     const stopping = this.confirmStop; this.confirmStop = false; this.notice = '';
-    if ((matchesKey(data, 'escape') && !this.editor.isShowingAutocomplete()) || matchesKey(data, 'ctrl+c')) {
-      if (!this.editor.getText()) return this.close();
+    const escape = matchesKey(data, 'escape') && !this.editor.isShowingAutocomplete(), interrupt = matchesKey(data, 'ctrl+c');
+    if ((escape || interrupt) && this.editor.getText()) {
       this.editor.setText(''); // First press clears a draft, as in the main editor.
       return this.options.redraw();
     }
-    if (matchesKey(data, 'ctrl+x')) {
+    if (escape || interrupt && !this.canMessage) return this.close();
+    // Up on an empty input pulls the newest queued message back to edit: sending it queues the new text, clearing it drops it.
+    const pulled = matchesKey(data, 'up') && !this.editor.getText() && this.canMessage ? children.withdraw(id) : undefined;
+    if (pulled !== undefined) this.editor.setText(pulled);
+    else if (interrupt) {
+      children.interrupt(id).catch((error: unknown) => { this.notice = `Could not interrupt: ${error instanceof Error ? error.message : String(error)}`; })
+        .finally(() => { if (!this.ended) this.options.redraw(); });
+    } else if (matchesKey(data, 'ctrl+x')) {
       if (!children.live(id)) this.notice = 'This agent has already finished.';
       else if (stopping) children.stop(id).catch((error: unknown) => { this.notice = `Could not stop: ${String(error)}`; this.options.redraw(); });
       else this.confirmStop = true;
@@ -287,9 +294,12 @@ export class AgentView implements Component, Focusable {
     const end = lines.length - this.back;
     const body = lines.slice(Math.max(0, end - this.bodyHeight), end);
     while (body.length < this.bodyHeight) body.push('');
+    const editable = this.canMessage && run?.guidance.some(g => g.state === 'queued' && g.from === 'user');
+    const keys = [...this.editor.getText() ? ['Esc clear'] : ['Esc back to main', ...this.canMessage ? ['Ctrl+C interrupt'] : [], ...editable ? ['↑ edit queued'] : []],
+      ...live ? ['Ctrl+X stop'] : [], ...this.overflow ? [this.back ? 'PgDn newer' : 'PgUp older'] : []];
     const hint = this.confirmStop ? color('warning', ' Press Ctrl+X again to stop this agent and the agents it started')
       : this.notice ? color('error', ` ${this.notice}`)
-      : color('dim', ` ${this.editor.getText() ? 'Esc clear' : 'Esc back to main'}${live ? ' · Ctrl+X stop' : ''}${this.overflow ? this.back ? ' · PgDn newer' : ' · PgUp older' : ''}`);
+      : color('dim', ` ${keys.join(' · ')}`);
     const scrolled = this.back ? color('warning', `↑ ${this.back} lines up `) : '';
     const footer = [visibleWidth(hint) + visibleWidth(scrolled) < width ? `${hint}${' '.repeat(width - visibleWidth(hint) - visibleWidth(scrolled))}${scrolled}` : hint];
     // On a terminal too short for everything, the header goes first; the input and footer stay.
