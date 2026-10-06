@@ -3,12 +3,12 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { createHash } from 'node:crypto';
-import type { AgentMessage, ThinkingLevel } from '@earendil-works/pi-agent-core';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { createCompressor } from './compactor.ts';
-import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
+import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, THINKING, type ProfileConfig } from './profiles.ts';
 import { MASTER, VIEW_DOC } from './prompts.ts';
 import { cachePayload, record } from './cache.ts';
 import { asUser, boundedMessage, buildContext, logMessage, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
@@ -29,6 +29,7 @@ import { serveWindows } from './window-bridge.ts';
 import { openConnectedWindow, registerConnectedRenderer } from './connected-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
+import { showSettings } from './settings-page.ts';
 
 const binding = 'optchat.profile';
 interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
@@ -141,13 +142,13 @@ export default function optchat(pi: ExtensionAPI) {
       const memory = new Memory(memoryDirectory(dir), createCompressor(ctx.modelRegistry, () => config.compactor, message => {
         usage.compression(message, 'compactor', sessionId);
         status(ctx);
-      }), warning => ctx.ui.notify(warning, 'error'));
+      }, () => config.summaryAcceptBytes), warning => ctx.ui.notify(warning, 'error'));
       openingMemory = memory;
       const inbox = new Inbox(dir);
       const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
       if (recovered) ctx.ui.notify(`Recovered ${recovered} unanswered inputs into ${name}'s memory. Ask to continue them when ready.`, 'info');
       const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => `${instructions(dir)}\n\n${IMPORT_GUIDANCE}`,
-        deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, builtins: () => loadedBuiltins(pi),
+        deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, builtins: () => loadedBuiltins(pi), settings: () => config,
           summarizeHandoff: createHandoffSummarizer(ctx.modelRegistry, () => config.compactor, message => usage.compression(message, 'compactor', sessionId)) });
       const loggedReports = new Set(memory.root.map(e => e.receipt));
       reports = saved.filter((s): s is string => typeof s === 'string' && !loggedReports.has(reportReceipt(s)));
@@ -227,7 +228,8 @@ export default function optchat(pi: ExtensionAPI) {
   });
   const startRun = (ctx: ExtensionContext) => {
     flush(); run = []; logged = 0; view = undefined; runStarted = true;
-    previous = previousExchange(ctx.sessionManager.getBranch());
+    const config = active?.config;
+    previous = config?.previousExchange ? previousExchange(ctx.sessionManager.getBranch(), config.previousExchangeKB * 1000) : [];
     pi.appendEntry(RUN_BOUNDARY, { state: 'start' });
   };
   // A report sent while Pi is idle starts its run without before_agent_start; it reuses the last built prompt.
@@ -239,7 +241,7 @@ export default function optchat(pi: ExtensionAPI) {
     startRun(ctx);
     const a = required();
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
-    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text; left out when very long), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.`;
+    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? '\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text; left out when very long), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.' : ''}`;
     event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
     prompt = event.systemPrompt;
   });
@@ -314,8 +316,8 @@ export default function optchat(pi: ExtensionAPI) {
   registerReportRenderer(pi);
   for (const tool of memoryTools(() => required().memory)) pi.registerTool(tool);
   pi.registerTool({ name: 'spawn', label: 'Spawn background agents',
-    description: 'Start background subagents, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Each receives the current memory view and read-only zoom/date. Children may delegate two more levels; the whole profile allows 8 active agents. Completion reports arrive automatically; never poll or sleep waiting for them.',
-    parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1, maxItems: 8 }) }),
+    description: 'Start background subagents, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Each receives the current memory view and read-only zoom/date. Whether children may delegate further, and how many agents may run at once, is set per profile. Completion reports arrive automatically; never poll or sleep waiting for them.',
+    parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1 }) }),
     async execute(_id, args, signal, _update, ctx) {
       const ids = await required().children.spawn(args.tasks, ctx.cwd, signal); status(ctx);
       return result(`Started: ${ids.join(', ')}. Reports will arrive automatically.`);
@@ -332,10 +334,11 @@ export default function optchat(pi: ExtensionAPI) {
     choices.sort((a, b) => Number(b === `${current.provider}/${current.model}`) - Number(a === `${current.provider}/${current.model}`) || a.localeCompare(b));
     const selected = await ctx.ui.select(`${a.name}: ${role} model`, choices);
     if (!selected) return;
-    const thinking = await ctx.ui.select('Thinking level', ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+    const picked = await ctx.ui.select('Thinking level', [...THINKING]);
+    const thinking = THINKING.find(level => level === picked);
     if (!thinking) return;
     const separator = selected.indexOf('/');
-    a.config[role] = { provider: selected.slice(0, separator), model: selected.slice(separator + 1), thinking: thinking as ThinkingLevel };
+    a.config[role] = { provider: selected.slice(0, separator), model: selected.slice(separator + 1), thinking };
     saveConfig(a.dir, a.config); ctx.ui.notify(`${role}: ${selected} (${thinking}); applies to new calls.`, 'info');
   };
   const inspect = async (ctx: ExtensionContext, page: InspectorPage) => {
@@ -364,7 +367,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (!action) {
       const a = active;
       const info = a ? `${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending\nCompactor: ${a.config.compactor.model} (${a.config.compactor.thinking})\nAgents: ${a.config.subagent.model} (${a.config.subagent.thinking})\n${a.memory.lastError ?? ''}` : 'No active profile';
-      action = await ctx.ui.select(`OptChat\n${info}`, ['profile', 'model', 'agents', 'usage', 'instructions', 'browse', 'import']) ?? '';
+      action = await ctx.ui.select(`OptChat\n${info}`, ['profile', 'settings', 'model', 'agents', 'usage', 'instructions', 'browse', 'import']) ?? '';
     }
     if (action === 'import') {
       const a = required();
@@ -394,7 +397,7 @@ export default function optchat(pi: ExtensionAPI) {
         if (!closed) { await a.memory.close(); closed = true; }
         const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, message => {
           a.usage.compression(message, 'import', ctx.sessionManager.getSessionId());
-        });
+        }, () => a.config.summaryAcceptBytes);
         const completed = await showProgress(ctx, job, (signal, progress) => runImport(a.dir, compress, signal, progress), signal);
         ctx.ui.notify(completed ? `Imported ${job.added} messages into ${a.name}. Previous memory retained at ${job.previous === '.' ? a.dir : join(a.dir, job.previous)}.`
           : 'Import paused. Use /optchat import to resume. Other profiles remain available.', 'info');
@@ -414,6 +417,12 @@ export default function optchat(pi: ExtensionAPI) {
       await ctx.newSession({ setup: async manager => { manager.appendCustomEntry(binding, { name: selected }); } });
       return;
     }
+    if (action === 'settings') {
+      const a = required();
+      if (ctx.mode !== 'tui') throw new Error('/optchat settings requires interactive Pi. Edit config.json in the profile directory instead.');
+      return showSettings(ctx, { profile: a.name, config: a.config, models: ctx.modelRegistry.getAvailable().map(m => `${m.provider}/${m.id}`).sort(),
+        save: config => saveConfig(a.dir, config) });
+    }
     if (action === 'model') return pickModel(ctx, 'compactor');
     if (action === 'agents model') return pickModel(ctx, 'subagent');
     if (action === 'agents' || action === 'usage') return inspect(ctx, action);
@@ -428,7 +437,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (ctx.hasUI) execFile(process.platform === 'darwin' ? 'open' : 'xdg-open', [file], error => { if (error) ctx.ui.notify(`Open ${file}`, 'info'); });
       ctx.ui.notify(file, 'info'); return;
     }
-    if (action) throw new Error('Use /optchat [profile|model|agents|usage|instructions|browse|import].');
+    if (action) throw new Error('Use /optchat [profile|settings|model|agents|usage|instructions|browse|import].');
   };
   pi.registerCommand('complete', { description: 'End this connected conversation and hand off to the main agent', handler: async (_args, ctx) => {
     if (!remote) { ctx.ui.notify('/complete is for connected subagent windows.', 'info'); return; }
@@ -438,8 +447,8 @@ export default function optchat(pi: ExtensionAPI) {
     if (!remote) { ctx.ui.notify('/tell-main is for connected subagent windows.', 'info'); return; }
     try { await remote.tell(args); } catch (error) { ctx.ui.notify(errorText(error), 'error'); }
   } });
-  pi.registerCommand('optchat', { description: 'OptChat profiles, models, agents, instructions, memory browser, and imports',
-    getArgumentCompletions: prefix => ['profile', 'model', 'agents', 'agents model', 'usage', 'instructions', 'browse', 'import'].filter(s => s.startsWith(prefix)).map(value => ({ value, label: value })),
+  pi.registerCommand('optchat', { description: 'OptChat profiles, settings, models, agents, instructions, memory browser, and imports',
+    getArgumentCompletions: prefix => ['profile', 'settings', 'model', 'agents', 'agents model', 'usage', 'instructions', 'browse', 'import'].filter(s => s.startsWith(prefix)).map(value => ({ value, label: value })),
     handler: async (args, ctx) => { try { await command(args, ctx); } catch (error) { ctx.ui.notify(errorText(error), 'error'); } },
   });
 }

@@ -1,0 +1,157 @@
+import { Container, fuzzyFilter, getKeybindings, Input, SelectList, SettingsList, Spacer, Text, type Component, type SelectItem, type SettingItem } from '@earendil-works/pi-tui';
+import { DynamicBorder, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
+import { defaults, THINKING, type ProfileConfig } from './profiles.ts';
+import { invalid, isNumberKey, SETTING_KEYS, SETTINGS, type NumberKey, type SettingKey } from './settings.ts';
+import type { ModelChoice } from './compactor.ts';
+
+type Role = 'compactor' | 'subagent';
+const ROLES: Record<Role, { label: string; description: string; applies: string }> = {
+  compactor: { label: 'Compactor model', description: 'Writes memory summaries, imports and connected-window handoffs. Shortcut: /optchat model.', applies: 'Applies to the next summary.' },
+  subagent: { label: 'Subagent model', description: 'Runs every subagent. Shortcut: /optchat agents model.', applies: 'Applies to subagents started after this.' },
+};
+const modelName = (choice: ModelChoice) => `${choice.provider}/${choice.model}`;
+const showModel = (choice: ModelChoice) => `${modelName(choice)} · ${choice.thinking}`;
+const show = (key: SettingKey, value: number | boolean) => {
+  const spec = SETTINGS[key];
+  return typeof value === 'boolean' ? value ? 'on' : 'off' : spec.kind === 'number' && spec.unit ? `${value} ${spec.unit}` : String(value);
+};
+
+interface Options {
+  profile: string; config: ProfileConfig; models: string[];
+  /** Saves the whole profile config; throws if it can't be written. */
+  save: (config: ProfileConfig) => void;
+}
+
+/** A titled step inside the page: what it changes, the control, and its keys. */
+function step(theme: Theme, title: string, description: string, control: Component, hint: string, extra: Component[] = []) {
+  const box = new Container();
+  for (const child of [new Text(theme.bold(theme.fg('accent', title)), 0, 0), new Spacer(1), new Text(theme.fg('muted', description), 0, 0),
+    new Spacer(1), control, ...extra, new Spacer(1), new Text(theme.fg('dim', hint), 0, 0)]) box.addChild(child);
+  return box;
+}
+const listTheme = (theme: Theme) => ({ selectedPrefix: (t: string) => theme.fg('accent', t), selectedText: (t: string) => theme.fg('accent', t),
+  description: (t: string) => theme.fg('muted', t), scrollInfo: (t: string) => theme.fg('muted', t),
+  noMatch: () => theme.fg('muted', '  No matching models. Pi lists the models you are logged in to.') });
+
+/** Whole numbers only: typing replaces the value, Enter saves it, a bad value stays on screen with the reason. */
+class NumberStep extends Container {
+  private readonly input: Input;
+  private readonly error = new Text('', 0, 0);
+  constructor(theme: Theme, key: NumberKey, current: number, submit: (value: number) => string | undefined, cancel: () => void) {
+    super();
+    const spec = SETTINGS[key];
+    // Empty with the current value as placeholder: typing starts a new value, Enter alone keeps the old one.
+    this.input = new Input({ placeholder: String(current), placeholderStyle: text => theme.fg('dim', text) }); this.input.focused = true;
+    this.input.onEscape = cancel;
+    this.input.onSubmit = text => {
+      if (!text.trim()) return cancel();
+      const value = /^\s*\d+\s*$/.test(text) ? Number(text) : NaN;
+      const problem = invalid(key, value) ?? submit(value);
+      if (problem) this.error.setText(theme.fg('error', problem));
+    };
+    this.addChild(step(theme, `${spec.label}${spec.unit ? ` (${spec.unit})` : ''}`, `${spec.description} Default ${show(key, spec.default)}.`,
+      this.input, 'Type a number · Enter to save · Esc to go back', [this.error]));
+  }
+  handleInput(data: string) { this.input.handleInput(data); }
+}
+
+/** Model first (type to filter), then thinking level; Esc goes back a step. */
+class ModelStep extends Container {
+  private active: { handleInput(data: string): void } = { handleInput: () => {} };
+  constructor(private readonly theme: Theme, private readonly role: Role, private readonly models: string[], private readonly current: ModelChoice,
+    private readonly submit: (choice: ModelChoice) => string | undefined, private readonly cancel: () => void) {
+    super();
+    this.pickModel();
+  }
+  private pickModel() {
+    const { theme, current } = this, filter = new Input();
+    const items: SelectItem[] = this.models.map(value => ({ value, label: value }));
+    let list = new SelectList(items, 10, listTheme(theme));
+    const build = () => {
+      list = new SelectList(filter.getValue() ? fuzzyFilter(items, filter.getValue(), i => i.value) : items, 10, listTheme(theme));
+      list.onSelect = item => this.pickThinking(item.value); list.onCancel = this.cancel;
+      return list;
+    };
+    build(); list.setSelectedIndex(Math.max(0, this.models.indexOf(modelName(current))));
+    filter.focused = true;
+    const box = step(theme, ROLES[this.role].label, `${ROLES[this.role].description} Now ${showModel(current)}.`, filter, 'Type to filter · Enter to choose · Esc to go back', [new Spacer(1), list]);
+    this.show(box, data => {
+      const keys = getKeybindings();
+      if ((['tui.select.up', 'tui.select.down', 'tui.select.confirm', 'tui.select.cancel'] as const).some(k => keys.matches(data, k))) return list.handleInput(data);
+      filter.handleInput(data);
+      const index = box.children.indexOf(list); box.children[index] = build();
+    });
+  }
+  private pickThinking(model: string) {
+    const { theme, current } = this, error = new Text('', 0, 0);
+    const list = new SelectList(THINKING.map(value => ({ value, label: value })), THINKING.length, listTheme(theme));
+    list.setSelectedIndex(Math.max(0, THINKING.indexOf(current.thinking)));
+    list.onCancel = () => this.pickModel();
+    list.onSelect = item => {
+      const thinking = THINKING.find(level => level === item.value);
+      const slash = model.indexOf('/');
+      const problem = thinking && this.submit({ provider: model.slice(0, slash), model: model.slice(slash + 1), thinking });
+      if (problem) error.setText(theme.fg('error', problem));
+    };
+    this.show(step(theme, 'Thinking level', `For ${model}.`, list, 'Enter to save · Esc to go back', [error]), data => list.handleInput(data));
+  }
+  private show(box: Component, input: (data: string) => void) { this.clear(); this.addChild(box); this.active = { handleInput: input }; }
+  handleInput(data: string) { this.active.handleInput(data); }
+}
+
+/** The page itself: Pi's settings list over this profile's config, one row per setting, saved on change. */
+export function settingsPage(theme: Theme, o: Options, close: () => void, redraw = () => {}) {
+  const { config } = o;
+  const notice = new Text('', 2, 0);
+  const marker = (same: boolean, fallback: string) => theme.fg('dim', same ? '  default' : `  default ${fallback}`);
+  const value = (key: SettingKey, current: number | boolean) => `${show(key, current)}${marker(current === SETTINGS[key].default, show(key, SETTINGS[key].default))}`;
+  const apply = (patch: Partial<ProfileConfig>, what: string, applies: string) => {
+    try { o.save({ ...config, ...patch }); }
+    catch (error) { return `Could not save: ${error instanceof Error ? error.message : String(error)}`; }
+    Object.assign(config, patch);
+    notice.setText(theme.fg('success', `Saved ${what}. `) + theme.fg('muted', applies));
+    return undefined;
+  };
+  const models = (['compactor', 'subagent'] as const).map((role): SettingItem => {
+    const { label, description, applies } = ROLES[role], same = showModel(config[role]) === showModel(defaults[role]);
+    return { id: role, label, description: `${description} Default ${showModel(defaults[role])}. ${applies}`,
+      currentValue: `${showModel(config[role])}${same ? marker(true, '') : ''}`,
+      submenu: (_value, done) => new ModelStep(theme, role, o.models, config[role], choice => {
+        const problem = apply({ [role]: choice }, `${label.toLowerCase()} ${showModel(choice)}`, applies);
+        if (!problem) done(`${showModel(choice)}${showModel(choice) === showModel(defaults[role]) ? marker(true, '') : ''}`);
+        return problem;
+      }, () => done()),
+    };
+  });
+  const settings = SETTING_KEYS.map((key): SettingItem => {
+    const spec = SETTINGS[key], base = { id: key, label: spec.label, description: `${spec.description} ${spec.applies}` };
+    if (isNumberKey(key)) return { ...base, currentValue: value(key, config[key]),
+      submenu: (_value, done) => new NumberStep(theme, key, config[key], next => {
+        const problem = apply({ [key]: next }, `${spec.label.toLowerCase()} ${show(key, next)}`, spec.applies);
+        if (!problem) done(value(key, next));
+        return problem;
+      }, () => done()) };
+    return { ...base, currentValue: value(key, config[key]), values: [value(key, true), value(key, false)] };
+  });
+  const list = new SettingsList([...models, ...settings], 10, {
+    label: (text, selected) => selected ? theme.fg('accent', text) : text,
+    value: (text, selected) => selected ? theme.fg('accent', text) : theme.fg('muted', text),
+    description: text => theme.fg('dim', text), cursor: theme.fg('accent', '→ '), hint: text => theme.fg('dim', text),
+  }, (id, next) => {
+    // Only the on/off rows change here; the others save from their own step.
+    const key = SETTING_KEYS.find(k => k === id);
+    if (!key || isNumberKey(key)) return;
+    const on = next === value(key, true);
+    const problem = apply({ [key]: on }, `${SETTINGS[key].label.toLowerCase()} ${on ? 'on' : 'off'}`, SETTINGS[key].applies);
+    if (problem) { list.updateValue(key, value(key, config[key])); notice.setText(theme.fg('error', problem)); }
+  }, close);
+  const page = new Container();
+  for (const child of [new DynamicBorder(s => theme.fg('border', s)), new Text(`${theme.bold(theme.fg('accent', 'OptChat settings'))}${theme.fg('muted', ` · ${o.profile}`)}`, 1, 0),
+    new Text(theme.fg('dim', 'Saved as you change them · Victor\'s recipe by default, except Previous exchange and Summary size tolerance'), 1, 0),
+    new Spacer(1), list, notice, new DynamicBorder(s => theme.fg('border', s))]) page.addChild(child);
+  return Object.assign(page, { handleInput: (data: string) => { notice.setText(''); list.handleInput(data); redraw(); } });
+}
+
+export function showSettings(ctx: ExtensionContext, o: Options) {
+  return ctx.ui.custom<void>((tui, theme, _keys, done) => settingsPage(theme, o, () => done(undefined), () => tui.requestRender()));
+}

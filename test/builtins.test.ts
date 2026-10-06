@@ -10,6 +10,9 @@ import { Memory } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
 
+/** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
+const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
+
 // The MCP extension reads mcp.json, its log and OAuth tokens from Pi's agent dir: never the user's real one.
 const agentDir = process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-builtins-agent-'));
 const server = resolve(import.meta.dirname, 'fixtures', 'fake-mcp.mjs');
@@ -69,7 +72,7 @@ test('subagents at every depth get the main session\'s built-in extensions and c
     },
   });
   const spawnChildren = (builtins: string[]) => new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { builtins: () => builtins, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(text); }, text => warnings.push(text), dir, { settings: nested, builtins: () => builtins, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   const servers = () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [];
   try {
     const children = spawnChildren(await mainBuiltins(dir, {}));
@@ -111,7 +114,7 @@ test('a batch that fails mid-launch closes the MCP connections of the children i
   });
   let created = 0;
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async () => {}, () => {}, dir, { builtins: () => ALL, createSession: async options => {
+    async () => {}, () => {}, dir, { settings: nested, builtins: () => ALL, createSession: async options => {
       if (++created === 2) {
         // Fail only once the first child's server is up, so its connection must be closed.
         await until(() => existsSync(log));
@@ -138,7 +141,7 @@ test('a child whose extensions fail to start still closes its MCP connections', 
     streamSimple() { throw new Error('the child never runs'); },
   });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async () => {}, () => {}, dir, { builtins: () => ALL, createSession: async options => {
+    async () => {}, () => {}, dir, { settings: nested, builtins: () => ALL, createSession: async options => {
       const made = await createAgentSession({ ...options, modelRuntime: runtime }), bind = made.session.bindExtensions.bind(made.session);
       // Binding starts the MCP connection, then fails.
       made.session.bindExtensions = async bindings => { await bind(bindings); await until(() => existsSync(log)); throw new Error('binding failed'); };

@@ -5,13 +5,16 @@ import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { ModelChoice } from './compactor.ts';
 import { record } from './cache.ts';
+import { DEFAULT_SETTINGS, readSettings, type Settings } from './settings.ts';
 
 export const dataHome = () => resolve(process.env.OPTCHAT_HOME ?? join(homedir(), '.optchat'));
-export interface ProfileConfig { compactor: ModelChoice; subagent: ModelChoice }
+export interface ProfileConfig extends Settings { compactor: ModelChoice; subagent: ModelChoice }
 export const defaults: ProfileConfig = {
   compactor: { provider: 'anthropic', model: 'claude-sonnet-5-5', thinking: 'medium' },
   subagent: { provider: 'anthropic', model: 'claude-opus-5-5', thinking: 'high' },
+  ...DEFAULT_SETTINGS,
 };
+export const THINKING = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 export function profilePath(name: string) {
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) throw new Error('Profile names: 1–64 lowercase letters, digits, hyphens, or underscores.');
   return join(dataHome(), 'profiles', name);
@@ -40,12 +43,13 @@ export function createProfile(name: string) {
 export function saveConfig(dir: string, config: ProfileConfig) { atomicWrite(join(dir, 'config.json'), JSON.stringify(config, null, 2) + '\n'); }
 function modelChoice(value: unknown): value is ModelChoice {
   return record(value) && typeof value.provider === 'string' && typeof value.model === 'string'
-    && typeof value.thinking === 'string' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value.thinking);
+    && THINKING.some(level => level === value.thinking);
 }
 export function loadConfig(dir: string): ProfileConfig {
   const value: unknown = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'));
   if (!record(value) || !modelChoice(value.compactor) || !modelChoice(value.subagent)) throw new Error(`Invalid profile config: ${dir}/config.json`);
-  return { compactor: value.compactor, subagent: value.subagent };
+  try { return { compactor: value.compactor, subagent: value.subagent, ...readSettings(value) }; }
+  catch (error) { throw new Error(`Invalid profile config: ${dir}/config.json: ${error instanceof Error ? error.message : String(error)}`); }
 }
 export function instructions(dir: string) { return readFileSync(join(dir, 'AGENTS.md'), 'utf8'); }
 export function lastProfile() {

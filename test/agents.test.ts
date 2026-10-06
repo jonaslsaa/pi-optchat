@@ -11,6 +11,9 @@ import { RunHistory } from '../src/runs.ts';
 import { emptyUsage, UsageLedger } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
 
+/** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
+const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
+
 // Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 
@@ -54,7 +57,7 @@ test('real SDK children stream, deliver independently, acknowledge steering, sto
   });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
     async text => { reports.push(text); }, text => warnings.push(text), dir,
-    { usage, parentSession: 'parent-session', createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    { settings: nested, usage, parentSession: 'parent-session', createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   try {
     const [slow, fast, stopped] = await children.spawn([{ task: 'slow' }, { task: 'fast' }, { task: 'stop-me' }], dir);
     await until(() => releases.size === 3);
@@ -77,7 +80,7 @@ test('real SDK children stream, deliver independently, acknowledge steering, sto
     assert.match(children.history.records.get(slow)?.report ?? '', /Guidance received/);
     assert.ok(usage.select('This session', 'parent-session').length >= 3);
     const before = usage.entries.length;
-    const restored = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '', async () => {}, text => warnings.push(text), dir, { usage, parentSession: 'new-parent' });
+    const restored = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '', async () => {}, text => warnings.push(text), dir, { settings: nested, usage, parentSession: 'new-parent' });
     assert.equal(usage.entries.length, before, 'reloading saved children must not double count usage');
     assert.ok(restored.messages(slow).some(m => m.role === 'user' && textContent(m.content) === 'Please include tests.'));
     assert.equal(restored.history.records.get(fast)?.state, 'completed');
@@ -148,7 +151,7 @@ test('children get the main agent\'s extensions, AGENTS.md files and skills, but
     },
   });
   const children = new Children(new Memory(dir, async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => 'PROFILE_RULES',
-    async () => {}, () => {}, dir, { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async () => {}, () => {}, dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   try {
     const [id] = await children.spawn([{ task: 'inspect tools' }], dir);
     const names = children.live(id)?.session.getAllTools().map(t => t.name) ?? [];
@@ -196,7 +199,7 @@ test('children can message their parent mid-run: the main agent, an idle parent,
     },
   });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(text); }, text => warnings.push(text), dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   const heard = (id: string, from: string) => children.messages(id).some(m => m.role === 'assistant' && textContent(m.content).includes(`heard: [${from}] Message from subagent (still running): question from`));
   try {
     // Top-level child: the message reaches the main agent before the final report.
@@ -264,7 +267,7 @@ test('a child that fails to clean up still reports, is disposed, and frees its s
     },
   });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(text); }, text => warnings.push(text), dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   const breakDispose = (id: string) => {
     const session = children.live(id)!.session, dispose = session.dispose.bind(session);
     session.dispose = () => { dispose(); throw new Error('dispose failed'); };
@@ -326,7 +329,7 @@ test('a batch that fails mid-launch rolls back every launched child even when th
     return made;
   };
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async () => {}, text => warnings.push(text), dir, { createSession });
+    async () => {}, text => warnings.push(text), dir, { settings: nested, createSession });
   try {
     await assert.rejects(children.spawn([{ task: 'one' }, { task: 'two' }, { task: 'three' }], dir), /session store unavailable/);
     assert.deepEqual(disposed, ['session 1', 'session 2'], 'a throwing dispose does not skip the remaining children');
@@ -358,7 +361,7 @@ async function quickChildren(dir: string) {
     },
   });
   return new Children(new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async () => {}, () => {}, join(dir, 'profile'), { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async () => {}, () => {}, join(dir, 'profile'), { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
 }
 
 test('a task cwd may start with ~ or be relative to the spawning agent; a missing one is refused', async () => {

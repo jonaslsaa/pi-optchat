@@ -10,6 +10,9 @@ import { Memory } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
 
+/** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
+const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
+
 // Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 
@@ -59,7 +62,7 @@ async function setup(prefix: string) {
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const reports: string[] = [], warnings: string[] = [];
   const make = (parentSession: string) => new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { parentSession, createSession: async options => {
+    async text => { reports.push(text); }, text => warnings.push(text), dir, { settings: nested, parentSession, createSession: async options => {
       await hooks.beforeSession?.();
       const created = await createAgentSession({ ...options, modelRuntime: runtime });
       hooks.opened?.(created.session);

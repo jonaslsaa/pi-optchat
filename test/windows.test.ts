@@ -16,6 +16,9 @@ import { profileSocket, lockProfile, createProfile, profilePath } from '../src/p
 import { openConnectedWindow, registerConnectedRenderer } from '../src/connected-window.ts';
 import { createHandoffSummarizer } from '../src/handoff.ts';
 
+/** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
+const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
+
 // Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 
@@ -80,7 +83,7 @@ async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
   const registry = new ModelRegistry(runtime), choice = () => ({ provider: 'window-test', model: 'child', thinking: 'off' as const });
   const ledger = new UsageLedger(dir);
   const summarize = createHandoffSummarizer(registry, choice, reply => ledger.compression(reply, 'compactor', 'owner'));
-  const options = { parentSession: 'owner', usage: ledger, createSession: (options: Parameters<typeof createAgentSession>[0]) => createAgentSession({ ...options, modelRuntime: runtime }), summarizeHandoff: summarize };
+  const options = { settings: nested, parentSession: 'owner', usage: ledger, createSession: (options: Parameters<typeof createAgentSession>[0]) => createAgentSession({ ...options, modelRuntime: runtime }), summarizeHandoff: summarize };
   const children = new Children(memory, registry, choice, () => '', async text => { reports.push(text); }, text => warnings.push(text), dir, options);
   const unlock = await lockProfile(dir, 'test owner');
   return { control, dir, memory, children, requests, summaries, summaryOptions, reports, warnings, registry, choice, options, ledger,

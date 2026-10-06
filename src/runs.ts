@@ -31,7 +31,7 @@ function isRun(value: unknown): value is RunInfo {
     && (value.handoff === undefined || record(value.handoff) && ['complete', 'disconnected', 'owner-stopped', 'failed'].includes(String(value.handoff.reason))
       && (value.handoff.text === undefined || typeof value.handoff.text === 'string')
       && (value.handoff.delivered === undefined || typeof value.handoff.delivered === 'boolean'))
-    && typeof value.depth === 'number' && Number.isInteger(value.depth) && value.depth >= 1 && value.depth <= 3
+    && typeof value.depth === 'number' && Number.isInteger(value.depth) && value.depth >= 1
     && (value.parentId === undefined || typeof value.parentId === 'string')
     && Array.isArray(value.guidance) && value.guidance.every(g => record(g) && typeof g.text === 'string' && typeof g.date === 'number' && ['queued', 'delivered', 'undelivered'].includes(String(g.state)) && (g.from === undefined || g.from === 'user' || g.from === 'manager'));
 }

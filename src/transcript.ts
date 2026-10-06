@@ -3,6 +3,7 @@ import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { getCurrentSystemMessage, type SystemMessage, type UserMessage } from '@earendil-works/pi-ai';
 import { CAP, cap, type Memory } from './memory.ts';
 import { record } from './cache.ts';
+import { DEFAULT_SETTINGS } from './settings.ts';
 
 export const RUN_BOUNDARY = 'optchat.run';
 /** Subagent traffic to the main agent: a custom message on screen, a plain user message to the model and memory. */
@@ -63,15 +64,15 @@ function completedExchange(history: readonly AgentMessage[]) {
   return [...requests, { ...answer, content }];
 }
 
-/** Bytes of text (~4,000 tokens). Most exchanges are 1-7 KB; a larger one, usually a big paste, is left out entirely
- * and the model falls back to its summaries in the memory view, zooming for the full text if it needs it. */
-export const PREVIOUS_EXCHANGE = 16_000;
+/** Default limit in bytes of text (16 KB, ~4,000 tokens). Most exchanges are 1-7 KB; a larger one, usually a big paste, is
+ * left out entirely and the model falls back to its summaries in the memory view, zooming for the full text if it needs it. */
+export const PREVIOUS_EXCHANGE = DEFAULT_SETTINGS.previousExchangeKB * 1000;
 
-/** The latest successful run on this branch, skipping failed and unfinished runs; none if it is too large to replay. */
-export function previousExchange(branch: readonly SessionEntry[]) {
+/** The latest successful run on this branch, skipping failed and unfinished runs; none if it is over `limit` bytes. */
+export function previousExchange(branch: readonly SessionEntry[], limit = PREVIOUS_EXCHANGE) {
   const exchange = latestExchange(branch);
   const bytes = exchange.reduce((sum, message) => sum + Buffer.byteLength(textContent(message.content)), 0);
-  return bytes <= PREVIOUS_EXCHANGE ? exchange : [];
+  return bytes <= limit ? exchange : [];
 }
 
 function latestExchange(branch: readonly SessionEntry[]) {
