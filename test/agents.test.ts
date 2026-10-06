@@ -13,6 +13,8 @@ import { textContent } from '../src/transcript.ts';
 
 /** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
 const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
+/** The same, with each child reporting as soon as it finishes instead of with the rest of its spawn. */
+const each = () => ({ ...nested(), groupReports: false });
 
 // Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
@@ -22,7 +24,7 @@ async function until(condition: () => boolean) {
   while (!condition()) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 10)); }
 }
 
-test('real SDK children stream, deliver independently, acknowledge steering, stop, and retain profile-local history/usage', async () => {
+test('with Group subagent reports off, real SDK children stream, deliver independently, acknowledge steering, stop, and retain profile-local history/usage', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-agents-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const usage = new UsageLedger(dir), reports: string[] = [], warnings: string[] = [];
@@ -57,7 +59,7 @@ test('real SDK children stream, deliver independently, acknowledge steering, sto
   });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
     async text => { reports.push(text); }, text => warnings.push(text), dir,
-    { settings: nested, usage, parentSession: 'parent-session', createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    { settings: each, usage, parentSession: 'parent-session', createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   try {
     const [slow, fast, stopped] = await children.spawn([{ task: 'slow' }, { task: 'fast' }, { task: 'stop-me' }], dir);
     await until(() => releases.size === 3);
@@ -118,6 +120,60 @@ test('real SDK children stream, deliver independently, acknowledge steering, sto
     await until(() => !children.active);
     for (const id of [stopRoot, stopChild, stopLeaf]) assert.equal(children.history.records.get(id)?.state, 'stopped');
     assert.deepEqual(warnings, []);
+  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('one spawn\'s reports arrive together once its last child finishes, also to a parent subagent', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-group-'));
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const reports: string[] = [], releases = new Map<string, () => void>();
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple(model, context, options) {
+      const stream = createAssistantMessageEventStream();
+      const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
+      const last = context.messages.at(-1), first = !context.messages.some(m => m.role === 'assistant');
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: first ? `${task} done` : `${task} heard: ${textContent(last && 'content' in last ? last.content : '')}` }],
+        api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+      void (async () => {
+        // Each first turn waits for the test to release it (or for a stop).
+        if (first) await new Promise<void>(resolve => {
+          releases.set(task, resolve); options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+          if (options?.signal?.aborted) resolve();
+        });
+        stream.push({ type: 'done', reason: 'stop', message }); stream.end();
+      })();
+      return stream;
+    },
+  });
+  // No groupReports given: grouping is the default.
+  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+    async text => { reports.push(text); }, () => {}, dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  const state = (id: string) => children.history.records.get(id)?.state;
+  try {
+    const [a, b, stopped] = await children.spawn([{ task: 'a' }, { task: 'b' }, { task: 'stopped' }], dir);
+    await until(() => releases.size === 3);
+    await children.stop(stopped);
+    releases.get('a')!();
+    await until(() => state(a) === 'completed' && state(stopped) === 'stopped');
+    await new Promise(r => setTimeout(r, 50));
+    assert.deepEqual(reports, [], 'nothing is delivered while a sibling still runs');
+    releases.get('b')!();
+    await until(() => !children.active);
+    assert.deepEqual(reports, [`[${a}] a done\n\n[${b}] b done\n\n[${stopped}] stopped done`], 'one message, in spawn order');
+
+    const [boss] = await children.spawn([{ task: 'boss' }], dir);
+    const [x, y] = await children.spawn([{ task: 'x' }, { task: 'y' }], dir, undefined, boss);
+    await until(() => releases.has('boss') && releases.has('x') && releases.has('y'));
+    releases.get('boss')!();
+    await until(() => state(boss) === 'waiting');
+    releases.get('x')!();
+    await until(() => state(x) === 'completed');
+    releases.get('y')!();
+    await until(() => !children.active);
+    assert.equal(reports.at(-1), `[${boss}] boss heard: [${x}] x done\n\n[${y}] y done`, 'the parent is woken once, with both reports');
   } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -267,7 +323,7 @@ test('a child that fails to clean up still reports, is disposed, and frees its s
     },
   });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(text); }, text => warnings.push(text), dir, { settings: each, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   const breakDispose = (id: string) => {
     const session = children.live(id)!.session, dispose = session.dispose.bind(session);
     session.dispose = () => { dispose(); throw new Error('dispose failed'); };

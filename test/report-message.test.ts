@@ -22,6 +22,7 @@ test('subagent messages render as a dark labelled box, never in the user-message
   assert.deepEqual(reportParts('[8964a512] All done.'), { label: 'subagent 8964a512 · report', body: 'All done.' });
   assert.deepEqual(reportParts('[8964a512] Connected agent message: hi'), { label: 'subagent 8964a512 · connected window', body: 'hi' });
   assert.deepEqual(reportParts('no id'), { label: 'subagent', body: 'no id' });
+  assert.deepEqual(reportParts('[8964a512] One.\n\n[0f6d1168] Two.'), { label: '2 subagent reports', body: '[8964a512] One.\n\n[0f6d1168] Two.' });
   let renderer: MessageRenderer | undefined;
   registerReportRenderer({ registerMessageRenderer: (_type: string, r: MessageRenderer) => { renderer = r; } } as unknown as ExtensionAPI);
   const message = { role: 'custom' as const, customType: REPORT_TYPE, content: '[8964a512] Message from subagent (still running): **step 1** done', display: true, timestamp: 1 };

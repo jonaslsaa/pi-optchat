@@ -76,6 +76,7 @@ Compression and subagents make extra model requests with your provider credentia
 | Subagent model | Opus 5.5, high | Same as `/optchat agents model`. Applies to new subagents. |
 | Subagent levels | 1 | 1: only the main agent starts subagents (the recipe). 2 or more: subagents may start their own, that many levels deep. Applies to subagents started or resumed after the change. |
 | Max active agents | 8 | Subagents running at once in the profile, all levels together, so it also caps how deep a chain can go. |
+| Group subagent reports | on | The subagents started by one spawn report together, in one message once the last of them finishes (the recipe). Off: each reports as soon as it finishes. Applies to the next spawn. |
 | Previous exchange | on | Replays your last request and answer in full with the next turn (see below). Off is the recipe. |
 | Previous exchange limit | 16 KB | A larger last exchange is left out. |
 | Summary size tolerance | 640 bytes | The compactor is always asked for 512-byte lines; a longer line up to this size is kept instead of retried. 512 is the recipe's strict rule. |
@@ -92,7 +93,7 @@ Ask in plain words, for example: "Spawn an agent to investigate this repository 
 
 - Children get the profile's memory view (frozen at launch), its instructions, read-only `zoom`/`date`, and normal coding tools plus your installed extensions.
 - Children also get the Pi built-in extensions the main session loaded: MCP, codemode and tool search. Your MCP servers (`~/.pi/agent/mcp.json`, the project's `.pi/mcp.json`) work in subagents, with the sign-ins you made in Pi. If MCP is off in the main session (`--no-mcp`, `-builtin:mcp` in settings, or an extension that replaces `/mcp`), it is off in subagents too. Each subagent opens its own server connections (stdio servers start once per subagent) and closes them when it ends.
-- Each child reports back on its own when it finishes. The parent stays alive to receive reports; it never polls.
+- The children of one spawn report together: when the last of them finishes, their reports reach the parent as one message, `[id] report` each, in spawn order. A stopped or failed child counts as finished, with its stop or error text as its report. Turn **Group subagent reports** off to get each report as soon as its child finishes. Messages sent with `tell_parent`, connected windows and their handoffs are never held back, and a child resumed with `tell` reports on its own. The parent stays alive to receive reports; it never polls.
 - In the main chat, subagent messages and reports appear in a dark grey box labelled `↳ subagent <id> · still running` or `· report`, so they don't look like something you typed. The model still receives them as ordinary user messages. (One exception: reports recovered at startup, before your first message in the session, still show as plain user messages.)
 - The parent can send a running child guidance with `tell`, and the child can message its parent mid-run with `tell_parent` (a question, an early finding). It reaches the parent like a report, marked "still running": between tool calls if the parent is busy, or waking it if it's waiting.
 - `tell` to a finished child resumes it: the same agent (ID, parent, model, directory) reopens its saved transcript, gets the message as a new prompt, and sends a new report. This also works for children from earlier Pi sessions. Only the agent that started the child can resume it, and the resumed child takes one active slot. Connected windows can't be resumed, and a child whose transcript is missing must be spawned fresh.
@@ -217,7 +218,7 @@ The recipe's four prompts are kept verbatim in `src/prompts.ts`, along with its 
 Each run's context is the memory view, the previous exchange, and your new message. Deliberate additions (the ones that change the recipe's behaviour are settings, see [Settings](#settings)):
 
 1. **Previous exchange kept verbatim.** Your last request (with any steering) and the final answer are included in full, so "why is that?" refers to what you actually read. Tool calls and reasoning are not carried over. It comes on top of the 128,000-byte view. If it is over 16,000 bytes (about 4,000 tokens, usually a big paste; Previous exchange limit) it is left out entirely, and the model relies on the view and zoom as in Victor's recipe. A new Pi session starts with the memory view only.
-2. **Subagents** are built in with Pi's SDK rather than a separate package. Children report individually instead of per batch, and with Subagent levels above 1 they can delegate further.
+2. **Subagents** are built in with Pi's SDK rather than a separate package. With Subagent levels above 1 they can delegate further.
 3. **Profiles**, the **inspector**, the **usage ledger**, **import**, and **connected windows** are additions. Import adds historical-record guidance to the prompts.
 4. **Not done**: computer use and hosting on an always-on machine.
 

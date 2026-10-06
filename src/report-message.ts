@@ -8,6 +8,9 @@ const HEAD = /^\[([0-9a-f]{8})\] (?:(Message from subagent \(still running\)|Con
 export function reportParts(text: string) {
   const match = HEAD.exec(text);
   if (!match) return { label: 'subagent', body: text };
+  // One spawn's reports delivered together: "[id] report" paragraphs, one per subagent.
+  const reports = text.match(/(?:^|\n\n)\[[0-9a-f]{8}\] /g)?.length ?? 0;
+  if (match[2] === undefined && reports > 1) return { label: `${reports} subagent reports`, body: text };
   const kind = match[2] === undefined ? 'report' : match[2].startsWith('Message') ? 'still running' : 'connected window';
   return { label: `subagent ${match[1]} · ${kind}`, body: text.slice(match[0].length) };
 }

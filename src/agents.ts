@@ -23,12 +23,14 @@ export interface LiveRun {
   session: AgentSession; info: RunInfo; updated: number; streaming?: AgentMessage;
   tools: Map<string, { name: string; args: unknown; output?: unknown; started: number }>;
   pendingReports: string[]; pendingGuidance: string[]; wake?: () => void; completion?: Promise<void>;
+  /** Shared by the children of one spawn whose reports are delivered together, in spawn order. */
+  batch?: { ids: string[]; reports: Map<string, string> };
 }
 interface Options { parentSession?: string; usage?: UsageLedger; createSession?: typeof createAgentSession;
   /** Names of the built-in extensions the main session loaded (see `loadedBuiltins`). */
   builtins?: () => Iterable<string>;
-  /** Read on every spawn, so a changed profile setting applies to the next one. */
-  settings?: () => Pick<Settings, 'subagentLevels' | 'maxAgents'>;
+  /** Read on every spawn, so a changed profile setting applies to the next one. Missing settings take their defaults. */
+  settings?: () => Partial<Settings>;
   summarizeHandoff?: (run: RunInfo, messages: AgentMessage[], descendants?: HandoffEvidence[]) => Promise<string> }
 
 // Subagents load the user's installed extensions, except any copy of OptChat itself: they get memory tools directly and must not open a profile.
@@ -84,7 +86,7 @@ export class Children {
       } catch (error) { warn(`Could not backfill child usage for ${run.id}: ${String(error)}`); }
     }
   }
-  private get settings() { return this.options.settings?.() ?? DEFAULT_SETTINGS; }
+  private get settings(): Settings { return { ...DEFAULT_SETTINGS, ...this.options.settings?.() }; }
   private full(extra: number) { return this.running.size + this.launching + extra > this.settings.maxAgents; }
   get ids() { return [...this.running.keys()]; }
   get active() { return this.completions.size > 0 || this.launching > 0 || this.settling > 0; }
@@ -131,7 +133,7 @@ export class Children {
     const cancelled = () => this.closing || (parentId !== undefined && this.running.get(parentId)?.info.state !== 'running');
     if (parentId && (!parent || parent.info.state !== 'running')) throw new Error('The parent is no longer running.');
     const depth = parent ? parent.info.depth + 1 : 1;
-    const { subagentLevels, maxAgents } = this.settings;
+    const { subagentLevels, maxAgents, groupReports } = this.settings;
     if (depth > subagentLevels) throw new Error(`Delegation depth limit reached: this profile allows ${subagentLevels} level${subagentLevels === 1 ? '' : 's'} of subagents.`);
     if (this.closing) throw new Error('Profile is closing.');
     if (this.full(tasks.length)) throw new Error(`Profile limit: at most ${maxAgents} active agents, including parents and descendants. Reduce the batch or continue without delegating.`);
@@ -140,8 +142,10 @@ export class Children {
     const model = this.registry.find(selected.provider, selected.model);
     if (!model) throw new Error(`Subagent model unavailable: ${selected.provider}/${selected.model}`);
     const launched = await this.track(this.launchBatch({ tasks, cwd, depth, parentId, connected, selected, model, signal, cancelled }));
-    // Each child reports independently. A slow sibling must not hold back a finished result.
+    // Grouped, the last child of this spawn to finish delivers every report; otherwise each reports on its own.
+    const batch = groupReports && !connected ? { ids: launched.map(c => c.info.id), reports: new Map<string, string>() } : undefined;
     for (const live of launched) {
+      live.batch = batch;
       const work = this.execute(live, `${view}\n\nYour task:\n${live.info.task}`).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
         .finally(() => { this.completions.delete(work); this.changed(); });
       this.completions.add(work);
@@ -149,6 +153,10 @@ export class Children {
     }
     this.changed();
     return launched.map(c => c.info.id);
+  }
+  /** The spawn tools' answer, saying how the reports will come back. */
+  started(ids: string[]) {
+    return `Started: ${ids.join(', ')}. ${ids.length > 1 && this.settings.groupReports ? 'Their reports will arrive together, as one message, once all of them have finished.' : 'Reports will arrive automatically.'}`;
   }
   /** close() waits for launches, so shutdown never unlocks the profile under a child that is still opening. */
   private track<T>(launch: Promise<T>) {
@@ -229,7 +237,7 @@ export class Children {
   private delegationTools(parentId: string, cwd: string, levels: number, maxAgents: number) {
     return [{ name: 'spawn', label: 'Delegate task', description: `Delegate parts of your task. Results arrive automatically after this run; never poll or sleep waiting. Maximum depth ${levels} and ${maxAgents} active agents per profile.`,
       parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1 }) }),
-      execute: async (_id: string, args: { tasks: { task: string; cwd?: string }[] }, signal?: AbortSignal) => result(`Started: ${(await this.spawn(args.tasks, cwd, signal, parentId)).join(', ')}. Results will arrive automatically.`),
+      execute: async (_id: string, args: { tasks: { task: string; cwd?: string }[] }, signal?: AbortSignal) => result(this.started(await this.spawn(args.tasks, cwd, signal, parentId))),
     }, { name: 'tell', label: 'Guide child', description: 'Send guidance to one of your direct children. A finished child is resumed with its earlier conversation, and its new report arrives automatically.',
       parameters: Type.Object({ id: Type.String(), message: Type.String() }),
       execute: async (_id: string, args: { id: string; message: string }) => {
@@ -317,7 +325,13 @@ export class Children {
     }
     // A metadata failure must not suppress delivery of the actual result.
     try { this.save(info); } catch (error) { this.warn(`Could not save run metadata: ${String(error)}`); }
-    const text = `[${info.id}] ${info.report}`;
+    let text = `[${info.id}] ${info.report}`;
+    const batch = live.batch;
+    if (batch) {
+      batch.reports.set(info.id, text);
+      if (batch.reports.size < batch.ids.length) return;
+      text = batch.ids.map(id => batch.reports.get(id)).join('\n\n');
+    }
     if (info.parentId) {
       const parent = this.running.get(info.parentId);
       if (parent && parent.info.state !== 'stopping') { parent.pendingReports.push(text); this.changed(); }
