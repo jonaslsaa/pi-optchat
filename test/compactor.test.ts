@@ -41,7 +41,7 @@ async function setup() {
   const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }));
   // Long enough for a cache mark, so the first 50k characters are a shared, cacheable prefix.
   const view = `<chat>\n${'0+1|user: an old remembered line\n'.repeat(2000)}</chat>`;
-  const run = (source: string, context = view) => compress({ context, source, merge: false }, new AbortController().signal);
+  const run = (source: string, context = view, signal = new AbortController().signal) => compress({ context, source, merge: false }, signal);
   const settle = () => new Promise(resolve => setTimeout(resolve, 20));
   return { calls, run, settle, view };
 }
@@ -74,4 +74,16 @@ test('a failing primer releases the waiting calls instead of hanging them', { ti
   await settle();
   calls.slice(1).forEach(c => { c.answer(); c.finish(); });
   assert.deepEqual(await Promise.all(replies), ['overloaded', 'summary of b', 'summary of c']);
+});
+
+test('a waiting call that is cancelled stops at once without ever calling the model', { timeout: 5000 }, async () => {
+  const { calls, run, settle, view } = await setup();
+  const primer = run('a'), cancel = new AbortController();
+  const waiter = run('b', view, cancel.signal);
+  await settle();
+  cancel.abort();
+  await assert.rejects(waiter, { name: 'AbortError' });
+  calls[0].answer(); calls[0].finish();
+  await primer;
+  assert.deepEqual(calls.map(c => c.source), ['a']);
 });

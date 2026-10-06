@@ -14,9 +14,17 @@ const WARM_MS = 4 * 60_000; // Anthropic's short cache lives 5 minutes from its 
 /** Parallel calls can't read a cache entry that isn't written yet, so one call primes a cold prefix and the rest wait until it answers. */
 function primeFirst() {
   const warm = new Map<string, number | Promise<void>>();
-  return async (prefix: string) => {
+  return async (prefix: string, signal: AbortSignal) => {
     for (let state = warm.get(prefix); state !== undefined; state = warm.get(prefix)) {
-      if (typeof state === 'number') { if (Date.now() - state < WARM_MS) break; warm.delete(prefix); } else await state;
+      if (typeof state === 'number') { if (Date.now() - state < WARM_MS) break; warm.delete(prefix); continue; }
+      // A cancelled waiter leaves at once instead of waiting for someone else's primer.
+      signal.throwIfAborted();
+      let wake = () => {};
+      const aborted = new Promise<void>(resolve => { wake = resolve; });
+      signal.addEventListener('abort', wake, { once: true });
+      await Promise.race([state, aborted]);
+      signal.removeEventListener('abort', wake);
+      signal.throwIfAborted();
     }
     let release = () => {};
     const pending = warm.has(prefix) ? undefined : new Promise<void>(resolve => { release = resolve; });
@@ -41,7 +49,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${selected.thinking}\n${view.slice(0, -1).join('')}` : undefined;
     const tries: string[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
-      const warmed = prefix ? await gate(prefix) : () => {};
+      const warmed = prefix ? await gate(prefix, signal) : () => {};
       let reply: AssistantMessage;
       try {
         const stream = registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
