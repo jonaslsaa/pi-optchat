@@ -520,6 +520,38 @@ test('the user can take their newest queued message back; the rest stays queued 
   } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('taking back a message whose text is queued twice keeps the queue and its records in the same order', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-withdraw-twice-'));
+  const { children, asked } = await busyChildren(dir, []);
+  try {
+    const [id] = await children.spawn([{ task: 'busy' }], dir);
+    await until(() => asked.length === 1);
+    await children.tell(id, 'Run tests.', 'user');
+    await children.tell(id, 'Update code first.');
+    await children.tell(id, 'Run tests.');
+    assert.equal(children.withdraw(id), 'Run tests.');
+    const session = children.live(id)!.session;
+    await until(() => session.getSteeringMessages().length === 2);
+    assert.deepEqual(children.history.records.get(id)?.guidance.map(g => g.text), [...session.getSteeringMessages()]);
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an interrupt right after taking a message back delivers each remaining message once', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-withdraw-interrupt-'));
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports);
+  try {
+    const [id] = await children.spawn([{ task: 'busy' }], dir);
+    await until(() => asked.length === 1);
+    for (const text of ['A.', 'B.', 'C.']) await children.tell(id, text, 'user');
+    assert.equal(children.withdraw(id), 'C.');
+    assert.equal(await children.interrupt(id), 'continued');
+    await until(() => reports.length === 1);
+    assert.match(reports[0], /Now doing: Interrupted by the user:\n\nA\.\n\nB\.$/);
+    assert.deepEqual(asked.at(-1)?.filter(text => text.includes('B.')).length, 1, 'B arrives once, not also as steering');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 async function quickChildren(dir: string, memory = new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {})) {
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider('optchat-test', {

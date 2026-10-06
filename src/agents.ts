@@ -24,7 +24,9 @@ export interface LiveRun {
   tools: Map<string, { name: string; args: unknown; output?: unknown; started: number }>;
   pendingReports: string[]; pendingGuidance: string[]; wake?: () => void; completion?: Promise<void>;
   /** Set by the user's interrupt: the queued guidance the run continues with once its current step is aborted. */
-  interruption?: { text: string; guidance: RunInfo['guidance'] };
+  interruption?: RunInfo['guidance'];
+  /** Messages being steered back into Pi's queue after it was cleared; other queue changes wait for it. */
+  requeueing?: Promise<void>;
   /** Shared by the children of one spawn whose reports are delivered together, in spawn order. */
   batch?: { ids: string[]; reports: Map<string, string> };
 }
@@ -291,12 +293,17 @@ export class Children {
       if (this.closing || info.handoff || state === 'stopping') throw new Error('Stopped before its first request.');
       await session.prompt(prompt);
       while (info.state !== 'stopping') {
-        const interruption = live.interruption;
-        if (interruption) {
+        if (live.interruption) {
+          const guidance = live.interruption.filter(g => g.state === 'queued');
           live.interruption = undefined;
-          for (const g of interruption.guidance) g.state = 'delivered';
+          // Read Pi's queue only once a rebuild has landed, and take the interrupt's messages off it so they arrive once.
+          await live.requeueing;
+          const texts = new Set(guidance.map(g => g.text));
+          await this.requeue(live, session.clearQueue().steering.filter(text => !texts.has(text)));
+          if (!guidance.length) continue;
+          for (const g of guidance) g.state = 'delivered';
           transition(info, 'running'); this.save(info);
-          await session.prompt(interruption.text);
+          await session.prompt(`Interrupted by the user:\n\n${guidance.map(g => g.text).join('\n\n')}`);
           continue;
         }
         const last = session.messages.findLast(m => m.role === 'assistant');
@@ -376,6 +383,7 @@ export class Children {
     const guidance: RunInfo['guidance'][number] = { text, date: Date.now(), state: 'queued', from: source };
     live.info.guidance.push(guidance); this.save(live.info);
     try {
+      await live.requeueing; // Keeps the queue in the order messages were sent.
       if (live.info.state === 'waiting') { live.pendingGuidance.push(text); live.wake?.(); }
       else await live.session.steer(text);
     }
@@ -392,11 +400,11 @@ export class Children {
     if (!live || !['running', 'waiting'].includes(live.info.state)) throw new Error(`No running subagent ${id}.`);
     const guidance = live.info.guidance.filter(g => g.state === 'queued');
     if (!guidance.length) { await this.stop(id); return 'stopped'; }
-    // Queued guidance sits in Pi's steering queue, or in pendingGuidance while the run waits; take it from both so it arrives once.
+    // Nothing yields before the abort starts, so the run cannot finish in between and drop the messages.
+    // They leave pendingGuidance here and Pi's steering queue in execute(), which then sends them in one prompt.
     const texts = new Set(guidance.map(g => g.text));
     live.pendingGuidance = live.pendingGuidance.filter(text => !texts.has(text));
-    await this.requeue(live, live.session.clearQueue().steering.filter(text => !texts.has(text)));
-    live.interruption = { text: `Interrupted by the user:\n\n${guidance.map(g => g.text).join('\n\n')}`, guidance };
+    live.interruption = guidance;
     live.wake?.();
     await live.session.abort();
     return 'continued';
@@ -404,8 +412,10 @@ export class Children {
   /** Takes the user's newest undelivered message back off the queue, to edit it; undefined when there is none left to take. */
   withdraw(id: string) {
     const live = this.running.get(id);
-    const guidance = live?.info.guidance.findLast(g => g.state === 'queued' && g.from === 'user');
-    if (!live || !guidance) return undefined;
+    const text = live?.info.guidance.findLast(g => g.state === 'queued' && g.from === 'user')?.text;
+    if (!live || text === undefined || live.requeueing || live.interruption) return undefined;
+    // The queue holds only texts, so of equal ones the last is taken back, record and queue entry alike.
+    const guidance = live.info.guidance.findLast(g => g.state === 'queued' && g.text === text)!;
     const pending = live.pendingGuidance.lastIndexOf(guidance.text);
     if (pending >= 0) live.pendingGuidance.splice(pending, 1);
     else {
@@ -418,9 +428,13 @@ export class Children {
     live.info.guidance.splice(live.info.guidance.indexOf(guidance), 1); this.save(live.info);
     return guidance.text;
   }
-  private async requeue(live: LiveRun, texts: string[]) {
-    try { for (const text of texts) await live.session.steer(text); }
-    catch (error) { this.warn(`Could not requeue a message for ${live.info.id}: ${String(error)}`); }
+  private requeue(live: LiveRun, texts: string[]) {
+    const work: Promise<void> = (async () => {
+      try { for (const text of texts) await live.session.steer(text); }
+      catch (error) { this.warn(`Could not requeue a message for ${live.info.id}: ${String(error)}`); }
+    })().finally(() => { if (live.requeueing === work) live.requeueing = undefined; });
+    live.requeueing = work;
+    return work;
   }
   /** Reopens a finished child from its saved transcript, same ID, parent and model, and gives it a new message. */
   private async resume(id: string, message: string, caller: string | undefined) {
