@@ -53,6 +53,23 @@ test('pending compaction blocks a turn, cancellation works, failure retries', as
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a turn waits for the view to be built, not for merges that bring it under budget', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
+  let release = () => {};
+  const merging = new Promise<void>(resolve => { release = resolve; });
+  // Each 300-byte message is its own summary; merging two goes past 512 bytes, so it needs the compactor, which holds it.
+  const memory = new Memory(dir, async input => { if (input.merge) await merging; return 'merged'; }, () => {}, 500);
+  try {
+    memory.append('user', 'a'.repeat(300)); memory.append('user', 'b'.repeat(300));
+    await memory.settle(AbortSignal.timeout(2000));
+    assert.ok(memory.ready);
+    assert.ok(memory.size > memory.budget, 'the view is still over budget while the merge is pending');
+    release();
+    await memory.settle(AbortSignal.timeout(2000), true);
+    assert.ok(memory.size <= memory.budget);
+  } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('torn final line is reported and the next append remains readable', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')); let memory = new Memory(dir, async () => 'summary');
   memory.append('user', 'first'); await memory.close();

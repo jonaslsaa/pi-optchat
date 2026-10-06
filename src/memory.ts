@@ -200,8 +200,9 @@ export class Memory {
     if (!this.retryAt.size) this.lastError = undefined;
     this.fit();
   }
+  /** Waits until every part of the view is built. As in the recipe, the view may run over budget until pending merges land. */
   async settle(signal?: AbortSignal, all = false): Promise<void> {
-    const done = () => this.ready && this.size <= this.budget && (!all || (this.busy.size === 0 && this.tree.size === this.expectedNodes()));
+    const done = () => this.ready && (!all || (this.busy.size === 0 && this.tree.size === this.expectedNodes()));
     if (done()) return;
     if (this.stopped || signal?.aborted) throw new Error('Memory wait cancelled.');
     await new Promise<void>((resolve, reject) => {
