@@ -9,7 +9,7 @@ import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type Extensi
 import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { createCompressor } from './compactor.ts';
-import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, THINKING, type ProfileConfig } from './profiles.ts';
+import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { MASTER, VIEW_DOC } from './prompts.ts';
 import { cachePayload, record } from './cache.ts';
 import { asUser, boundedMessage, buildContext, logMessage, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
@@ -30,7 +30,7 @@ import { serveWindows } from './window-bridge.ts';
 import { openConnectedWindow, registerConnectedRenderer } from './connected-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
-import { showSettings } from './settings-page.ts';
+import { showModelPicker, showSettings } from './settings-page.ts';
 
 const binding = 'optchat.profile';
 const CONTINUITY = '\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text; left out when very long), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.';
@@ -357,20 +357,15 @@ export default function optchat(pi: ExtensionAPI) {
     async execute(_id, args) { return result(await required().children.tell(args.id, args.message)); },
   });
 
+  /** The settings page's options: every model Pi is logged in to, with the thinking levels it takes, sorted so each provider's models sit together. */
+  const settingsOptions = (ctx: ExtensionContext, a: Active) => ({ profile: a.name, config: a.config,
+    models: ctx.modelRegistry.getAvailable().map(m => ({ name: `${m.provider}/${m.id}`, thinking: getSupportedThinkingLevels(m) })).sort((x, y) => x.name.localeCompare(y.name)),
+    save: (config: ProfileConfig) => { saveConfig(a.dir, config); syncSearch(config); } });
   const pickModel = async (ctx: ExtensionContext, role: 'compactor' | 'subagent') => {
-    const a = required(), current = a.config[role];
-    const available = ctx.modelRegistry.getAvailable(), choices = available.map(m => `${m.provider}/${m.id}`);
-    choices.sort((a, b) => Number(b === `${current.provider}/${current.model}`) - Number(a === `${current.provider}/${current.model}`) || a.localeCompare(b));
-    const selected = await ctx.ui.select(`${a.name}: ${role} model`, choices);
-    if (!selected) return;
-    const model = available.find(m => `${m.provider}/${m.id}` === selected);
-    const levels = model ? getSupportedThinkingLevels(model) : THINKING;
-    const picked = await ctx.ui.select('Thinking level', [...levels]);
-    const thinking = levels.find(level => level === picked);
-    if (!thinking) return;
-    const separator = selected.indexOf('/');
-    a.config[role] = { provider: selected.slice(0, separator), model: selected.slice(separator + 1), thinking };
-    saveConfig(a.dir, a.config); ctx.ui.notify(`${role}: ${selected} (${thinking}); applies to new calls.`, 'info');
+    const a = required();
+    if (ctx.mode !== 'tui') throw new Error('Choosing a model requires interactive Pi. Edit config.json in the profile directory instead.');
+    const choice = await showModelPicker(ctx, role, settingsOptions(ctx, a));
+    if (choice) ctx.ui.notify(`${role}: ${choice.provider}/${choice.model} (${choice.thinking}); applies to new calls.`, 'info');
   };
   const inspect = async (ctx: ExtensionContext, page: InspectorPage) => {
     if (inspectorController) return;
@@ -451,8 +446,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (action === 'settings') {
       const a = required();
       if (ctx.mode !== 'tui') throw new Error('/optchat settings requires interactive Pi. Edit config.json in the profile directory instead.');
-      return showSettings(ctx, { profile: a.name, config: a.config, models: ctx.modelRegistry.getAvailable().map(m => ({ name: `${m.provider}/${m.id}`, thinking: getSupportedThinkingLevels(m) })).sort((a, b) => a.name.localeCompare(b.name)),
-        save: config => { saveConfig(a.dir, config); syncSearch(config); } });
+      return showSettings(ctx, settingsOptions(ctx, a));
     }
     if (action === 'model') return pickModel(ctx, 'compactor');
     if (action === 'agents model') return pickModel(ctx, 'subagent');

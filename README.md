@@ -44,9 +44,9 @@ For headless use, pass `--optchat-profile work`.
 | `/optchat` | Status and actions menu. |
 | `/optchat profile` | Select or create a profile. Switching starts a fresh Pi session. |
 | `/optchat settings` | This profile's settings: models, subagent levels and limits, previous exchange, summary size tolerance. |
-| `/optchat model` | Compactor model and effort for this profile. |
+| `/optchat model` | Compactor model and effort for this profile. Type to filter the models you are logged in to; the current one is marked. |
 | `/optchat agents` | Live agent tree and saved run history. |
-| `/optchat agents model` | Subagent model and effort for this profile. |
+| `/optchat agents model` | Subagent model and effort for this profile, picked the same way. |
 | `/optchat usage` | Token usage and cost estimates. |
 | `/optchat activity` | Memory gauge: view size, summaries catching up, running agents. |
 | `/optchat instructions` | Edit this profile's `AGENTS.md`. |

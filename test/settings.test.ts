@@ -320,3 +320,48 @@ test('the thinking step offers only levels the model takes, so Sonnet 5.5 has no
     assert.deepEqual(config.compactor, { provider: 'anthropic', model: 'claude-sonnet-5-5', thinking: 'low' });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('/optchat model and /optchat agents model pick from a searchable list that scrolls, so the last model is reachable', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-picker-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  const { runtime } = await fixture(dir);
+  const ids = Array.from({ length: 30 }, (_, i) => `model-${String(i).padStart(2, '0')}`);
+  runtime.registerProvider('many', { baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: ids.map(id => ({ id, name: id, reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 })) });
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    saveConfig(profilePath('fixture'), { ...loadConfig(profilePath('fixture')), compactor: model });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.inMemory(dir);
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom'] })).session;
+    const screens: string[] = [];
+    const custom = (async (factory: (tui: unknown, theme: Theme, keys: unknown, done: (result: unknown) => void) => Component) => {
+      let result: unknown;
+      const picker = factory({ requestRender: () => {} }, plain, {}, value => { result = value; });
+      screens.push(picker.render(100).join('\n'));
+      for (const key of ['2', '9']) picker.handleInput?.(key);
+      screens.push(picker.render(100).join('\n'));
+      for (const key of ['\r', '\r']) picker.handleInput?.(key); // the model, then its only thinking level
+      return result;
+    }) as unknown as ExtensionUIContext['custom'];
+    await session.bindExtensions({ uiContext: { ...session.extensionRunner.getUIContext(), custom }, mode: 'tui' });
+    await session.prompt('/optchat model');
+    const [full, filtered] = screens;
+    assert.match(full, /fixture\/fixture\s+current/, 'the current model is marked');
+    assert.ok(!full.includes('many/model-29') && full.split('\n').filter(line => line.includes('many/')).length <= 10, 'the list scrolls instead of growing past the screen');
+    assert.ok(filtered.includes('many/model-29'));
+    assert.deepEqual(loadConfig(profilePath('fixture')).compactor, { provider: 'many', model: 'model-29', thinking: 'off' });
+    await session.prompt('/optchat agents model');
+    assert.deepEqual(loadConfig(profilePath('fixture')).subagent, { provider: 'many', model: 'model-29', thinking: 'off' });
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
