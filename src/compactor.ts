@@ -9,6 +9,8 @@ import { IMPORT_GUIDANCE } from './import/guidance.ts';
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
 const scaleBase = 'user: Keep work and personal memory separate; use a binary summary tree and inspect original messages before acting. talk: Implemented the append-only log with durable writes and a stable view. echo: Checked caching, chronological summaries, cancellation, and profile locks. user: Main agent uses Opus; compactor uses Sonnet at medium effort. work: Worker completed the parser; tests cover invalid records and repeated imports. talk: The browser opens original messages, preserving dates and sources.';
 export const SCALE = scaleBase.padEnd(NODE, '.').slice(0, NODE);
+/** The model is asked for 512 bytes; a small overshoot costs less view space than a retry costs money. */
+export const ACCEPTED = NODE * 1.25;
 export function createCompressor(registry: ModelRegistry, choice: () => ModelChoice,
   onUsage: (message: AssistantMessage) => void = () => {}): Compressor {
   return async (input, signal) => {
@@ -28,7 +30,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       const line = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim();
       if (!line) throw new Error('Compactor returned no text.');
       tries.push(line);
-      if (bytes(line) <= NODE) break;
+      if (bytes(line) <= ACCEPTED) break;
       messages.push(reply);
       const cut = Buffer.from(line).subarray(0, NODE).toString('utf8').replace(/\uFFFD$/, '');
       messages.push({ role: 'user', content: `That line is ${bytes(line)} bytes; the limit is 512. It must end where it is cut here:\n${cut}| ← LIMIT`, timestamp: Date.now() });
