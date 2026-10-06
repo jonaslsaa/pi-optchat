@@ -328,8 +328,8 @@ export default function optchat(pi: ExtensionAPI) {
     description: 'Start background subagents, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Each receives the current memory view and read-only zoom/date. Whether children may delegate further, and how many agents may run at once, is set per profile. Completion reports arrive automatically; never poll or sleep waiting for them.',
     parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1 }) }),
     async execute(_id, args, signal, _update, ctx) {
-      const { children } = required(), ids = await children.spawn(args.tasks, ctx.cwd, signal); status(ctx);
-      return result(children.started(ids));
+      const text = await required().children.start(args.tasks, ctx.cwd, signal); status(ctx);
+      return result(text);
     },
   });
   pi.registerTool({ name: 'tell', label: 'Tell background agent', description: 'Send a message to a subagent. A running one gets it at its next tool boundary. A finished one you started is resumed with its earlier conversation, and its new report arrives automatically.',

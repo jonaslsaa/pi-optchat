@@ -125,6 +125,14 @@ export class Children {
     } catch (error) { this.warn(`Could not record subagent activity: ${String(error)}`); }
   }
   async spawn(tasks: { task: string; cwd?: string }[], cwd: string, signal?: AbortSignal, parentId?: string, connected = false) {
+    return (await this.launch(tasks, cwd, signal, parentId, connected)).ids;
+  }
+  /** The spawn tools' answer, saying how this spawn's reports will come back. */
+  async start(tasks: { task: string; cwd?: string }[], cwd: string, signal?: AbortSignal, parentId?: string) {
+    const { ids, grouped } = await this.launch(tasks, cwd, signal, parentId);
+    return `Started: ${ids.join(', ')}. ${grouped && ids.length > 1 ? 'Their reports will arrive together, as one message, once all of them have finished.' : 'Reports will arrive automatically.'}`;
+  }
+  private async launch(tasks: { task: string; cwd?: string }[], cwd: string, signal: AbortSignal | undefined, parentId: string | undefined, connected = false) {
     for (const directory of tasks.map(t => taskDirectory(cwd, t.cwd))) if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error(`No such directory: ${directory}`);
     if (this.closing) throw new Error('Profile is closing.');
     this.settling++;
@@ -152,11 +160,7 @@ export class Children {
       live.completion = work;
     }
     this.changed();
-    return launched.map(c => c.info.id);
-  }
-  /** The spawn tools' answer, saying how the reports will come back. */
-  started(ids: string[]) {
-    return `Started: ${ids.join(', ')}. ${ids.length > 1 && this.settings.groupReports ? 'Their reports will arrive together, as one message, once all of them have finished.' : 'Reports will arrive automatically.'}`;
+    return { ids: launched.map(c => c.info.id), grouped: batch !== undefined };
   }
   /** close() waits for launches, so shutdown never unlocks the profile under a child that is still opening. */
   private track<T>(launch: Promise<T>) {
@@ -237,7 +241,7 @@ export class Children {
   private delegationTools(parentId: string, cwd: string, levels: number, maxAgents: number) {
     return [{ name: 'spawn', label: 'Delegate task', description: `Delegate parts of your task. Results arrive automatically after this run; never poll or sleep waiting. Maximum depth ${levels} and ${maxAgents} active agents per profile.`,
       parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1 }) }),
-      execute: async (_id: string, args: { tasks: { task: string; cwd?: string }[] }, signal?: AbortSignal) => result(this.started(await this.spawn(args.tasks, cwd, signal, parentId))),
+      execute: async (_id: string, args: { tasks: { task: string; cwd?: string }[] }, signal?: AbortSignal) => result(await this.start(args.tasks, cwd, signal, parentId)),
     }, { name: 'tell', label: 'Guide child', description: 'Send guidance to one of your direct children. A finished child is resumed with its earlier conversation, and its new report arrives automatically.',
       parameters: Type.Object({ id: Type.String(), message: Type.String() }),
       execute: async (_id: string, args: { id: string; message: string }) => {

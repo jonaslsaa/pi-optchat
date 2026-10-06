@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { Children, taskDirectory } from '../src/agents.ts';
+import type { Settings } from '../src/settings.ts';
 import { Memory } from '../src/memory.ts';
 import { RunHistory } from '../src/runs.ts';
 import { emptyUsage, UsageLedger } from '../src/usage.ts';
@@ -148,12 +149,20 @@ test('one spawn\'s reports arrive together once its last child finishes, also to
       return stream;
     },
   });
-  // No groupReports given: grouping is the default.
+  // No groupReports given: grouping is the default. The first spawn's sessions turn it off while they open.
+  const settings: Partial<Settings> = nested();
+  let opening = () => { settings.groupReports = false; };
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, () => {}, dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(text); }, () => {}, dir, { settings: () => settings, createSession: options => {
+      opening(); opening = () => {};
+      return createAgentSession({ ...options, modelRuntime: runtime });
+    } });
   const state = (id: string) => children.history.records.get(id)?.state;
   try {
-    const [a, b, stopped] = await children.spawn([{ task: 'a' }, { task: 'b' }, { task: 'stopped' }], dir);
+    const answer = await children.start([{ task: 'a' }, { task: 'b' }, { task: 'stopped' }], dir);
+    assert.match(answer, /arrive together/, 'the answer describes the mode the spawn started with');
+    delete settings.groupReports;
+    const [a, b, stopped] = /^Started: (.+?)\./.exec(answer)![1].split(', ');
     await until(() => releases.size === 3);
     await children.stop(stopped);
     releases.get('a')!();
