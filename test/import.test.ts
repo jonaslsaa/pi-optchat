@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { Memory, localDay, type Compressor } from '../src/memory.ts';
 import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
 import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate, chronological } from '../src/import/job.ts';
@@ -41,6 +42,32 @@ test('Claude imports user messages and final replies, omitting tool loops and re
     assert.equal(parsed.entries[0].date, date);
     const renamed = await readConversation({ ...conversation('claude', file), title: 'Renamed', project: '/moved' });
     assert.deepEqual(renamed.entries.map(e => e.receipt), parsed.entries.map(e => e.receipt));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Claude slash commands keep only typed arguments, shell commands stay plain and local command output is dropped', async () => {
+  const dir = temp(), file = join(dir, 'claude.jsonl');
+  const user = (uuid: string, content: string) => ({ type: 'user', uuid, cwd: '/synthetic', timestamp: date, message: { role: 'user', content } });
+  const reply = (uuid: string, text: string) => ({ type: 'assistant', uuid, timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text }] } });
+  const raw = '<command-message>oreo-mode</command-message>\n<command-name>/oreo-mode</command-name>\n<command-args>ship the parser fix</command-args>';
+  lines(file, [
+    user('compact', '<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>'),
+    user('stdout', '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>'),
+    user('stderr', '<local-command-stderr>Unknown command</local-command-stderr>'),
+    user('shell', '<bash-input>git status</bash-input>'),
+    user('shell-out', '<bash-stdout>On branch main</bash-stdout><bash-stderr></bash-stderr>'),
+    user('skill', raw),
+    reply('a1', 'shipped'),
+    user('plain', 'what is next?'),
+    reply('a2', 'the docs'),
+  ]);
+  try {
+    const parsed = await readConversation(conversation('claude', file));
+    assert.deepEqual(parsed.entries.map(e => e.text.slice(e.text.indexOf(']\n') + 2)), ['!git status', '/oreo-mode ship the parser fix', 'shipped', 'what is next?', 'the docs']);
+    assert.doesNotMatch(JSON.stringify(parsed.entries), /command-|bash-|Compacted|Unknown command|On branch/);
+    assert.equal(parsed.entries[1].receipt, `import:${createHash('sha256').update(JSON.stringify(['claude', 'conversation-1', 'skill', 'user', raw])).digest('hex')}`, 'the receipt still hashes the raw text');
+    const scan = await scanLocal('claude', [dir]);
+    assert.equal(scan.conversations[0].title, '!git status', 'a bare command never becomes the title');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
