@@ -134,17 +134,16 @@ export class Memory {
   get pending() { return this.root.length - this.leaves; }
   get active() { return this.busy.size; }
   get size() { return this.viewBytes; }
-  /** The view tiles the log in order, so a binary search finds the part covering a position. */
-  private visible(part: Part) {
-    const at = start(part);
+  /** The view line covering message `at`. The view tiles the log in order, so a binary search finds it. */
+  covering(at: number): Part | undefined {
     for (let lo = 0, hi = this.view.length - 1; lo <= hi;) {
       const mid = (lo + hi) >> 1, p = this.view[mid];
       if (end(p) <= at) lo = mid + 1;
       else if (start(p) > at) hi = mid - 1;
-      else return p.l === part.l && p.i === part.i;
+      else return p;
     }
-    return false;
   }
+  private visible(part: Part) { const p = this.covering(start(part)); return p?.l === part.l && p.i === part.i; }
   private fit(total = this.root.length) {
     while (this.viewBytes > this.budget) {
       let best = -1; let due = -Infinity;
