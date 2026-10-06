@@ -11,7 +11,7 @@ import { memoryTools } from './tools.ts';
 import { type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cachePayload } from './cache.ts';
-import { RunHistory, transition, sessionMessages, type RunInfo, type FinishReason } from './runs.ts';
+import { RunHistory, transition, sessionMessages, type RunInfo, type RunState, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { textContent } from './transcript.ts';
 import { Type } from 'typebox';
@@ -261,7 +261,9 @@ export class Children {
     const { session, info } = live;
     try {
       if (info.connected) await this.report(`[${info.id}] User started a connected conversation in ${info.cwd}. That agent is handling this request with the user directly; don't do it yourself. Initial message: ${info.task}\n\nUse tell with this agent ID only if you know something it needs. It stays open between replies and sends a final handoff on completion or disconnect.`);
-      if (this.closing || info.handoff) throw new Error('Conversation stopped before its first request.');
+      // A stop that lands before the first prompt has no turn to abort, so it is honoured here.
+      const state: RunState = info.state; // a local, so the loop below still sees later state changes
+      if (this.closing || info.handoff || state === 'stopping') throw new Error('Stopped before its first request.');
       await session.prompt(prompt);
       while (info.state !== 'stopping') {
         const last = session.messages.findLast(m => m.role === 'assistant');

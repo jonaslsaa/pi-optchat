@@ -181,7 +181,8 @@ test('a live profile cannot be opened by a second writer; other profiles can run
   const unlock = await lockProfile(dir, 'test owner');
   try {
     await assert.rejects(lockProfile(dir, 'second writer'), /test owner/);
-    const other = await lockProfile(dir + '-other', 'other profile'); await other();
+    mkdirSync(dir + '-other');
+    const other = await lockProfile(dir + '-other', 'other profile'); await other(); rmSync(dir + '-other', { recursive: true, force: true });
   } finally { await unlock(); }
   const again = await lockProfile(dir, 'after close'); await again(); rmSync(dir, { recursive: true, force: true });
 });

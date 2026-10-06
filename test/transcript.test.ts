@@ -385,7 +385,7 @@ test('typed text drops image placeholders and the image notes Pi appends', () =>
 });
 
 test('inputs with images are claimed too, including /skill: commands and Pi\'s image notes', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'optchat-skill-image-'));
+  const dir = mkdtempSync(join(tmpdir(), 'oc-skill-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;

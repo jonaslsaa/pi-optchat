@@ -345,6 +345,39 @@ test('a batch that fails mid-launch rolls back every launched child even when th
   } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a child stopped before its first request ends stopped without running its task', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-early-stop-'));
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  const asked: string[] = [];
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple: (model, context) => {
+      asked.push(textContent(context.messages.at(-1)?.content ?? '').split('Your task:\n').at(-1) ?? '');
+      const stream = createAssistantMessageEventStream();
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
+      queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
+      return stream;
+    },
+  });
+  const memory = new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {});
+  // The first child is stopped while its sibling is still being created, before either has been prompted.
+  let children: Children | undefined, created = 0;
+  children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+    async () => {}, () => {}, join(dir, 'profile'), { createSession: async options => {
+      if (++created === 2) await children!.stop([...children!.history.records.values()].find(r => r.task === 'first')!.id);
+      return createAgentSession({ ...options, modelRuntime: runtime });
+    } });
+  try {
+    await children.spawn([{ task: 'first' }, { task: 'second' }], dir);
+    await until(() => !children!.active);
+    const records = [...children.history.records.values()];
+    assert.equal(records.find(r => r.task === 'first')?.state, 'stopped');
+    assert.equal(records.find(r => r.task === 'second')?.state, 'completed');
+    assert.deepEqual(asked, ['second'], 'the stopped child never sent its task to the model');
+  } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 async function quickChildren(dir: string) {
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider('optchat-test', {
