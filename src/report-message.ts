@@ -4,8 +4,12 @@ import { REPORT_TYPE, textContent } from './transcript.ts';
 
 const HEAD = /^\[([0-9a-f]{8})\] (?:(Message from subagent \(still running\)|Connected agent message): )?/;
 
+/** Sent with a report: `count` subagent reports joined in one message, when one spawn's reports arrive together. */
+export interface ReportDetails { count?: number }
+
 /** Split "[id] Message from subagent (still running): body" into a short label and the body. */
-export function reportParts(text: string) {
+export function reportParts(text: string, count = 1) {
+  if (count > 1) return { label: `${count} subagent reports`, body: text };
   const match = HEAD.exec(text);
   if (!match) return { label: 'subagent', body: text };
   const kind = match[2] === undefined ? 'report' : match[2].startsWith('Message') ? 'still running' : 'connected window';
@@ -21,8 +25,8 @@ function darkBackground(theme: Theme) {
 }
 
 /** Background traffic: a dark neutral box with dim text, so it never looks like something the user typed. */
-export function reportBox(text: string, outputPad: number, theme: Theme) {
-  const { label, body } = reportParts(text);
+export function reportBox(text: string, outputPad: number, theme: Theme, count?: number) {
+  const { label, body } = reportParts(text, count);
   const box = new Box(outputPad, 1, darkBackground(theme));
   box.addChild(new Text(theme.fg('dim', `↳ ${label}`), 0, 0));
   box.addChild(new Markdown(body.trim(), 0, 0, getMarkdownTheme(), { color: text => theme.fg('muted', text) }));
@@ -30,5 +34,5 @@ export function reportBox(text: string, outputPad: number, theme: Theme) {
 }
 export const isReport = (text: string) => HEAD.test(text);
 export function registerReportRenderer(pi: ExtensionAPI) {
-  pi.registerMessageRenderer(REPORT_TYPE, (message, { outputPad }, theme) => reportBox(textContent(message.content), outputPad, theme));
+  pi.registerMessageRenderer<ReportDetails | undefined>(REPORT_TYPE, (message, { outputPad }, theme) => reportBox(textContent(message.content), outputPad, theme, message.details?.count));
 }

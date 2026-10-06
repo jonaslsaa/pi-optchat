@@ -233,11 +233,11 @@ test('turning Previous exchange off also reaches a turn that a subagent report s
     const manager = SessionManager.inMemory(dir);
     manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
     session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom'] })).session;
-    // The settings page, driven by keys: down to Previous exchange, toggle it, close.
+    // The settings page, driven by keys: down past Group subagent reports to Previous exchange, toggle it, close.
     const custom = (async (factory: (tui: unknown, theme: Theme, keys: unknown, done: (result: undefined) => void) => Component) => {
       let closed = false;
       const page = factory({ requestRender: () => {} }, plain, {}, () => { closed = true; });
-      for (const key of ['\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', ' ', '\x1b']) page.handleInput?.(key);
+      for (const key of ['\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', ' ', '\x1b']) page.handleInput?.(key);
       assert.ok(closed);
     }) as unknown as ExtensionUIContext['custom'];
     await session.bindExtensions({ uiContext: { ...session.extensionRunner.getUIContext(), custom }, mode: 'tui' });
@@ -281,7 +281,7 @@ test('Memory search turned on and off in /optchat settings adds and removes the 
     // The settings page, driven by keys: down to Memory search, toggle it, close.
     const custom = (async (factory: (tui: unknown, theme: Theme, keys: unknown, done: (result: undefined) => void) => Component) => {
       const page = factory({ requestRender: () => {} }, plain, {}, () => {});
-      for (const key of ['\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', ' ', '\x1b']) page.handleInput?.(key);
+      for (const key of ['\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', ' ', '\x1b']) page.handleInput?.(key);
     }) as unknown as ExtensionUIContext['custom'];
     await session.bindExtensions({ uiContext: { ...session.extensionRunner.getUIContext(), custom }, mode: 'tui' });
     // Pi declares the tools on the leading system message, next to the prompt.

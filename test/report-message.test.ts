@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAssistantMessageEventStream, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
@@ -22,10 +22,15 @@ test('subagent messages render as a dark labelled box, never in the user-message
   assert.deepEqual(reportParts('[8964a512] All done.'), { label: 'subagent 8964a512 · report', body: 'All done.' });
   assert.deepEqual(reportParts('[8964a512] Connected agent message: hi'), { label: 'subagent 8964a512 · connected window', body: 'hi' });
   assert.deepEqual(reportParts('no id'), { label: 'subagent', body: 'no id' });
+  assert.deepEqual(reportParts('[8964a512] One.\n\n[0f6d1168] Two.', 2), { label: '2 subagent reports', body: '[8964a512] One.\n\n[0f6d1168] Two.' });
+  // One report quoting a child's is still one report: the count comes with the message, not from its text.
+  assert.equal(reportParts('[8964a512] Heard: [0f6d1168] a done\n\n[1c2d3e4f] b done').label, 'subagent 8964a512 · report');
   let renderer: MessageRenderer | undefined;
   registerReportRenderer({ registerMessageRenderer: (_type: string, r: MessageRenderer) => { renderer = r; } } as unknown as ExtensionAPI);
   const message = { role: 'custom' as const, customType: REPORT_TYPE, content: '[8964a512] Message from subagent (still running): **step 1** done', display: true, timestamp: 1 };
   const lines = new CustomMessageComponent(message, renderer).render(80);
+  const grouped = { ...message, content: '[8964a512] One.\n\n[0f6d1168] Two.', details: { count: 2 } };
+  assert.match(plain(new CustomMessageComponent(grouped, renderer).render(80)), /↳ 2 subagent reports/);
   const text = plain(lines);
   assert.match(text, /↳ subagent 8964a512 · still running/);
   assert.match(text, /step 1 done/);
@@ -120,6 +125,54 @@ test('a report reaches an idle or busy main agent as a user message to the model
     const log = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n')).map(line => JSON.parse(line) as { kind: string; text: string });
     assert.ok(log.some(e => e.kind === 'user' && e.text === '[8964a512] Message from subagent (still running): step 1 done'));
     assert.ok(log.some(e => e.kind === 'user' && e.text === '[8964a512] Final report.'));
+    assert.deepEqual(errors, []);
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('reports a crash held back with unfinished siblings are delivered at the next start', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-held-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  const asked: string[] = [];
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    const profile = profilePath('fixture');
+    saveConfig(profile, { ...loadConfig(profile), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    // Pi died after one child of a two-child spawn finished: its report was journaled, held for its sibling.
+    writeFileSync(join(profile, 'pending-reports.json'), JSON.stringify([{ text: '[8964a512] a done', count: 1, batch: '8964a512' }]));
+    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+    runtime.registerProvider('fixture', {
+      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+      streamSimple(model, context) {
+        if (!context.messages.some(m => m.role === 'system' && m.content === COMPACT)) asked.push(textContent(context.messages.at(-1)?.content));
+        const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'ok' }], timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
+        return stream;
+      },
+    });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.create(dir, join(dir, 'sessions'));
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
+      resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date'] })).session;
+    const errors: string[] = [];
+    await session.bindExtensions({ onError: error => errors.push(error.error) });
+    for (const deadline = Date.now() + 10000; !asked.some(t => t.endsWith('[8964a512] a done'));) {
+      if (Date.now() > deadline) throw new Error(`Held report not delivered: ${errors.join('; ')}`);
+      await new Promise(r => setTimeout(r, 10));
+    }
+    await session.agent.waitForIdle();
+    assert.deepEqual(JSON.parse(readFileSync(join(profile, 'pending-reports.json'), 'utf8')), [], 'logged to memory, it leaves the journal');
     assert.deepEqual(errors, []);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }

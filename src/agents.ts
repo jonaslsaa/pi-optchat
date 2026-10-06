@@ -23,11 +23,15 @@ export interface LiveRun {
   session: AgentSession; info: RunInfo; updated: number; streaming?: AgentMessage;
   tools: Map<string, { name: string; args: unknown; output?: unknown; started: number }>;
   pendingReports: string[]; pendingGuidance: string[]; wake?: () => void; completion?: Promise<void>;
+  /** Shared by the children of one spawn whose reports are delivered together, in spawn order. */
+  batch?: { ids: string[]; reports: Map<string, string> };
 }
 interface Options { parentSession?: string; usage?: UsageLedger; createSession?: typeof createAgentSession;
   /** Names of the built-in extensions the main session loaded (see `loadedBuiltins`). */
   builtins?: () => Iterable<string>;
-  /** Read on every spawn, so a changed profile setting applies to the next one. */
+  /** Journals the reports a main-agent spawn has so far while its other children still run (none: the batch was delivered), so a crash cannot lose them. */
+  hold?: (batch: string, texts: string[]) => void;
+  /** Read on every spawn, so a changed profile setting applies to the next one. Missing settings take their defaults. */
   settings?: () => Partial<Settings>;
   summarizeHandoff?: (run: RunInfo, messages: AgentMessage[], descendants?: HandoffEvidence[]) => Promise<string> }
 
@@ -72,7 +76,7 @@ export class Children {
   private readonly completions = new Set<Promise<void>>();
   constructor(private readonly memory: Memory, private readonly registry: ModelRegistry,
     private readonly choice: () => ModelChoice, private readonly instructions: () => string,
-    private readonly report: (text: string, once?: boolean) => Promise<void>, private readonly warn: (text: string) => void,
+    private readonly report: (text: string, options?: { once?: boolean; count?: number }) => Promise<void>, private readonly warn: (text: string) => void,
     private readonly profileDirectory = memory.directory, private readonly options: Options = {}) {
     this.history = new RunHistory(profileDirectory);
     for (const warning of this.history.warnings) warn(warning);
@@ -84,7 +88,7 @@ export class Children {
       } catch (error) { warn(`Could not backfill child usage for ${run.id}: ${String(error)}`); }
     }
   }
-  private get settings() { return { ...DEFAULT_SETTINGS, ...this.options.settings?.() }; }
+  private get settings(): Settings { return { ...DEFAULT_SETTINGS, ...this.options.settings?.() }; }
   private full(extra: number) { return this.running.size + this.launching + extra > this.settings.maxAgents; }
   get ids() { return [...this.running.keys()]; }
   get active() { return this.completions.size > 0 || this.launching > 0 || this.settling > 0; }
@@ -123,6 +127,14 @@ export class Children {
     } catch (error) { this.warn(`Could not record subagent activity: ${String(error)}`); }
   }
   async spawn(tasks: { task: string; cwd?: string }[], cwd: string, signal?: AbortSignal, parentId?: string, connected = false) {
+    return (await this.launch(tasks, cwd, signal, parentId, connected)).ids;
+  }
+  /** The spawn tools' answer, saying how this spawn's reports will come back. */
+  async start(tasks: { task: string; cwd?: string }[], cwd: string, signal?: AbortSignal, parentId?: string) {
+    const { ids, grouped } = await this.launch(tasks, cwd, signal, parentId);
+    return `Started: ${ids.join(', ')}. ${grouped && ids.length > 1 ? 'Their reports will arrive together, as one message, once all of them have finished.' : 'Reports will arrive automatically.'}`;
+  }
+  private async launch(tasks: { task: string; cwd?: string }[], cwd: string, signal: AbortSignal | undefined, parentId: string | undefined, connected = false) {
     for (const directory of tasks.map(t => taskDirectory(cwd, t.cwd))) if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error(`No such directory: ${directory}`);
     if (this.closing) throw new Error('Profile is closing.');
     this.settling++;
@@ -131,7 +143,7 @@ export class Children {
     const cancelled = () => this.closing || (parentId !== undefined && this.running.get(parentId)?.info.state !== 'running');
     if (parentId && (!parent || parent.info.state !== 'running')) throw new Error('The parent is no longer running.');
     const depth = parent ? parent.info.depth + 1 : 1;
-    const { subagentLevels, maxAgents } = this.settings;
+    const { subagentLevels, maxAgents, groupReports } = this.settings;
     if (depth > subagentLevels) throw new Error(`Delegation depth limit reached: this profile allows ${subagentLevels} level${subagentLevels === 1 ? '' : 's'} of subagents.`);
     if (this.closing) throw new Error('Profile is closing.');
     if (this.full(tasks.length)) throw new Error(`Profile limit: at most ${maxAgents} active agents, including parents and descendants. Reduce the batch or continue without delegating.`);
@@ -140,15 +152,17 @@ export class Children {
     const model = this.registry.find(selected.provider, selected.model);
     if (!model) throw new Error(`Subagent model unavailable: ${selected.provider}/${selected.model}`);
     const launched = await this.track(this.launchBatch({ tasks, cwd, depth, parentId, connected, selected, model, signal, cancelled }));
-    // Each child reports independently. A slow sibling must not hold back a finished result.
+    // Grouped, the last child of this spawn to finish delivers every report; otherwise each reports on its own.
+    const batch = groupReports && !connected ? { ids: launched.map(c => c.info.id), reports: new Map<string, string>() } : undefined;
     for (const live of launched) {
+      live.batch = batch;
       const work = this.execute(live, `${view}\n\nYour task:\n${live.info.task}`).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
         .finally(() => { this.completions.delete(work); this.changed(); });
       this.completions.add(work);
       live.completion = work;
     }
     this.changed();
-    return launched.map(c => c.info.id);
+    return { ids: launched.map(c => c.info.id), grouped: batch !== undefined };
   }
   /** close() waits for launches, so shutdown never unlocks the profile under a child that is still opening. */
   private track<T>(launch: Promise<T>) {
@@ -229,7 +243,7 @@ export class Children {
   private delegationTools(parentId: string, cwd: string, levels: number, maxAgents: number) {
     return [{ name: 'spawn', label: 'Delegate task', description: `Delegate parts of your task. Results arrive automatically after this run; never poll or sleep waiting. Maximum depth ${levels} and ${maxAgents} active agents per profile.`,
       parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1 }) }),
-      execute: async (_id: string, args: { tasks: { task: string; cwd?: string }[] }, signal?: AbortSignal) => result(`Started: ${(await this.spawn(args.tasks, cwd, signal, parentId)).join(', ')}. Results will arrive automatically.`),
+      execute: async (_id: string, args: { tasks: { task: string; cwd?: string }[] }, signal?: AbortSignal) => result(await this.start(args.tasks, cwd, signal, parentId)),
     }, { name: 'tell', label: 'Guide child', description: 'Send guidance to one of your direct children. A finished child is resumed with its earlier conversation, and its new report arrives automatically.',
       parameters: Type.Object({ id: Type.String(), message: Type.String() }),
       execute: async (_id: string, args: { id: string; message: string }) => {
@@ -317,18 +331,27 @@ export class Children {
     }
     // A metadata failure must not suppress delivery of the actual result.
     try { this.save(info); } catch (error) { this.warn(`Could not save run metadata: ${String(error)}`); }
-    const text = `[${info.id}] ${info.report}`;
+    let text = `[${info.id}] ${info.report}`;
+    const batch = live.batch;
+    let count: number | undefined;
+    if (batch) {
+      batch.reports.set(info.id, text);
+      const texts = batch.ids.flatMap(id => batch.reports.get(id) ?? []);
+      if (texts.length < batch.ids.length) { if (!info.parentId) this.options.hold?.(batch.ids[0], texts); return; }
+      text = texts.join('\n\n'); count = texts.length;
+    }
     if (info.parentId) {
       const parent = this.running.get(info.parentId);
       if (parent && parent.info.state !== 'stopping') { parent.pendingReports.push(text); this.changed(); }
       return;
     }
-    if (this.closing) { this.memory.append('user', text); return; }
-    try { await this.report(text); }
+    if (this.closing) this.memory.append('user', text);
+    else try { await this.report(text, { count }); }
     catch (error) {
       this.memory.append('user', text);
       this.warn(`Subagent report saved but could not wake the parent: ${String(error)}`);
     }
+    if (batch && batch.ids.length > 1) this.options.hold?.(batch.ids[0], []);
   }
   /** `caller` is the agent sending a manager message: undefined for the main agent, else the parent subagent's ID. */
   async tell(id: string, message: string, source: 'manager' | 'user' = 'manager', caller?: string) {
@@ -440,7 +463,7 @@ export class Children {
       handoff.text = `[${run.id}] Connected conversation ${handoff.reason === 'complete' ? 'completed by user' : `interrupted (${handoff.reason})`}. This describes the conversation ending, not proof that every task succeeded.\n${summary}\n${source}`;
       run.report = handoff.text; this.save(run);
     }
-    await this.report(handoff.text, true);
+    await this.report(handoff.text, { once: true });
     handoff.delivered = true; this.save(run);
   }
   async stop(id: string) {

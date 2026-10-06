@@ -13,7 +13,7 @@ import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, lo
 import { MASTER, VIEW_DOC } from './prompts.ts';
 import { cachePayload, record } from './cache.ts';
 import { asUser, boundedMessage, buildContext, logMessage, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
-import { registerReportRenderer } from './report-message.ts';
+import { registerReportRenderer, type ReportDetails } from './report-message.ts';
 import { memoryTools, result, SEARCH_DOC, searchTool } from './tools.ts';
 import { Children, CWD_DOC, loadedBuiltins } from './agents.ts';
 import { exportBrowser } from './browser.ts';
@@ -52,7 +52,8 @@ export default function optchat(pi: ExtensionAPI) {
   let prompt = '';
   let runStarted = false;
   let fault: string | undefined;
-  let reports: string[] = [];
+  /** Reports not yet in memory. `count`: how many subagent reports the text joins. `batch`: held while the rest of that spawn runs, not sent yet. */
+  let reports: { text: string; count?: number; batch?: string }[] = [];
   const receipts = new Map<AgentMessage, string>();
   let checkpoints = Promise.resolve();
   let importing = false;
@@ -69,6 +70,9 @@ export default function optchat(pi: ExtensionAPI) {
     const a = active;
     if (a) title.show(text => ctx.ui.setTitle(text), mainTitle(a.name, working, a.children.ids.length));
   };
+  /** Journals written before batches held plain strings. */
+  const isPendingReport = (s: unknown): s is string | { text: string; count?: number } =>
+    typeof s === 'string' || record(s) && typeof s.text === 'string' && (s.count === undefined || typeof s.count === 'number');
   const reportReceipt = (text: string) => 'report:' + createHash('sha256').update(text).digest('hex');
   const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
   pi.registerFlag('optchat-profile', { description: 'OptChat profile (required for noninteractive sessions without a saved binding)', type: 'string' });
@@ -92,21 +96,25 @@ export default function optchat(pi: ExtensionAPI) {
       if (receipt && !receipt.startsWith('report:')) active.inbox.acknowledge(receipt);
       receipts.delete(message);
       if (message.role === 'user') {
-        const index = reports.indexOf(textContent(message.content));
+        const text = textContent(message.content), index = reports.findIndex(r => !r.batch && r.text === text);
         if (index >= 0) { reports.splice(index, 1); saveReports(); }
       }
     }
   };
   // Shown as a dark background box, not as the user's own message. Before this profile has run once there is no
   // built system prompt to reuse, so that rare case still goes through Pi's normal prompt path as a user message.
-  const sendReport = (text: string) => {
-    if (prompt) pi.sendMessage({ customType: REPORT_TYPE, content: text, display: true }, { triggerTurn: true, deliverAs: 'steer' });
+  const sendReport = (text: string, count?: number) => {
+    if (prompt) pi.sendMessage<ReportDetails>({ customType: REPORT_TYPE, content: text, display: true, details: { count } }, { triggerTurn: true, deliverAs: 'steer' });
     else pi.sendUserMessage(text, { deliverAs: 'steer', expandPromptTemplates: false });
   };
-  const deliverReport = async (text: string, once = false) => {
-    if (once && (active?.memory.root.some(e => e.receipt === reportReceipt(text)) || reports.includes(text))) return;
-    reports.push(text); saveReports();
-    if (!stopping) sendReport(text);
+  const deliverReport = async (text: string, { once = false, count }: { once?: boolean; count?: number } = {}) => {
+    if (once && (active?.memory.root.some(e => e.receipt === reportReceipt(text)) || reports.some(r => r.text === text))) return;
+    reports.push({ text, count }); saveReports();
+    if (!stopping) sendReport(text, count);
+  };
+  const holdReports = (batch: string, texts: string[]) => {
+    reports = [...reports.filter(r => r.batch !== batch), ...texts.length ? [{ text: texts.join('\n\n'), count: texts.length, batch }] : []];
+    saveReports();
   };
   const stop = async () => {
     remote?.close(); remote = undefined;
@@ -149,7 +157,7 @@ export default function optchat(pi: ExtensionAPI) {
       usage.backfill(ctx.sessionManager.getEntries(), sessionId);
       const pending = join(dir, 'pending-reports.json');
       const saved: unknown = existsSync(pending) ? JSON.parse(readFileSync(pending, 'utf8')) : [];
-      if (!Array.isArray(saved) || !saved.every(s => typeof s === 'string')) throw new Error('Invalid pending report journal.');
+      if (!Array.isArray(saved) || !saved.every(isPendingReport)) throw new Error('Invalid pending report journal.');
       const memory = new Memory(memoryDirectory(dir), createCompressor(ctx.modelRegistry, () => config.compactor, message => {
         usage.compression(message, 'compactor', sessionId);
         status(ctx);
@@ -159,10 +167,12 @@ export default function optchat(pi: ExtensionAPI) {
       const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
       if (recovered) ctx.ui.notify(`Recovered ${recovered} unanswered inputs into ${name}'s memory. Ask to continue them when ready.`, 'info');
       const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => `${instructions(dir)}\n\n${IMPORT_GUIDANCE}`,
-        deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, builtins: () => loadedBuiltins(pi), settings: () => config,
+        deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, builtins: () => loadedBuiltins(pi), settings: () => config, hold: holdReports,
           summarizeHandoff: createHandoffSummarizer(ctx.modelRegistry, () => config.compactor, message => usage.compression(message, 'compactor', sessionId)) });
       const loggedReports = new Set(memory.root.map(e => e.receipt));
-      reports = saved.filter((s): s is string => typeof s === 'string' && !loggedReports.has(reportReceipt(s)));
+      // Reports a crash held back with their unfinished siblings are delivered now, as they are.
+      reports = saved.map(s => typeof s === 'string' ? { text: s } : { text: s.text, count: s.count })
+        .filter(r => !loggedReports.has(reportReceipt(r.text)));
       atomicWrite(pending, JSON.stringify(reports));
       rememberProfile(name);
       active = { name, dir, config, memory, inbox, children, usage, unlock }; fault = undefined;
@@ -173,7 +183,7 @@ export default function optchat(pi: ExtensionAPI) {
       ctx.ui.notify(`OptChat · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
       const queuedReports = [...reports];
       if (!pendingImport(dir)) recovery = children.recoverHandoffs().catch(error => ctx.ui.notify(`Handoff recovery: ${errorText(error)}`, 'error'));
-      setImmediate(() => { if (active?.memory === memory && !pendingImport(dir)) for (const text of queuedReports) sendReport(text); });
+      setImmediate(() => { if (active?.memory === memory && !pendingImport(dir)) for (const r of queuedReports) sendReport(r.text, r.count); });
     } catch (error) {
       await closeWindows?.(); closeWindows = undefined;
       untitle?.(); untitle = undefined; title.clear();
@@ -264,7 +274,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (message.role === 'user') {
       try {
         const text = textContent(message.content);
-        if (reports.includes(text)) receipts.set(message, reportReceipt(text));
+        if (reports.some(r => !r.batch && r.text === text)) receipts.set(message, reportReceipt(text));
         else {
           // The inbox journaled the typed input: match without image placeholders or Pi's image notes.
           const typed = typedText(message.content), skill = parseSkillBlock(typed.bare);
@@ -338,8 +348,8 @@ export default function optchat(pi: ExtensionAPI) {
     description: 'Start background subagents, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Each receives the current memory view and read-only zoom/date. Whether children may delegate further, and how many agents may run at once, is set per profile. Completion reports arrive automatically; never poll or sleep waiting for them.',
     parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1 }) }),
     async execute(_id, args, signal, _update, ctx) {
-      const ids = await required().children.spawn(args.tasks, ctx.cwd, signal); status(ctx);
-      return result(`Started: ${ids.join(', ')}. Reports will arrive automatically.`);
+      const text = await required().children.start(args.tasks, ctx.cwd, signal); status(ctx);
+      return result(text);
     },
   });
   pi.registerTool({ name: 'tell', label: 'Tell background agent', description: 'Send a message to a subagent. A running one gets it at its next tool boundary. A finished one you started is resumed with its earlier conversation, and its new report arrives automatically.',
