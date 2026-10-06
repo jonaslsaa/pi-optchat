@@ -4,7 +4,7 @@ export const result = (text: string) => ({ content: [{ type: 'text' as const, te
 export const SEARCH_PAGE = 20;
 const SNIPPET = 200;
 /** Added after the view doc when Memory search is on. */
-export const SEARCH_DOC = '\n\nsearch(text) finds the original messages that contain text, newest first. Use it for an exact name, number, PR, path or error the view doesn\'t show, then zoom(id, 1) to read a hit.';
+export const SEARCH_DOC = '\n\nsearch(text) finds the original messages that contain text, newest first. Use it for an exact name, number, PR, path or error the view doesn\'t show, then zoom(id, 1) to read a hit. A hit is one message: zoom around it too, especially the messages after it, where the outcome usually is.';
 
 /** One page of hits, each with its id, date and a snippet around the first match; at most ~5 KB. */
 export function searchPage(memory: Memory, text: string, before?: number) {
