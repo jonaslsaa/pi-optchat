@@ -8,10 +8,13 @@ import { ranges, summarizeUsage, type UsageLedger, type UsageRange, type UsageRo
 export const clean = (text: string) => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '').replace(/\t/g, '  ');
 export const oneLine = (text: string) => clean(text).replace(/\n/g, ' ');
 export const count = (n: number) => n.toLocaleString('en-US');
-/** 950, 12.3k, 164k, 2.4M: enough precision to compare rows at a glance. */
+const units = ['', 'k', 'M', 'B'];
+/** 950, 12.3k, 164k, 2.4M: enough precision to compare rows at a glance. A value that rounds to 1000 moves up a unit. */
 export const short = (n: number) => {
-  const [value, unit] = n >= 1e9 ? [n / 1e9, 'B'] : n >= 1e6 ? [n / 1e6, 'M'] : n >= 1e3 ? [n / 1e3, 'k'] : [n, ''];
-  return `${value >= 100 || !unit ? Math.round(value) : Number(value.toFixed(1))}${unit}`;
+  let unit = 0, value = n;
+  const round = (v: number) => v >= 100 || !unit ? Math.round(v) : Number(v.toFixed(1));
+  while (unit < units.length - 1 && round(value) >= 1000) { value /= 1000; unit++; }
+  return `${round(value)}${units[unit]}`;
 };
 const dollars = (n: number) => `$${n.toFixed(2)}`;
 const cached = (u: Usage) => { const input = u.input + u.cacheRead + u.cacheWrite; return `${input ? Math.round(100 * u.cacheRead / input) : 0}%`; };
@@ -118,7 +121,7 @@ export class Inspector implements Component, Focusable {
       lines.push(`${color('accent', dollars(total.cost.total))} estimated · ${short(total.totalTokens)} tokens · ${cached(total)} cached`, '');
       const order = ['main', 'subagent', 'compactor', 'import'] as const;
       const sorted = groups.sort((a, b) => order.indexOf(a.role) - order.indexOf(b.role) || b.usage.cost.total - a.usage.cost.total);
-      const rows = sorted.map((g, i) => [i && sorted[i - 1].role === g.role ? '' : roleNames[g.role], g.model, dollars(g.usage.cost.total),
+      const rows = sorted.map((g, i) => [i && sorted[i - 1].role === g.role ? '' : roleNames[g.role], oneLine(g.model), dollars(g.usage.cost.total),
         `${total.cost.total ? Math.round(100 * g.usage.cost.total / total.cost.total) : 0}%`, short(g.usage.output), cached(g.usage)]);
       const header = ['', 'model', 'cost', 'share', 'out', 'cached'];
       const widths = header.map((h, c) => Math.max(h.length, ...rows.map(r => r[c].length)));
