@@ -183,7 +183,7 @@ test('the settings page saves a valid number and explains an invalid one', () =>
   const dir = mkdtempSync(join(tmpdir(), 'optchat-page-'));
   try {
     const config: ProfileConfig = { ...defaults, compactor: { provider: 'anthropic', model: 'claude-haiku-4-5', thinking: 'low' } };
-    const page = settingsPage(plain, { profile: 'demo', config, models: ['anthropic/claude-sonnet-5-5'], save: next => saveConfig(dir, next) }, () => {});
+    const page = settingsPage(plain, { profile: 'demo', config, models: [{ name: 'anthropic/claude-sonnet-5-5', thinking: ['low', 'medium'] }], save: next => saveConfig(dir, next) }, () => {});
     const type = (...keys: string[]) => { for (const key of keys) page.handleInput(key); };
     assert.match(page.render(100).join('\n'), /Subagent levels\s+1  default\n/);
     assert.match(page.render(100).join('\n'), /claude-haiku-4-5 · low  default claude-sonnet-5-5 · medium/, 'a changed model shows its default too');
@@ -242,4 +242,20 @@ test('turning Previous exchange off also reaches a turn that a subagent report s
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('the thinking step offers only levels the model takes, so Sonnet 5.5 has no "off" that would run at high effort', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-page-'));
+  try {
+    const config: ProfileConfig = { ...defaults };
+    const page = settingsPage(plain, { profile: 'demo', config, save: next => saveConfig(dir, next),
+      models: [{ name: 'anthropic/claude-sonnet-5-5', thinking: ['low', 'medium', 'high'] }] }, () => {});
+    page.handleInput('\r'); // open Compactor model
+    page.handleInput('\r'); // pick the only model
+    const step = page.render(100).join('\n');
+    assert.match(step, /Thinking level[\s\S]*low[\s\S]*high/);
+    assert.doesNotMatch(step, /^\W*(off|minimal)\s*$/m);
+    page.handleInput('\x1b[A'); page.handleInput('\r'); // up from the current "medium" to "low"
+    assert.deepEqual(config.compactor, { provider: 'anthropic', model: 'claude-sonnet-5-5', thinking: 'low' });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
