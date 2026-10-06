@@ -65,6 +65,18 @@ const CODEX_EXACT = /^(?:<external_([^>]+)>[\s\S]*<\/external_\1>|<codex_interna
 /** What the user typed in a Codex message: every part except the context Codex injected. */
 const codexTyped = (content: unknown) => (Array.isArray(content) ? content : [content]).map(text)
   .filter(piece => piece && !CODEX_MARKED.test(piece.trim()) && !CODEX_EXACT.test(piece.trim())).join('\n');
+/** OMP logs reminders and nudges it injects as user messages attributed to the agent; the user typed everything else. */
+const ompTyped = (m: Record<string, unknown>) => m.role === 'user' && m.attribution !== 'agent' && m.synthetic !== true;
+/** OMP keeps sessions per profile: the default profile in ~/.omp/agent/sessions, others in ~/.omp/profiles/<name>/agent/sessions. */
+async function ompRoots(): Promise<string[]> {
+  const profiles = join(homedir(), '.omp/profiles');
+  const entries = await readdir(profiles, { withFileTypes: true }).catch(error => {
+    if (missingSource(error)) return [];
+    throw error;
+  });
+  const named = entries.filter(e => e.isDirectory()).map(e => join(profiles, e.name, 'agent/sessions')).sort();
+  return [join(homedir(), '.omp/agent/sessions'), ...named];
+}
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
 function imported(c: Conversation, id: string, kind: Kind, content: string, date: string, identity = content): ImportedEntry | undefined {
   if (!content.trim()) return undefined;
@@ -101,8 +113,9 @@ async function filesUnder(path: string, accept: (name: string) => boolean, signa
   }
   return files.sort();
 }
-export async function scanLocal(source: 'claude' | 'codex', roots?: string[], signal?: AbortSignal): Promise<Scan> {
+export async function scanLocal(source: 'claude' | 'codex' | 'omp', roots?: string[], signal?: AbortSignal): Promise<Scan> {
   const folders = roots ?? (source === 'claude' ? [join(homedir(), '.claude/projects')]
+    : source === 'omp' ? await ompRoots()
     : [join(homedir(), '.codex/sessions'), join(homedir(), '.codex/archived_sessions')]);
   const conversations: Conversation[] = [], warnings: string[] = [];
   // Claude workflow journals contain orchestration events, not conversation messages.
@@ -110,9 +123,13 @@ export async function scanLocal(source: 'claude' | 'codex', roots?: string[], si
     signal?.throwIfAborted();
     // Import user conversations, not separate delegated runs (including Claude's older flat layout).
     if (source === 'claude' && (relative(folder, dirname(file)).split(/[\\/]/).includes('subagents') || basename(file).startsWith('agent-'))) continue;
+    // OMP keeps a session's subagent and advisor logs in a folder named after the session, below the project folder.
+    if (source === 'omp' && relative(folder, file).split(/[\\/]/).length > 2) continue;
     try {
       const info = await stat(file);
       let id = basename(file, '.jsonl'), project = dirname(file), date = info.mtime.toISOString(), title = '';
+      // OMP's own title: its first line is rewritten with the current one; older logs only have renames and the header.
+      let named = '', current = false;
       let sidechain = false;
       for await (const { value: v, line } of jsonLines(file, warnings, source === 'claude' ? Infinity : 60, signal)) {
         // Sidechain markers can appear late; picker metadata still comes from the first 60 lines.
@@ -127,16 +144,26 @@ export async function scanLocal(source: 'claude' | 'codex', roots?: string[], si
           project = string(v.cwd) ?? project;
           if (v.type === 'custom-title' || v.type === 'ai-title') title = string(v.customTitle ?? v.aiTitle) ?? title;
         }
-        const m = source === 'claude' ? v.message : v.type === 'response_item' ? v.payload : undefined;
-        const user = record(m) && m.role === 'user' && !title;
-        const first = !user ? '' : source === 'claude' ? claudeCommand(text(m.content)) ?? text(m.content) : codexTyped(m.content);
+        if (source === 'omp') {
+          if (v.type === 'title') { named = string(v.title) ?? named; current = true; }
+          else if (v.type === 'title_change' && !current) named = string(v.title) ?? named;
+          else if (v.type === 'session') {
+            id = string(v.id) ?? id; project = string(v.cwd) ?? project; date = timestamp(v.timestamp, date);
+            if (!named) named = string(v.title) ?? '';
+          }
+        }
+        const m = source === 'claude' ? v.message : source === 'omp' ? v.type === 'message' ? v.message : undefined
+          : v.type === 'response_item' ? v.payload : undefined;
+        const user = record(m) && m.role === 'user' && !title && (source !== 'omp' || ompTyped(m));
+        const first = !user ? '' : source === 'claude' ? claudeCommand(text(m.content)) ?? text(m.content)
+          : source === 'omp' ? text(m.content) : codexTyped(m.content);
         if (first.trim()) {
           title = first.replace(/\s+/g, ' ').slice(0, 110);
           date = timestamp(v.timestamp, date);
         }
       }
       if (sidechain) continue;
-      conversations.push({ source, file, id, project, date, title: title || id, size: info.size });
+      conversations.push({ source, file, id, project, date, title: named || title || id, size: info.size });
     } catch (error) {
       signal?.throwIfAborted();
       if (!missingSource(error)) throw error;
@@ -368,6 +395,16 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
             else if (parts.length) assistant(parts, date, final);
             else if (!final) pending = [];
           }
+        }
+        if (c.source === 'omp' && v.type === 'message' && record(v.message)) {
+          const m = v.message, id = string(v.id) ?? `line:${line}`;
+          if (ompTyped(m)) add(id, 'user', text(m.content), date);
+          // A `!command` the user ran: the command stays as typed and its output is dropped, as for Claude Code.
+          else if (m.role === 'bashExecution' && typeof m.command === 'string') add(id, 'user', `!${m.command}`, date);
+          // A turn's answer is the reply that stopped on its own. Replies that call tools, fail or are aborted are work in progress.
+          else if (m.role === 'assistant' && m.stopReason === 'stop' && Array.isArray(m.content)) m.content.forEach((block: unknown, index: number) => {
+            if (record(block) && block.type === 'text') add(`${id}:${index}`, 'talk', text(block), date);
+          });
         }
         if (c.source === 'codex' && v.type === 'session_meta' && record(v.payload) && codexSubagent(v.payload)) return { entries: [], warnings };
         if (c.source === 'codex' && v.type === 'event_msg' && record(v.payload)) {

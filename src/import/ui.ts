@@ -10,9 +10,10 @@ type ImportUI = { ui: Pick<ExtensionUIContext, 'select' | 'input' | 'confirm' | 
 const clean = (s: string) => s.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
 const size = (n: number) => `${(n / 1_000_000).toFixed(1)} MB`;
 export async function chooseImport(ctx: ImportUI, profile: string, memory: Memory, model: string, signal: AbortSignal): Promise<{ entries: ImportedEntry[]; mode: ImportMode } | undefined> {
-  const sourceLabel = await ctx.ui.select(`Import into ${profile} · source`, ['Claude Code', 'Claude Code memories', 'Codex', 'ChatGPT export'], { signal });
+  const sourceLabel = await ctx.ui.select(`Import into ${profile} · source`, ['Claude Code', 'Claude Code memories', 'Codex', 'OMP', 'ChatGPT export'], { signal });
   if (!sourceLabel) return;
-  const source: Source = sourceLabel === 'Claude Code' ? 'claude' : sourceLabel === 'Claude Code memories' ? 'claude-memory' : sourceLabel === 'Codex' ? 'codex' : 'chatgpt';
+  const source: Source = sourceLabel === 'Claude Code' ? 'claude' : sourceLabel === 'Claude Code memories' ? 'claude-memory'
+    : sourceLabel === 'Codex' ? 'codex' : sourceLabel === 'OMP' ? 'omp' : 'chatgpt';
   const unit = source === 'claude-memory' ? 'memories' : 'conversations';
   ctx.ui.setWidget('optchat-import', ['Scanning local conversation metadata…']);
   let scan;

@@ -7,7 +7,7 @@ A Pi extension that implements [Victor Taelin's OptChat recipe](https://gist.git
 - **Memory**: every message is logged and summarized into a binary tree. Each turn starts from a fresh context holding a bounded memory view; the agent uses `zoom` and `date` to read originals.
 - **Profiles**: separate memories and instructions, such as `work` and `personal`.
 - **Subagents**: delegate tasks to background agents, inspect them live, and send them guidance.
-- **Import**: bring in history from Claude Code (conversations and memories), Codex, or ChatGPT.
+- **Import**: bring in history from Claude Code (conversations and memories), Codex, OMP, or ChatGPT.
 - **Connected windows**: a second Pi window on the same profile becomes a subagent you talk to directly.
 
 It runs inside ordinary Pi, with no fork or separate launcher.
@@ -143,14 +143,14 @@ Guidance shows as queued until delivered, or undelivered if the child stops firs
 
 Pick the destination profile, then run `/optchat import`.
 
-1. **Source**: Claude Code (`~/.claude/projects`), Claude Code memories, Codex (`~/.codex/sessions`, `~/.codex/archived_sessions`), or a ChatGPT export (ZIP, folder, or `conversations.json`; ZIP needs `unzip`). Scanning is local and makes no model calls.
-2. **Select**: for Claude Code, its memories, and Codex, pick projects (busiest first), optionally filter by start date, then take all conversations or pick some. **Tab** toggles (and **Space** when the filter is empty), **Enter** continues, type to filter, **Ctrl+A**/**Ctrl+D** select/clear matches, **Esc** cancels. Nothing is classified as work or personal for you.
+1. **Source**: Claude Code (`~/.claude/projects`), Claude Code memories, Codex (`~/.codex/sessions`, `~/.codex/archived_sessions`), [OMP](https://github.com/can1357/oh-my-pi) (`~/.omp/agent/sessions` and each profile's `~/.omp/profiles/<name>/agent/sessions`), or a ChatGPT export (ZIP, folder, or `conversations.json`; ZIP needs `unzip`). Scanning is local and makes no model calls.
+2. **Select**: for Claude Code, its memories, Codex, and OMP, pick projects (busiest first), optionally filter by start date, then take all conversations or pick some. **Tab** toggles (and **Space** when the filter is empty), **Enter** continues, type to filter, **Ctrl+A**/**Ctrl+D** select/clear matches, **Esc** cancels. Nothing is classified as work or personal for you.
 3. **Mode** (only if the profile already has history):
    - **Append**: keep existing summaries and add the import. Faster and cheaper.
    - **Rebuild by conversation start date**: regenerate the whole tree, ordered by conversation start.
 4. **Preview**: destination, new and duplicate counts, text size, rough token estimate, and compactor. This is not a price quote: a big import costs about 3x that estimate in compactor input, because every message is summarized and then re-read in merges, each with the memory view as (mostly cached) context.
 
-**What gets imported**: user messages and final assistant replies, with original dates and source labels, as in Victor's recipe. Tool calls and results, intermediate commentary, reasoning, subagent transcripts, replayed context, and image/audio/file bytes are left out. So is the output Claude Code logs for slash and shell commands; the command itself stays as typed (`/name args` or `!command`). So are the context messages Codex injects, such as the AGENTS.md instructions and the environment context. Dropped text never becomes a conversation's title. ChatGPT alternate branches are labelled as alternatives. Imported records are marked as historical so old requests are not treated as new instructions.
+**What gets imported**: user messages and final assistant replies, with original dates and source labels, as in Victor's recipe. Tool calls and results, intermediate commentary, reasoning, subagent transcripts, replayed context, and image/audio/file bytes are left out. So is the output Claude Code logs for slash and shell commands; the command itself stays as typed (`/name args` or `!command`). So are the context messages Codex injects, such as the AGENTS.md instructions and the environment context, and the messages OMP injects (reminders, background job notices), along with the output of `!command`s run in OMP. Dropped text never becomes a conversation's title. ChatGPT alternate branches are labelled as alternatives. Imported records are marked as historical so old requests are not treated as new instructions.
 
 **Claude Code memories**: the auto-memory topic files in `~/.claude/projects/*/memory/` (not `MEMORY.md`, which only indexes them), picked by project. Each file becomes one dated note in the memory tree, not part of the prompt. An edited file comes in again as a newer note.
 

@@ -198,6 +198,66 @@ test('Codex discovery and parsing exclude delegated sessions while keeping user 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('OMP imports what the user typed and the replies that ended a turn, without injected messages, tool work or aborted replies', async () => {
+  const dir = temp(), file = join(dir, 'omp.jsonl');
+  const message = (id: string, message: Record<string, unknown>) => ({ type: 'message', id, parentId: null, timestamp: date, message });
+  const typed = (id: string, text: string, extra = {}) => message(id, { role: 'user', attribution: 'user', content: [{ type: 'text', text }], ...extra });
+  const reply = (id: string, stopReason: string, content: unknown[]) => message(id, { role: 'assistant', stopReason, content });
+  lines(file, [
+    { type: 'title', v: 1, title: 'Fixture' },
+    { type: 'session', version: 3, id: 'session', timestamp: date, cwd: '/project' },
+    { type: 'model_change', id: 'm', timestamp: date, model: 'anthropic/model' },
+    typed('u1', 'exact user question'),
+    reply('a1', 'toolUse', [{ type: 'thinking', thinking: 'SECRET REASONING' }, { type: 'text', text: 'intermediate explanation' },
+      { type: 'toolCall', id: 'call-1', name: 'bash', arguments: { command: 'ls' } }]),
+    message('t1', { role: 'toolResult', toolCallId: 'call-1', content: [{ type: 'text', text: 'TOOL OUTPUT' }] }),
+    message('d1', { role: 'developer', attribution: 'agent', content: [{ type: 'text', text: 'RULE REMINDER' }] }),
+    typed('n1', 'AGENT NUDGE', { attribution: 'agent' }),
+    typed('s1', 'SYNTHETIC PROMPT', { synthetic: true }),
+    { type: 'custom_message', id: 'c1', timestamp: date, customType: 'async-result', display: true, content: 'BACKGROUND NOTICE' },
+    reply('a2', 'stop', [{ type: 'thinking', thinking: 'SECRET REASONING' }, { type: 'text', text: 'final answer' }, { type: 'text', text: 'second part' }]),
+    message('b1', { role: 'bashExecution', command: 'git status', output: 'SHELL OUTPUT', exitCode: 0 }),
+    typed('u2', 'steer while it works', { steering: true }),
+    reply('a3', 'aborted', [{ type: 'text', text: 'ABORTED REPLY' }]),
+    reply('a4', 'error', [{ type: 'text', text: 'FAILED REPLY' }]),
+    { type: 'compaction', id: 'k', timestamp: date, summary: 'COMPACTION SUMMARY' },
+  ]);
+  try {
+    const parsed = await readConversation(conversation('omp', file));
+    const body = (e: ImportedEntry) => e.text.slice(e.text.indexOf(']\n') + 2);
+    assert.deepEqual(parsed.entries.map(e => [e.kind, body(e)]), [
+      ['user', 'exact user question'], ['talk', 'final answer'], ['talk', 'second part'], ['user', '!git status'], ['user', 'steer while it works']]);
+    assert.doesNotMatch(JSON.stringify(parsed.entries),
+      /SECRET REASONING|intermediate explanation|TOOL OUTPUT|RULE REMINDER|AGENT NUDGE|SYNTHETIC PROMPT|BACKGROUND NOTICE|SHELL OUTPUT|ABORTED REPLY|FAILED REPLY|COMPACTION SUMMARY/);
+    assert.deepEqual(parsed.warnings, []);
+    assert.equal(parsed.entries[0].text.split('\n')[0], `[Historical omp · 2026-01-02 12:00Z · conversation- · Fixture]`);
+    const again = await readConversation({ ...conversation('omp', file), title: 'Renamed', project: '/moved' });
+    assert.deepEqual(again.entries.map(e => e.receipt), parsed.entries.map(e => e.receipt));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('OMP discovery takes the session\'s own title, project and start, and skips the subagent logs stored beside it', async () => {
+  const root = temp(), project = join(root, '-work-alpha'), stem = '2026-01-02T12-00-00-000Z_session';
+  mkdirSync(join(project, stem), { recursive: true }); mkdirSync(join(root, '-work-beta'));
+  const session = (id: string, extra = {}) => ({ type: 'session', version: 3, id, timestamp: date, cwd: `/work/${id}`, ...extra });
+  const typed = (text: string, attribution = 'user') => ({ type: 'message', id: text, timestamp: '2026-01-02T12:05:00.000Z', message: { role: 'user', attribution, content: [{ type: 'text', text }] } });
+  lines(join(project, `${stem}.jsonl`), [{ type: 'title', v: 1, title: 'Current title' }, session('alpha', { title: 'Header title' }),
+    { type: 'title_change', id: 'r', title: 'Older rename' }, typed('first request')]);
+  lines(join(project, stem, 'Scout.jsonl'), [session('child'), typed('delegated task')]);
+  lines(join(project, stem, '__advisor.jsonl'), [session('advisor'), typed('advice')]);
+  // An older log without the rewritten first line: the latest rename wins over the header, and an injected message is not the title.
+  lines(join(root, '-work-beta', 'old.jsonl'), [session('beta', { title: 'Header title' }), { type: 'title_change', id: 'r1', title: 'First rename' },
+    { type: 'title_change', id: 'r2', title: 'Second rename' }, typed('reminder', 'agent'), typed('typed request')]);
+  lines(join(root, '-work-beta', 'untitled.jsonl'), [session('gamma'), typed('reminder', 'agent'), typed('typed request')]);
+  try {
+    const scan = await scanLocal('omp', [root]);
+    assert.deepEqual(scan.conversations.map(c => [c.id, c.project, c.title]).sort(), [
+      ['alpha', '/work/alpha', 'Current title'], ['beta', '/work/beta', 'Second rename'], ['gamma', '/work/gamma', 'typed request']]);
+    assert.ok(scan.conversations.every(c => c.date === '2026-01-02T12:05:00.000Z'), 'the start is the first message the user typed');
+    assert.deepEqual(scan.warnings, []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('ChatGPT keeps user messages and final replies on each branch with stable identities', async () => {
   const dir = temp(), file = join(dir, 'conversations-1.json');
   const exported = { id: 'chat-1', title: 'Branches', create_time: 100, update_time: 300, current_node: 'final', mapping: {
