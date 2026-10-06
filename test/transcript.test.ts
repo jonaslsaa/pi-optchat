@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type UserMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { buildContext, PREVIOUS_EXCHANGE, previousExchange, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
@@ -316,6 +316,57 @@ test('a /skill: command is logged once, as its expansion, and never recovered as
     assert.deepEqual(log.map(entry => entry.kind), ['user', 'talk']);
     assert.match(log[0].text, /^<skill name="demo"[\s\S]*Follow the demo steps\.[\s\S]*Do the task\.$/);
     assert.deepEqual(JSON.parse(readFileSync(join(dir, 'profiles', 'fixture', 'pending-inputs.json'), 'utf8')), []);
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an aborted wait for summaries clears the working message', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-wait-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  const working: (string | undefined)[] = [];
+  let stall = true, session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    const config = loadConfig(profilePath('fixture'));
+    saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
+      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+    runtime.registerProvider('fixture', {
+      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+      streamSimple(model, context, options) {
+        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+        const reply = answer(compression ? 'Summary.' : 'Done.'); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
+        const stream = createAssistantMessageEventStream();
+        if (compression && stall) {
+          reply.stopReason = 'aborted'; reply.errorMessage = 'closed';
+          options?.signal?.addEventListener('abort', () => { stream.push({ type: 'error', reason: 'aborted', error: reply }); stream.end(); }, { once: true });
+        } else queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
+        return stream;
+      },
+    });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager, noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.inMemory(dir);
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
+      resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date'] })).session;
+    const ui = { setWorkingMessage: (message?: string) => { working.push(message); }, notify() {}, setStatus() {}, setWidget() {}, setTitle() {} } as unknown as ExtensionUIContext;
+    await session.bindExtensions({ uiContext: ui });
+    await session.prompt('First question. ' + 'padding '.repeat(400));
+    working.length = 0;
+    const second = session.prompt('Second question.');
+    for (let i = 0; i < 200 && !working.includes('Waiting for OptChat summaries…'); i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(working, ['Waiting for OptChat summaries…'], 'the second turn waits for summaries');
+    await session.abort(); await second;
+    assert.equal(working.at(-1), undefined, 'the message is cleared although the wait threw');
+    assert.equal(working.length, 2);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
