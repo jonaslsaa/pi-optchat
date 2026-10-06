@@ -1,6 +1,6 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
@@ -101,7 +101,9 @@ test('the main window title follows the real Pi session: profile, working, runni
     session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
       resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date', 'spawn'] })).session;
     const titles: string[] = [];
-    const uiContext: ExtensionUIContext = { ...session.extensionRunner.getUIContext(), setTitle: title => { titles.push(title); } };
+    const statuses: (string | undefined)[] = [];
+    const uiContext: ExtensionUIContext = { ...session.extensionRunner.getUIContext(), setTitle: title => { titles.push(title); },
+      setStatus: (_key, text) => { statuses.push(text); } };
     await session.bindExtensions({ uiContext });
 
     assert.equal(titles[0], 'π fixture');
@@ -111,8 +113,13 @@ test('the main window title follows the real Pi session: profile, working, runni
     const running = session.prompt('Long task.');
     await held;
     assert.equal(titles.at(-1), '● π fixture');
+    // A broken import journal must not stop the turn from settling: the working mark still clears.
+    const journal = join(profilePath('fixture'), 'imports', 'pending.json');
+    mkdirSync(join(profilePath('fixture'), 'imports'), { recursive: true }); writeFileSync(journal, '{');
     release(); await running; await session.agent.waitForIdle();
     await until(() => titles.at(-1) === 'π fixture');
+    assert.match(statuses.at(-1) ?? '', / · import journal invalid$/);
+    rmSync(journal);
 
     const before = titles.length;
     session.setSessionName('renamed'); // Pi retitles the tab on renames.

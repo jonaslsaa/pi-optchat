@@ -73,7 +73,12 @@ export default function optchat(pi: ExtensionAPI) {
   const required = () => { if (!active) throw new Error('Choose an OptChat profile first: /optchat profile'); return active; };
   const status = (ctx: ExtensionContext) => {
     const a = active;
-    ctx.ui.setStatus('optchat', a ? `OptChat: ${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending · ${a.children.ids.length} agents${importing ? ' · importing' : pendingImport(a.dir) ? ' · import paused: /optchat import' : ''}` : 'OptChat: choose profile');
+    if (!a) { ctx.ui.setStatus('optchat', 'OptChat: choose profile'); return; }
+    // A display only: a broken import journal is refused where it matters, never here.
+    let note = '';
+    try { note = importing ? ' · importing' : pendingImport(a.dir) ? ' · import paused: /optchat import' : ''; }
+    catch { note = ' · import journal invalid'; }
+    ctx.ui.setStatus('optchat', `OptChat: ${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending · ${a.children.ids.length} agents${note}`);
   };
   const saveReports = () => { if (active) atomicWrite(join(active.dir, 'pending-reports.json'), JSON.stringify(reports)); };
   const flush = () => {
