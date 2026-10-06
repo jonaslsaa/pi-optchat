@@ -1,4 +1,4 @@
-![Pi-OptChat: persistent memory for Pi](docs/banner.png)
+![Pi-OptChat: persistent memory for Pi](https://raw.githubusercontent.com/jonaslsaa/pi-optchat/main/docs/banner.png)
 
 # pi-optchat
 
