@@ -56,7 +56,7 @@ test('a config.json from before settings existed loads with the defaults, and se
   const dir = mkdtempSync(join(tmpdir(), 'optchat-config-'));
   try {
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ compactor: defaults.compactor, subagent: defaults.subagent }));
-    assert.deepEqual(loadConfig(dir), { ...defaults, subagentLevels: 1, maxAgents: 8, previousExchange: true, previousExchangeKB: 16, summaryAcceptBytes: 640 });
+    assert.deepEqual(loadConfig(dir), { ...defaults, subagentLevels: 1, maxAgents: 8, previousExchange: true, previousExchangeKB: 16, denseSummaries: false, summaryAcceptBytes: 640 });
     const changed = { ...loadConfig(dir), subagentLevels: 3, maxAgents: 12, previousExchange: false, previousExchangeKB: 4, summaryAcceptBytes: 512 };
     saveConfig(dir, changed);
     assert.deepEqual(loadConfig(dir), changed);

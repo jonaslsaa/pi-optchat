@@ -5,11 +5,13 @@ import { COMPACT } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
 import { cachePayload, splitView } from './cache.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
-import { DEFAULT_SETTINGS } from './settings.ts';
+import { DEFAULT_SETTINGS, type Settings } from './settings.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
 /** A realistic summary line of exactly NODE bytes, on a topic no real chat shares so its wording can't leak into summaries. */
 export const SCALE = 'user: Plan the Lisbon trip for 14-18 May: four adults, one in a wheelchair, 2400 EUR budget, no flights before 09:00. talk: Suggested Baixa; skip tram 28 (not step-free). tool: searched TAP, easyJet fares; echo: TAP TP1205 at 08:40 (too early), easyJet U27652 at 11:15 is 162 EUR each. user: "Book easyJet; step-free rooms matter more than a view." work: [4c1e9a20] Casa do Rio has two step-free rooms at 138 EUR/night, free cancellation to 10 May, held to 2 May. talk: Asked about a Sintra day trip, unanswered.';
+/** Added to each request when Dense summaries is on; COMPACT itself stays the recipe's. */
+export const DENSE = 'Don\'t repeat state the surrounding chat already shows, such as a list of what is still open or the request that started a chain of tool calls: point to it in a few words at most and spend the bytes on what is new in your stretch.';
 const WARM_MS = 4 * 60_000; // Anthropic's short cache lives 5 minutes from its last use.
 
 /** Parallel calls can't read a cache entry that isn't written yet, so one call primes a cold prefix and the rest wait until it answers. */
@@ -37,15 +39,17 @@ function primeFirst() {
     };
   };
 }
-/** The model is asked for 512 bytes; `accepted` is the longest line kept without a retry (the profile's summary size tolerance). */
+/** The model is asked for 512 bytes; the profile's summary size tolerance is the longest line kept without a retry. */
 export function createCompressor(registry: ModelRegistry, choice: () => ModelChoice,
-  onUsage: (message: AssistantMessage) => void = () => {}, accepted = () => DEFAULT_SETTINGS.summaryAcceptBytes): Compressor {
+  onUsage: (message: AssistantMessage) => void = () => {},
+  settings: () => Pick<Settings, 'summaryAcceptBytes' | 'denseSummaries'> = () => DEFAULT_SETTINGS): Compressor {
   const gate = primeFirst();
   return async (input, signal) => {
     const selected = choice();
     const model = registry.find(selected.provider, selected.model);
     if (!model) throw new Error(`Compactor model unavailable: ${selected.provider}/${selected.model}. Use /optchat model.`);
-    const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}For scale, this line is exactly 512 bytes:\n${SCALE}\n\n${input.merge ? 'Merge these two lines into one' : 'Compress this message into one line'}, in at most 512 bytes:\n${input.source}`;
+    const { summaryAcceptBytes, denseSummaries } = settings();
+    const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}${denseSummaries ? DENSE + '\n\n' : ''}For scale, this line is exactly 512 bytes:\n${SCALE}\n\n${input.merge ? 'Merge these two lines into one' : 'Compress this message into one line'}, in at most 512 bytes:\n${input.source}`;
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${selected.thinking}\n${view.slice(0, -1).join('')}` : undefined;
@@ -68,7 +72,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       if (!line) throw new Error('Compactor returned no text.');
       tries.push(line);
       // A merge of two short lines can come back nearly as big as both, so a line must also shrink what it replaces.
-      if (bytes(line) <= accepted() && bytes(line) < bytes(input.source)) break;
+      if (bytes(line) <= summaryAcceptBytes && bytes(line) < bytes(input.source)) break;
       messages.push(reply);
       const cut = Buffer.from(line).subarray(0, NODE).toString('utf8').replace(/\uFFFD$/, '');
       messages.push({ role: 'user', content: `That line is ${bytes(line)} bytes; the limit is 512. It must end where it is cut here:\n${cut}| ← LIMIT`, timestamp: Date.now() });

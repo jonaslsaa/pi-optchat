@@ -43,7 +43,7 @@ For headless use, pass `--optchat-profile work`.
 | --- | --- |
 | `/optchat` | Status and actions menu. |
 | `/optchat profile` | Select or create a profile. Switching starts a fresh Pi session. |
-| `/optchat settings` | This profile's settings: models, subagent levels and limits, previous exchange, summary size tolerance. |
+| `/optchat settings` | This profile's settings: models, subagent levels and limits, previous exchange, dense summaries, summary size tolerance. |
 | `/optchat model` | Compactor model and effort for this profile. |
 | `/optchat agents` | Live agent tree and saved run history. |
 | `/optchat agents model` | Subagent model and effort for this profile. |
@@ -78,6 +78,7 @@ Compression and subagents make extra model requests with your provider credentia
 | Max active agents | 8 | Subagents running at once in the profile, all levels together, so it also caps how deep a chain can go. |
 | Previous exchange | on | Replays your last request and answer in full with the next turn (see below). Off is the recipe. |
 | Previous exchange limit | 16 KB | A larger last exchange is left out. |
+| Dense summaries | off | Adds one sentence to each compactor request: don't repeat what the surrounding chat already shows (such as lists of what is still open), spend the bytes on what is new. Off is the recipe. In a small blind-graded study, summaries of a personal chat kept clearly more detail (75 vs 62 of 100 points); on a work chat it made no difference. |
 | Summary size tolerance | 640 bytes | The compactor is always asked for 512-byte lines; a longer line up to this size is kept instead of retried. 512 is the recipe's strict rule. |
 
 Numbers must be whole numbers of at least 1 (512 for the summary size tolerance). Missing keys in an older `config.json` take their defaults.
