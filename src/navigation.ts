@@ -1,7 +1,7 @@
 import { CustomEditor, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { matchesKey, truncateToWidth, visibleWidth, type KeyId } from '@earendil-works/pi-tui';
 import type { Children } from './agents.ts';
-import { inspectorShowing, type InspectorPage } from './inspector.ts';
+import { inspectorShowing, nextPage, type InspectorPage } from './inspector.ts';
 import { isActiveRun } from './runs.ts';
 
 /** Configured before extension registration; this also works in legacy terminals with F6. */
@@ -22,7 +22,7 @@ export class BarNavigation {
     }
     if (matchesKey(data, 'escape') || matchesKey(data, 'up')) { this.selected = undefined; return true; }
     if (matchesKey(data, 'left') || matchesKey(data, 'right') || matchesKey(data, 'tab')) {
-      this.selected = this.selected === 'agents' ? 'usage' : 'agents'; return true;
+      this.selected = nextPage(this.selected, matchesKey(data, 'left') ? -1 : 1); return true;
     }
     if (matchesKey(data, 'return')) { const page = this.selected; this.selected = undefined; open(page); return true; }
     if (matchesKey(data, 'down')) return true;
@@ -53,7 +53,7 @@ export function mountNavigation(ctx: ExtensionContext, children: Children, short
         if (inspectorShowing()) return []; // The open panel replaces the editor and this bar.
         const list = children.history.list(), running = list.filter(isActiveRun).length;
         const label = (page: InspectorPage, text: string) => navigation.selected === page ? theme.fg('accent', `› ${text}`) : theme.fg('muted', text);
-        const left = `${label('agents', `Agents: ${running} running · ${list.length - running} saved`)}   ${label('usage', 'Usage')}`;
+        const left = `${label('agents', `Agents: ${running} running · ${list.length - running} saved`)}   ${label('usage', 'Usage')}   ${label('activity', 'Activity')}`;
         const hint = theme.fg('dim', navigation.selected ? '←→ select · Enter open · Esc input' : `${previous ? '' : '↓ select · '}${shortcut} inspect`);
         const gap = width - visibleWidth(left) - visibleWidth(hint);
         return [truncateToWidth(gap >= 3 ? `${left}${' '.repeat(gap)}${hint}` : `${left}   ${hint}`, width)];

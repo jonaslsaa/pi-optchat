@@ -70,6 +70,30 @@ test('a turn waits for the view to be built, not for merges that bring it under 
   } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('activity lists a summary while the compactor builds it, then as retrying with the error', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
+  let release = () => {};
+  const merging = new Promise<void>(resolve => { release = resolve; });
+  const memory = new Memory(dir, async input => { if (input.merge) { await merging; throw new Error('401 invalid x-api-key'); } return 'merged'; }, () => {}, 500, 8, 60_000);
+  const until = async (done: () => boolean, deadline = Date.now() + 2000) => { while (!done()) { assert.ok(Date.now() < deadline, 'timed out'); await new Promise(resolve => setTimeout(resolve, 5)); } };
+  try {
+    const before = Date.now();
+    memory.append('user', 'a'.repeat(300)); memory.append('user', 'b'.repeat(300));
+    await until(() => memory.activity().building.some(p => p.l === 1));
+    const { building, retrying } = memory.activity();
+    assert.deepEqual(building.map(({ l, i }) => ({ l, i })), [{ l: 1, i: 0 }]);
+    assert.ok(building[0].started >= before && building[0].started <= Date.now());
+    assert.deepEqual(retrying, []);
+    release();
+    await until(() => memory.activity().retrying.length > 0);
+    const after = memory.activity();
+    assert.deepEqual(after.building, []);
+    assert.deepEqual(after.retrying.map(({ l, i }) => ({ l, i })), [{ l: 1, i: 0 }]);
+    assert.ok(after.retrying[0].in > 50_000);
+    assert.equal(after.lastError, '401 invalid x-api-key');
+  } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('torn final line is reported and the next append remains readable', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')); let memory = new Memory(dir, async () => 'summary');
   memory.append('user', 'first'); await memory.close();

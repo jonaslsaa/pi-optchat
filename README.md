@@ -48,6 +48,7 @@ For headless use, pass `--optchat-profile work`.
 | `/optchat agents` | Live agent tree and saved run history. |
 | `/optchat agents model` | Subagent model and effort for this profile. |
 | `/optchat usage` | Token usage and cost estimates. |
+| `/optchat activity` | Summaries being built or retrying, and how many agents run. |
 | `/optchat instructions` | Edit this profile's `AGENTS.md`. |
 | `/optchat browse` | Open a readable snapshot of memory: the shape of what the model sees, summaries you can open down to the original messages, and search that shows where each message is folded. Run again to refresh. |
 | `/optchat import` | Import history, or resume/discard a paused import. |
@@ -103,9 +104,9 @@ Ask in plain words, for example: "Spawn an agent to investigate this repository 
 - Stopping an agent stops its whole subtree. A failed parent stops its descendants.
 - Agents run inside the Pi process. Closing Pi stops them; there is no detached mode.
 
-## Agents and usage inspector
+## Agents, usage and activity inspector
 
-An **Agents | Usage** bar sits below the input.
+An **Agents | Usage | Activity** bar sits below the input.
 
 | Key | Action |
 | --- | --- |
@@ -113,7 +114,7 @@ An **Agents | Usage** bar sits below the input.
 | **Left/Right**, **Enter** | Pick and open a section |
 | **Escape**, **Up**, or typing | Back to the editor |
 | **F6** | Open Agents directly, keeping your draft |
-| **Tab** | Switch between Agents and Usage |
+| **Tab** | Cycle Agents, Usage and Activity |
 
 Set a different shortcut with `OPTCHAT_INSPECT_KEY=ctrl+shift+a pi`. If another extension supplies a custom editor, OptChat leaves its Down key alone; use the shortcut or commands instead.
 
@@ -133,6 +134,10 @@ Guidance shows as queued until delivered, or undelivered if the child stops firs
 **Usage** shows this session, last hour, today, last 7 days, or all time (**Left/Right**): one row per role and model (main agent, subagents, compactor, imports) with estimated cost, share of the total, output tokens, and how much input came from the cache. Costs are API prices, not your subscription bill.
 
 ![Usage page](docs/screenshots/usage.png)
+
+**Activity** shows the background work you otherwise only see as a footer count: each summary the compactor is building (its view line, level and elapsed time), how many messages still wait for one, and summaries waiting to retry with the countdown and the last error, so a bad key or a rate limit is visible. It also counts running agents; their list is on Agents.
+
+![Activity page](docs/screenshots/activity.png)
 
 - Costs are API-rate estimates, not your subscription bill. Unknown rates show zero.
 - Record counts are not request counts; retries and tool overhead can add records.

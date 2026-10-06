@@ -27,7 +27,7 @@ test('inspector reaches old runs, opens the selected agent, shows usage, resizes
   spend('main', 'claude-opus-5-5', 20.5, 'anthropic'); spend('main', 'evil\n\x1b[2Jmodel', 0); spend('compactor', 'claude-sonnet-5-5', 60, 'anthropic'); spend('compactor', 'claude-sonnet-5-5', 3.35);
   let rows = 24;
   const actions: (InspectorAction | undefined)[] = [];
-  const open = (page: 'agents' | 'usage') => new Inspector({ profile: 'personal', session: 'parent', children, usage, page, rows: () => rows, redraw: () => {}, done: action => { actions.push(action); }, color: (_tone, text) => text, context: () => 123, signal: controller.signal });
+  const open = (page: 'agents' | 'usage') => new Inspector({ profile: 'personal', session: 'parent', children, usage, memory, page, rows: () => rows, redraw: () => {}, done: action => { actions.push(action); }, color: (_tone, text) => text, context: () => 123, signal: controller.signal });
   const inspector = open('agents'), usagePage = open('usage');
   try {
     inspector.handleInput('\x1b[F');
@@ -51,6 +51,36 @@ test('inspector reaches old runs, opens the selected agent, shows usage, resizes
     assert.ok(narrow.every(line => visibleWidth(line) <= 40));
     controller.abort(); usagePage.handleInput('\x1b'); assert.equal(actions.length, 2);
   } finally { inspector.dispose(); usagePage.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Tab cycles Agents, Usage and Activity; Activity shows summaries in flight, retrying with the error, and an agent count', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-activity-'));
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, refreshOnCreate: false });
+  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'test', model: 'test', thinking: 'high' }), () => '', async () => {}, () => {}, dir);
+  const now = Date.now();
+  let state: ReturnType<Memory['activity']> = { pending: 0, lastError: undefined, building: [], retrying: [] };
+  const fake = { activity: () => state, onChange: () => () => {} };
+  const inspector = new Inspector({ profile: 'personal', session: 'parent', children, usage: new UsageLedger(dir), memory: fake, page: 'agents',
+    rows: () => 40, redraw: () => {}, done: () => {}, color: (_tone, text) => text, context: () => undefined });
+  const title = () => inspector.render(100)[1].trim().split(/\s{2,}/)[0];
+  try {
+    assert.equal(title(), 'OptChat · personal · Agents');
+    inspector.handleInput('\t'); assert.equal(title(), 'OptChat · personal · Usage');
+    inspector.handleInput('\t'); assert.equal(title(), 'OptChat · personal · Activity');
+    assert.match(inspector.render(100).join('\n'), /Nothing running\./);
+    state = { pending: 14, lastError: '401 invalid x-api-key', building: [{ l: 0, i: 4096, started: now - 3_000 }, { l: 10, i: 3, started: now - 64_000 }],
+      retrying: [{ l: 1, i: 1024, in: 7_000 }] };
+    children.history.records.set('run', { id: 'run', task: 'review', cwd: dir, model: 'test', thinking: 'high', parentSession: 'parent', depth: 1, started: now, state: 'running', guidance: [] });
+    const page = inspector.render(100).map(l => l.trim());
+    assert.ok(page.includes('Summaries  2 in flight · 14 messages pending · 1 retrying'));
+    // Oldest first, the view line each summary will fill, then retrying parts with their countdown and the error behind them.
+    assert.deepEqual(page.filter(l => /^\d+\+\d+/.test(l)).map(l => l.split(/\s{2,}/)), [['3072+1024', 'level 10', '1m 4s'], ['4096+1', 'level 0', '3s'], ['2048+2', 'level 1', 'retry in 7s']]);
+    assert.ok(page.includes('Last error: 401 invalid x-api-key'));
+    assert.ok(page.includes('Agents     1 running  Tab → Agents'));
+    assert.doesNotMatch(page.join('\n'), /review/, 'the agent list stays on its own page');
+    inspector.handleInput('\t'); assert.equal(title(), 'OptChat · personal · Agents');
+  } finally { inspector.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('unfinished persisted runs recover as interrupted with undelivered guidance', () => {

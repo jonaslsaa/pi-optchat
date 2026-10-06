@@ -1,6 +1,7 @@
 import { matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type Focusable } from '@earendil-works/pi-tui';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { Children } from './agents.ts';
+import type { Memory } from './memory.ts';
 import { isActiveRun } from './runs.ts';
 import type { Usage } from '@earendil-works/pi-ai';
 import { ranges, summarizeUsage, type UsageLedger, type UsageRange, type UsageRole } from './usage.ts';
@@ -32,12 +33,16 @@ const spread = (left: string, right: string, width: number) => {
   const gap = width - visibleWidth(left) - visibleWidth(right);
   return gap >= 2 ? `${left}${' '.repeat(gap)}${right}` : left;
 };
-export type InspectorPage = 'agents' | 'usage';
+const pages = ['agents', 'usage', 'activity'] as const;
+export type InspectorPage = typeof pages[number];
+const pageNames: Record<InspectorPage, string> = { agents: 'Agents', usage: 'Usage', activity: 'Activity' };
+/** Tab order, wrapping around: Agents, Usage, Activity. */
+export const nextPage = (page: InspectorPage, delta = 1) => pages[(pages.indexOf(page) + delta + pages.length) % pages.length];
 /** Closing the panel either picks the subagent model or opens one agent's conversation. */
 export type InspectorAction = 'model' | { open: string };
 type Tone = 'accent' | 'muted' | 'dim' | 'error' | 'warning' | 'border';
 interface Options {
-  profile: string; session: string; children: Children; usage: UsageLedger; page: InspectorPage;
+  profile: string; session: string; children: Children; usage: UsageLedger; memory: Pick<Memory, 'activity' | 'onChange'>; page: InspectorPage;
   rows: () => number; redraw: () => void; done: (action?: InspectorAction) => void;
   color: (tone: Tone, text: string) => string;
   context: () => number | null | undefined;
@@ -56,12 +61,12 @@ export class Inspector implements Component, Focusable {
   private hintLines = 1;
   private range: UsageRange = 'This session';
   private ended = false;
-  private readonly unsubscribe: () => void;
+  private readonly unsubscribe: (() => void)[];
   private readonly timer: ReturnType<typeof setInterval>;
   constructor(private readonly options: Options) {
     this.page = options.page;
     this.selected = options.children.history.list()[0]?.id;
-    this.unsubscribe = options.children.subscribe(() => options.redraw());
+    this.unsubscribe = [options.children.subscribe(() => options.redraw()), options.memory.onChange(() => options.redraw())];
     this.timer = setInterval(() => { options.refreshUsage?.(); options.redraw(); }, 1000); this.timer.unref();
     options.signal?.addEventListener('abort', this.abort, { once: true });
     if (options.signal?.aborted) queueMicrotask(this.abort);
@@ -69,7 +74,7 @@ export class Inspector implements Component, Focusable {
   private readonly abort = () => this.finish();
   private finish(action?: InspectorAction) { if (!this.ended) { this.dispose(); this.options.done(action); } }
   dispose() {
-    this.ended = true; clearInterval(this.timer); this.unsubscribe(); this.options.signal?.removeEventListener('abort', this.abort);
+    this.ended = true; clearInterval(this.timer); this.unsubscribe.forEach(stop => stop()); this.options.signal?.removeEventListener('abort', this.abort);
   }
   invalidate() {}
   /** Body rows left after the rules, title, hint and spacing; the rest of the screen keeps the footer visible. */
@@ -83,8 +88,9 @@ export class Inspector implements Component, Focusable {
     if (this.ended) return;
     if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) return this.finish();
     if (data === 'u' || matchesKey(data, 'tab')) {
-      this.page = this.page === 'agents' ? 'usage' : 'agents'; this.scroll = 0;
-    } else if (this.page === 'usage') {
+      this.page = nextPage(this.page); this.scroll = 0;
+    } else if (this.page === 'activity') this.scrollInput(data);
+    else if (this.page === 'usage') {
       if (matchesKey(data, 'left') || matchesKey(data, 'right')) {
         const delta = matchesKey(data, 'left') ? -1 : 1;
         this.range = ranges[(ranges.indexOf(this.range) + delta + ranges.length) % ranges.length]; this.scroll = 0;
@@ -137,17 +143,38 @@ export class Inspector implements Component, Focusable {
     lines.push('', color('dim', 'Estimated at API prices, not your subscription bill.'), ...usage.warnings.map(w => color('warning', w)));
     return lines.flatMap(l => l ? wrapTextWithAnsi(l, width) : ['']);
   }
+  /** Background work: summaries being built or waiting to retry, and how many agents run (their list is one Tab away). */
+  private activityLines(width: number) {
+    const { memory, children, color } = this.options;
+    const { pending, lastError, building, retrying } = memory.activity(), now = Date.now();
+    const agents = children.history.list().filter(isActiveRun).length;
+    if (!building.length && !retrying.length && !pending && !agents) return [color('muted', 'Nothing running.')];
+    const rows = [...building.sort((a, b) => a.started - b.started).map(p => ({ p, time: elapsed(now - p.started), tone: undefined })),
+      ...retrying.map(p => ({ p, time: `retry in ${elapsed(p.in)}`, tone: 'warning' as const }))]
+      .map(({ p, time, tone }) => ({ cells: [`${p.i * 2 ** p.l}+${2 ** p.l}`, `level ${p.l}`, time], tone }));
+    const widths = [0, 1].map(c => Math.max(...rows.map(r => r.cells[c].length)));
+    const headline = [`${building.length} in flight`, `${count(pending)} ${pending === 1 ? 'message' : 'messages'} pending`, ...retrying.length ? [`${retrying.length} retrying`] : []];
+    const lines = [`${color('muted', 'Summaries')}  ${headline.join(' · ')}`, ''];
+    for (const { cells: [line, level, time], tone } of rows) {
+      const text = `  ${line.padEnd(widths[0])}  ${level.padEnd(widths[1])}  ${time}`;
+      lines.push(tone ? color(tone, text) : text);
+    }
+    if (retrying.length && lastError) lines.push(`  ${color('error', `Last error: ${oneLine(lastError)}`)}`);
+    if (rows.length) lines.push('');
+    lines.push(`${color('muted', 'Agents'.padEnd('Summaries'.length))}  ${agents} running  ${color('dim', 'Tab → Agents')}`);
+    return lines.flatMap(l => l ? wrapTextWithAnsi(l, width) : ['']);
+  }
   render(width: number): string[] {
     const { color, children, profile } = this.options;
     const inner = Math.max(1, width - 2);
-    let title = `OptChat · ${profile} · ${this.page === 'usage' ? 'Usage' : 'Agents'}`;
+    let title = `OptChat · ${profile} · ${pageNames[this.page]}`;
     let info: string, body: string[], hint: string;
-    if (this.page === 'usage') {
-      const lines = this.usageLines(inner); this.lineCount = lines.length;
+    if (this.page !== 'agents') {
+      const lines = this.page === 'usage' ? this.usageLines(inner) : this.activityLines(inner); this.lineCount = lines.length;
       this.scroll = Math.max(0, Math.min(this.scroll, lines.length - this.height));
       body = lines.slice(this.scroll, this.scroll + this.height);
-      info = `${this.scroll + 1}–${Math.min(this.scroll + this.height, lines.length)} / ${lines.length}`;
-      hint = '←→ period · ↑↓ scroll · Tab agents · Esc close';
+      info = this.page === 'usage' || lines.length > this.height ? `${this.scroll + 1}–${Math.min(this.scroll + this.height, lines.length)} / ${lines.length}` : '';
+      hint = this.page === 'usage' ? '←→ period · ↑↓ scroll · Tab activity · Esc close' : '↑↓ scroll · Tab agents · Esc close';
     } else {
       const list = children.history.list();
       if (!this.selected) this.selected = list[0]?.id;

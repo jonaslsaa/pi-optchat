@@ -381,7 +381,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (importing) throw new Error('Close the import dialog before opening the inspector.');
       inspectorController = controller;
       const signal = inspectorController.signal;
-      const action = await showInspector(ctx, { profile: a.name, session: ctx.sessionManager.getSessionId(), children: a.children, usage: a.usage, page, signal,
+      const action = await showInspector(ctx, { profile: a.name, session: ctx.sessionManager.getSessionId(), children: a.children, usage: a.usage, memory: a.memory, page, signal,
         refreshUsage: () => { collectUsage(ctx); try { a.children.collectUsage(); } catch (error) { ctx.ui.notify(`Could not save child usage: ${errorText(error)}`, 'error'); } },
       });
       if (signal.aborted) return;
@@ -390,7 +390,7 @@ export default function optchat(pi: ExtensionAPI) {
     } catch (error) { ctx.ui.notify(errorText(error), 'error'); }
     finally { if (inspectorController === controller) inspectorController = undefined; }
   };
-  pi.registerShortcut(shortcut, { description: 'Inspect OptChat agents and usage', handler: ctx => inspect(ctx, 'agents') });
+  pi.registerShortcut(shortcut, { description: 'Inspect OptChat agents, usage and background activity', handler: ctx => inspect(ctx, 'agents') });
   const command = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
     if (remote) { ctx.ui.notify('Manage this profile in its original window. Here use /tell-main or /complete.', 'info'); return; }
     if (importing) throw new Error('Close the import dialog before changing profile settings.');
@@ -398,7 +398,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (!action) {
       const a = active;
       const info = a ? `${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending\nCompactor: ${a.config.compactor.model} (${a.config.compactor.thinking})\nAgents: ${a.config.subagent.model} (${a.config.subagent.thinking})\n${a.memory.lastError ?? ''}` : 'No active profile';
-      action = await ctx.ui.select(`OptChat\n${info}`, ['profile', 'settings', 'model', 'agents', 'usage', 'instructions', 'browse', 'import']) ?? '';
+      action = await ctx.ui.select(`OptChat\n${info}`, ['profile', 'settings', 'model', 'agents', 'usage', 'activity', 'instructions', 'browse', 'import']) ?? '';
     }
     if (action === 'import') {
       const a = required();
@@ -456,7 +456,7 @@ export default function optchat(pi: ExtensionAPI) {
     }
     if (action === 'model') return pickModel(ctx, 'compactor');
     if (action === 'agents model') return pickModel(ctx, 'subagent');
-    if (action === 'agents' || action === 'usage') return inspect(ctx, action);
+    if (action === 'agents' || action === 'usage' || action === 'activity') return inspect(ctx, action);
     if (action === 'instructions') {
       const a = required();
       const edited = await ctx.ui.editor(`${a.name} · AGENTS.md`, instructions(a.dir));
@@ -468,7 +468,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (ctx.hasUI) execFile(process.platform === 'darwin' ? 'open' : 'xdg-open', [file], error => { if (error) ctx.ui.notify(`Open ${file}`, 'info'); });
       ctx.ui.notify(file, 'info'); return;
     }
-    if (action) throw new Error('Use /optchat [profile|settings|model|agents|usage|instructions|browse|import].');
+    if (action) throw new Error('Use /optchat [profile|settings|model|agents|usage|activity|instructions|browse|import].');
   };
   pi.registerCommand('complete', { description: 'End this connected conversation and hand off to the main agent', handler: async (_args, ctx) => {
     if (!remote) { ctx.ui.notify('/complete is for connected subagent windows.', 'info'); return; }
@@ -479,7 +479,7 @@ export default function optchat(pi: ExtensionAPI) {
     try { await remote.tell(args); } catch (error) { ctx.ui.notify(errorText(error), 'error'); }
   } });
   pi.registerCommand('optchat', { description: 'OptChat profiles, settings, models, agents, instructions, memory browser, and imports',
-    getArgumentCompletions: prefix => ['profile', 'settings', 'model', 'agents', 'agents model', 'usage', 'instructions', 'browse', 'import'].filter(s => s.startsWith(prefix)).map(value => ({ value, label: value })),
+    getArgumentCompletions: prefix => ['profile', 'settings', 'model', 'agents', 'agents model', 'usage', 'activity', 'instructions', 'browse', 'import'].filter(s => s.startsWith(prefix)).map(value => ({ value, label: value })),
     handler: async (args, ctx) => { try { await command(args, ctx); } catch (error) { ctx.ui.notify(errorText(error), 'error'); } },
   });
 }
