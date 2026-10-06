@@ -274,9 +274,9 @@ export default function optchat(pi: ExtensionAPI) {
       if (fault) throw new Error(fault);
       if (view === undefined) {
         ctx.ui.setWorkingMessage('Waiting for OptChat summaries…');
-        await a.memory.settle(ctx.signal);
+        try { await a.memory.settle(ctx.signal); } finally { ctx.ui.setWorkingMessage(); }
         view = a.memory.render(); // Capture old history before logging the new input.
-        flush(); ctx.ui.setWorkingMessage();
+        flush();
       }
       return { messages: buildContext(event.messages, run, view, prompt, previous) };
     } catch (error) {
