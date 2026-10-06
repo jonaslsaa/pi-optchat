@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -66,6 +66,15 @@ export function checkSocketPath(path: string) {
   if (length > SOCKET_PATH_LIMIT) throw new Error(`Cannot listen on the profile socket: its path is ${length} bytes, over this system's limit of ${SOCKET_PATH_LIMIT}. Set OPTCHAT_HOME to a shorter directory: ${path}`);
 }
 
+/** A socket that may be replaced; a file that only shares its name is refused, never deleted. */
+function existingSocket(path: string) {
+  let stat; try { stat = lstatSync(path); } catch { return undefined; }
+  if (!stat.isSocket()) throw new Error(`${path} is not an OptChat socket. Move it out of the profile and try again.`);
+  return stat;
+}
+/** Removes a dead socket left by a previous owner. */
+export function removeStaleSocket(path: string) { if (existingSocket(path)) unlinkSync(path); }
+
 /** OS-owned socket lifetime, no timeout-based stealing of a busy profile. */
 export async function lockProfile(dir: string, description: string) {
   const socketPath = profileSocket(dir); checkSocketPath(socketPath);
@@ -78,7 +87,8 @@ export async function lockProfile(dir: string, description: string) {
   try { await listen(); }
   catch (error) {
     if (!(error instanceof Error) || !('code' in error) || error.code !== 'EADDRINUSE') throw error;
-    const before = statSync(socketPath);
+    const before = existingSocket(socketPath);
+    if (!before) throw new Error('Profile lock changed; try again.');
     const owner = await new Promise<string | undefined>((resolve, reject) => {
       const socket = createConnection(socketPath); let message = '';
       socket.setTimeout(1500, () => { socket.destroy(); reject(new Error('Profile lock did not respond; refusing to steal it.')); });

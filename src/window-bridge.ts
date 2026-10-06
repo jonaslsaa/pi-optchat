@@ -1,9 +1,9 @@
-import { chmodSync, existsSync, unlinkSync } from 'node:fs';
+import { chmodSync } from 'node:fs';
 import { createConnection, createServer, type Socket } from 'node:net';
 import type { Children } from './agents.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './cache.ts';
-import { checkSocketPath, profileSocket } from './profiles.ts';
+import { checkSocketPath, profileSocket, removeStaleSocket } from './profiles.ts';
 import { textContent } from './transcript.ts';
 import { isActiveRun } from './runs.ts';
 
@@ -84,7 +84,7 @@ function wire(socket: Socket, receive: (frame: Frame) => void) {
 export async function serveWindows(directory: string, children: Children, available: () => boolean,
   report: (text: string) => Promise<void>) {
   const path = profileSocket(directory, 'windows'); checkSocketPath(path);
-  if (existsSync(path)) unlinkSync(path); // A previous owner can no longer hold the profile lock.
+  removeStaleSocket(path); // A previous owner can no longer hold the profile lock.
   const connections = new Set<Socket>();
   const work = new Set<Promise<void>>();
   let closing = false;

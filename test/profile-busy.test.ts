@@ -1,6 +1,6 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -120,6 +120,15 @@ test('two Pis with different TMPDIRs still share one profile lock', async () => 
     if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp;
     for (const path of [dir, ...temps]) rmSync(path, { recursive: true, force: true });
   }
+});
+
+test('a regular file named like the lock socket is refused, not deleted', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-lock-'));
+  try {
+    writeFileSync(profileSocket(dir), 'notes');
+    await assert.rejects(lockProfile(dir, 'holder'), /is not an OptChat socket/);
+    assert.equal(readFileSync(profileSocket(dir), 'utf8'), 'notes');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('a socket path over the system limit names OPTCHAT_HOME and its length without binding a truncated socket, and one at the limit locks', async () => {
