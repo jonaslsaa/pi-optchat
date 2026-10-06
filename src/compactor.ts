@@ -7,8 +7,8 @@ import { cachePayload, splitView } from './cache.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
-const scaleBase = 'user: Keep work and personal memory separate; use a binary summary tree and inspect original messages before acting. talk: Implemented the append-only log with durable writes and a stable view. echo: Checked caching, chronological summaries, cancellation, and profile locks. user: Main agent uses Opus; compactor uses Sonnet at medium effort. work: Worker completed the parser; tests cover invalid records and repeated imports. talk: The browser opens original messages, preserving dates and sources.';
-export const SCALE = scaleBase.padEnd(NODE, '.').slice(0, NODE);
+/** A realistic summary line of exactly NODE bytes, on a topic no real chat shares so its wording can't leak into summaries. */
+export const SCALE = 'user: Plan the Lisbon trip for 14-18 May: four adults, one in a wheelchair, 2400 EUR budget, no flights before 09:00. talk: Suggested Baixa; skip tram 28 (not step-free). tool: searched TAP, easyJet fares; echo: TAP TP1205 at 08:40 (too early), easyJet U27652 at 11:15 is 162 EUR each. user: "Book easyJet; step-free rooms matter more than a view." work: [4c1e9a20] Casa do Rio has two step-free rooms at 138 EUR/night, free cancellation to 10 May, held to 2 May. talk: Asked about a Sintra day trip, unanswered.';
 /** The model is asked for 512 bytes; a small overshoot costs less view space than a retry costs money. */
 export const ACCEPTED = NODE * 1.25;
 const WARM_MS = 4 * 60_000; // Anthropic's short cache lives 5 minutes from its last use.

@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
-import { createCompressor } from '../src/compactor.ts';
+import { createCompressor, SCALE } from '../src/compactor.ts';
+import { bytes, NODE } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 
 /** A fake model whose first reply is `first` bytes long and whose retries fit. */
@@ -34,4 +35,9 @@ async function attempts(first: number) {
 test('a summary up to 640 bytes is kept; one over 640 is retried', async () => {
   assert.deepEqual(await attempts(640), { calls: 1, bytes: 640 });
   assert.deepEqual(await attempts(641), { calls: 2, bytes: 400 });
+});
+
+test('the size example the compactor is shown is a real line of exactly NODE bytes, not padding', () => {
+  assert.equal(bytes(SCALE), NODE);
+  assert.doesNotMatch(SCALE, /([^\w\s])\1\1/);
 });
