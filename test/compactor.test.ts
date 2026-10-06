@@ -64,6 +64,26 @@ test('parallel calls on a cold view wait until one call has started answering, a
   await warm;
 });
 
+test('the compactor asks OpenAI to keep reasoning across turns', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-compactor-'));
+  const sent: unknown[] = [];
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-responses',
+    models: [{ id: 'compactor', name: 'Synthetic compactor', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1000 }],
+    streamSimple(model, _context, options) {
+      const stream = createAssistantMessageEventStream();
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'summary' }], api: model.api, provider: model.provider,
+        model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+      void Promise.resolve(options?.onPayload?.({ reasoning: { effort: 'low' } }, model)).then(payload => { sent.push(payload); stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
+      return stream;
+    },
+  });
+  const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'low' }));
+  await compress({ context: '<chat>\n</chat>', source: 'x'.repeat(600), merge: false }, new AbortController().signal);
+  assert.deepEqual(sent, [{ reasoning: { effort: 'low', context: 'all_turns' } }]);
+});
+
 test('a failing primer releases the waiting calls instead of hanging them', { timeout: 5000 }, async () => {
   const { calls, run, settle } = await setup();
   const replies = ['a', 'b', 'c'].map(source => run(source).catch((error: Error) => error.message));

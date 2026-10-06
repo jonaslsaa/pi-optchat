@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Memory, appendJson, cap, CAP, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
 import { lockProfile } from '../src/profiles.ts';
-import { splitView, cachePayload } from '../src/cache.ts';
+import { splitView, cachePayload, cacheFor } from '../src/cache.ts';
 import { logMessage, buildContext, boundedMessage } from '../src/transcript.ts';
 import { Inbox } from '../src/inbox.ts';
 import type { ToolResultMessage } from '@earendil-works/pi-ai';
@@ -199,6 +199,24 @@ test('stable cache cuts preserve every character and cap marks at four', () => {
     assert.equal((output.match(/cache_control/g) ?? []).length, 4, quoted ? 'a quoted closing tag keeps all marks' : 'plain view');
     assert.equal(payload.messages[0].content.map(b => b.text).join(''), view + 'new question');
   }
+});
+
+test('OpenAI requests keep reasoning across turns and send the view unchanged', () => {
+  const view = '<chat>\n' + '0+1|summary of a decision\n'.repeat(5000) + '</chat>';
+  for (const api of ['openai-responses', 'openai-codex-responses', 'azure-openai-responses']) {
+    const payload = { instructions: 'system', reasoning: { effort: 'high' },
+      input: [{ role: 'user', content: [{ type: 'input_text', text: view }, { type: 'input_text', text: 'new question' }] }] };
+    cacheFor(api, payload);
+    assert.deepEqual(payload.reasoning, { effort: 'high', context: 'all_turns' }, api);
+    assert.equal(payload.input[0].content.map(b => b.text).join(''), view + 'new question', 'the view is not split or marked');
+    assert.doesNotMatch(JSON.stringify(payload), /prompt_cache_breakpoint/);
+  }
+  const plain: Record<string, unknown> = { input: [] };
+  assert.equal(cacheFor('openai-responses', plain), plain);
+  assert.equal(plain.reasoning, undefined, 'a request without reasoning gets none');
+  const other = { reasoning: { effort: 'high' } };
+  assert.equal(cacheFor('google-generative-ai', other), other);
+  assert.deepEqual(other.reasoning, { effort: 'high' });
 });
 
 test('next turn excludes old conversation; current tool loop and reasoning remain verbatim', async () => {

@@ -12,7 +12,7 @@ The source remains upstream rather than duplicating the full article here. Its f
 
 - `src/memory.ts`: append-only log, binary summary tree, compression scheduling, bounded view, zoom/date.
 - `src/compactor.ts`: contextual compression and size retries.
-- `src/cache.ts`: stable Anthropic cache boundaries.
+- `src/cache.ts`: stable Anthropic cache boundaries, and `reasoning.context = all_turns` on OpenAI Responses requests.
 - `src/transcript.ts`: fresh context per parent run, current-run tool loop retained. The previous completed exchange is also retained in full text (left out if over 16,000 bytes by default), an intentional addition to the summary-only recipe for conversational continuity.
 - `src/agents.ts`: asynchronous Pi SDK children and automatic completion reports.
 - `src/settings.ts`: per-profile settings for the departures from the recipe. Defaults are the recipe's (one subagent level), except the previous exchange (on) and the summary size tolerance (640 bytes, against the recipe's strict 512).

@@ -10,7 +10,7 @@ import { SUBAGENT, VIEW_DOC } from './prompts.ts';
 import { memoryTools } from './tools.ts';
 import { type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
-import { cachePayload } from './cache.ts';
+import { cacheFor } from './cache.ts';
 import { RunHistory, transition, sessionMessages, type RunInfo, type RunState, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { textContent } from './transcript.ts';
@@ -212,7 +212,7 @@ export class Children {
           event.systemPromptOptions.customPrompt = `${SUBAGENT}\n\n${VIEW_DOC}`;
           event.systemPromptOptions.sections.instructions = instructions;
         });
-        pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
+        pi.on('before_provider_request', (event, ctx) => cacheFor(ctx.model?.api, event.payload));
       }],
     });
     await loader.reload();

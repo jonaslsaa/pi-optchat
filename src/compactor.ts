@@ -3,7 +3,7 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { COMPACT } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
-import { cachePayload, splitView } from './cache.ts';
+import { cacheFor, splitView } from './cache.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
 
@@ -56,7 +56,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       try {
         const stream = registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
           reasoning: selected.thinking === 'off' ? undefined : selected.thinking, signal, cacheRetention: 'short',
-          onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload) : payload,
+          onPayload: payload => cacheFor(model.api, payload),
         });
         // The cache entry is usable once the model starts answering.
         for await (const event of stream) if (event.type !== 'start') { warmed(event.type !== 'error'); break; }

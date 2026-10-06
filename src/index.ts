@@ -10,7 +10,7 @@ import { Memory } from './memory.ts';
 import { createCompressor } from './compactor.ts';
 import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, THINKING, type ProfileConfig } from './profiles.ts';
 import { MASTER, VIEW_DOC } from './prompts.ts';
-import { cachePayload, record } from './cache.ts';
+import { cacheFor, record } from './cache.ts';
 import { asUser, boundedMessage, buildContext, logMessage, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer } from './report-message.ts';
 import { memoryTools, result } from './tools.ts';
@@ -292,7 +292,7 @@ export default function optchat(pi: ExtensionAPI) {
       return { messages: [{ role: 'system', content: 'OptChat context unavailable. Stop.', timestamp: 0 }] };
     }
   });
-  pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
+  pi.on('before_provider_request', (event, ctx) => cacheFor(ctx.model?.api, event.payload));
   pi.on('cache_warming_decision', () => ({ action: 'stop' }));
   pi.on('session_before_compact', (_event, ctx) => {
     ctx.ui.notify('OptChat manages history between turns. Pi compaction is disabled; an exceptionally long single run may require stopping and continuing in a new turn.', 'info');
