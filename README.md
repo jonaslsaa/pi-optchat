@@ -242,12 +242,12 @@ npm run test:live  # paid Anthropic calls on synthetic data in a disposable prof
 
 Pi's [package directory](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md) lists npm packages with the `pi-package` keyword, which the manifest already has. GitHub alone is not enough.
 
-```sh
-npm ci --ignore-scripts
-npm run check && npm test
-npm pack --dry-run
-npm publish --access public
-```
+Publishing a GitHub release publishes to npm. The [Publish workflow](.github/workflows/publish.yml) uses npm trusted publishing, so no token or `npm login` is involved:
+
+1. Merge a PR that bumps `version` in `package.json`.
+2. `gh release create vX.Y.Z --target main --generate-notes`
+
+The workflow checks that the tag matches `package.json`, runs the type check and tests, and publishes with provenance. It skips versions already on npm. To retry a tag, run it by hand: `gh workflow run publish.yml -f tag=vX.Y.Z`.
 
 ## Credits and license
 

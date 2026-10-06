@@ -1,0 +1,57 @@
+# Publishes to npm with trusted publishing (OIDC): no token is stored anywhere.
+# npm only accepts it from this exact filename, as configured on npmjs.com.
+name: Publish
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, e.g. v0.6.8
+        required: true
+permissions:
+  contents: read
+  id-token: write
+concurrency: publish
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      # Node 24 ships npm 11, which trusted publishing needs (11.5.1 or later).
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Tag matches package.json
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match package.json version $version"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Skip if already on npm
+        id: published
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/pi-optchat/$VERSION")
+          case $status in
+            200)
+              echo "::notice::pi-optchat@$VERSION is already on npm, nothing to publish"
+              echo "done=true" >> "$GITHUB_OUTPUT" ;;
+            404) ;;
+            *) echo "::error::npm registry answered $status"; exit 1 ;;
+          esac
+      - if: steps.published.outputs.done != 'true'
+        run: npm ci --ignore-scripts
+      - if: steps.published.outputs.done != 'true'
+        run: npm run check
+      - if: steps.published.outputs.done != 'true'
+        run: npm test
+      - if: steps.published.outputs.done != 'true'
+        run: npm publish --access public
