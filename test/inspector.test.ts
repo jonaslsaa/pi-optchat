@@ -22,6 +22,9 @@ test('inspector reaches old runs, opens the selected agent, shows usage, resizes
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'test', model: 'test', thinking: 'high' }), () => '', async () => {}, () => {}, dir);
   for (let i = 0; i < 100; i++) children.history.records.set(`run-${i}`, { id: `run-${i}`, task: `Task ${i} ${'long title '.repeat(20)}`, cwd: dir, model: 'test', thinking: 'high',
     parentSession: 'parent', depth: 1, started: 1000 - i, ended: 2000, state: 'completed', guidance: [] });
+  const spend = (role: 'main' | 'compactor', model: string, cost: number, provider?: string) => usage.add({ date: new Date().toISOString(), role, model, provider, session: 'parent',
+    usage: { input: 0, output: 164_000, cacheRead: 900, cacheWrite: 100, totalTokens: 165_000, cost: { input: 0, output: cost, cacheRead: 0, cacheWrite: 0, total: cost } } });
+  spend('main', 'claude-opus-5-5', 20.5, 'anthropic'); spend('compactor', 'claude-sonnet-5-5', 60, 'anthropic'); spend('compactor', 'claude-sonnet-5-5', 3.35);
   let rows = 24;
   const actions: (InspectorAction | undefined)[] = [];
   const open = (page: 'agents' | 'usage') => new Inspector({ profile: 'personal', session: 'parent', children, usage, page, rows: () => rows, redraw: () => {}, done: action => { actions.push(action); }, color: (_tone, text) => text, context: () => 123, signal: controller.signal });
@@ -32,8 +35,13 @@ test('inspector reaches old runs, opens the selected agent, shows usage, resizes
     assert.match(inspector.render(100).join('\n'), /Enter open/);
     inspector.handleInput('\r');
     assert.deepEqual(actions, [{ open: 'run-99' }]);
+    const table = usagePage.render(100).filter(l => /main|compactor/.test(l));
+    // A provider-less older record shares its model's row; costs line up on the right.
+    assert.deepEqual(table.map(l => l.trim().split(/\s+/)), [['main', 'claude-opus-5-5', '$20.50', '24%', '164k', '90%'], ['compactor', 'claude-sonnet-5-5', '$63.35', '76%', '328k', '90%']]);
+    assert.equal(table[0].indexOf('$20.50') + 6, table[1].indexOf('$63.35') + 6);
+    assert.doesNotMatch(usagePage.render(40).join('\n'), /claude-/);
     usagePage.handleInput('\x1b[C');
-    assert.match(usagePage.render(100).join('\n'), /Last hour/);
+    assert.match(usagePage.render(100).join('\n'), /\[Last.hour\]/);
     rows = 16;
     const narrow = usagePage.render(40);
     assert.ok(narrow.length <= Math.floor(rows * 0.9));
