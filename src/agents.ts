@@ -300,11 +300,12 @@ export class Children {
       while (info.state !== 'stopping') {
         if (live.interruption) {
           const guidance = live.interruption.filter(g => g.state === 'queued');
-          live.interruption = undefined;
           // Read Pi's queue only once a rebuild has landed, and take the interrupt's messages off it so they arrive once.
+          // Until this is done, tell() holds new messages in pendingGuidance, where the turn below or a pause picks them up.
           await live.requeueing;
           const texts = new Set(guidance.map(g => g.text));
           await this.requeue(live, session.clearQueue().steering.filter(text => !texts.has(text)));
+          live.interruption = undefined;
           if (!guidance.length) {
             // Nothing to hand over: the run waits for its next message instead of ending, and whoever waits on its report hears why.
             if (transition(info, 'paused')) {
@@ -314,8 +315,9 @@ export class Children {
             }
             continue;
           }
+          if (!transition(info, 'running')) continue; // A stop during the cleanup wins.
           for (const g of guidance) g.state = 'delivered';
-          transition(info, 'running'); this.save(info);
+          this.save(info);
           await session.prompt(`Interrupted by the user:\n\n${guidance.map(g => g.text).join('\n\n')}`);
           continue;
         }
@@ -402,8 +404,8 @@ export class Children {
     live.info.guidance.push(guidance); this.save(live.info);
     try {
       await live.requeueing; // Keeps the queue in the order messages were sent.
-      if (live.info.state === 'running') await live.session.steer(text);
-      else { live.pendingGuidance.push(text); live.wake?.(); } // Waiting or paused: this message starts its next turn.
+      if (live.info.state === 'running' && !live.interruption) await live.session.steer(text);
+      else { live.pendingGuidance.push(text); live.wake?.(); } // Waiting, paused or being interrupted: this message starts its next turn.
     }
     catch (error) { guidance.state = 'undelivered'; this.save(live.info); throw error; }
     if (guidance.state === 'undelivered') throw new Error(`${id} finished before it read the message. Tell it again to resume it.`);

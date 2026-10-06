@@ -509,6 +509,29 @@ test('interrupting a child aborts its step and continues with the queued message
   } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a message sent while an interrupt is still settling is not lost; a stop during that time wins', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-interrupt-race-'));
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports);
+  try {
+    const [late, stopped] = await children.spawn([{ task: 'late' }, { task: 'stopped' }], dir);
+    await until(() => asked.length === 2);
+    const interrupting = children.interrupt(late);
+    await children.tell(late, 'Late.', 'user');
+    assert.equal(await interrupting, 'paused');
+    await until(() => children.history.records.get(late)?.state === 'completed');
+    assert.equal(reports.at(-1), `[${late}] Now doing: Late.`, 'the late message resumed it');
+    // Ctrl+X lands while the interrupt is clearing Pi's queue.
+    await children.tell(stopped, 'Use the cache.', 'user');
+    const session = children.live(stopped)!.session, clear = session.clearQueue.bind(session);
+    session.clearQueue = () => { void children.stop(stopped); return clear(); };
+    await children.interrupt(stopped);
+    await until(() => children.history.records.get(stopped)?.state === 'stopped');
+    assert.ok(!asked.flat().some(text => text.startsWith('Interrupted by the user:')), 'no turn starts after the stop');
+    assert.equal(children.history.records.get(stopped)?.guidance[0].state, 'undelivered');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('the user can take their newest queued message back; the rest stays queued in order', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-withdraw-'));
   const { children, asked } = await busyChildren(dir, []);
