@@ -127,7 +127,7 @@ test('with Group subagent reports off, real SDK children stream, deliver indepen
 test('one spawn\'s reports arrive together once its last child finishes, also to a parent subagent', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-group-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
-  const reports: string[] = [], releases = new Map<string, () => void>();
+  const reports: string[] = [], counts: (number | undefined)[] = [], held: string[][] = [], releases = new Map<string, () => void>();
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider('optchat-test', {
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
@@ -153,25 +153,29 @@ test('one spawn\'s reports arrive together once its last child finishes, also to
   const settings: Partial<Settings> = nested();
   let opening = () => { settings.groupReports = false; };
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, () => {}, dir, { settings: () => settings, createSession: options => {
+    async (text, options) => { reports.push(text); counts.push(options?.count); }, () => {}, dir, { settings: () => settings, hold: (_batch, texts) => held.push(texts), createSession: options => {
       opening(); opening = () => {};
       return createAgentSession({ ...options, modelRuntime: runtime });
     } });
   const state = (id: string) => children.history.records.get(id)?.state;
   try {
     const answer = await children.start([{ task: 'a' }, { task: 'b' }, { task: 'stopped' }], dir);
-    assert.match(answer, /arrive together/, 'the answer describes the mode the spawn started with');
     delete settings.groupReports;
-    const [a, b, stopped] = /^Started: (.+?)\./.exec(answer)![1].split(', ');
     await until(() => releases.size === 3);
+    assert.match(answer, /arrive together/, 'the answer describes the mode the spawn started with');
+    const [a, b, stopped] = /^Started: (.+?)\./.exec(answer)![1].split(', ');
     await children.stop(stopped);
     releases.get('a')!();
     await until(() => state(a) === 'completed' && state(stopped) === 'stopped');
     await new Promise(r => setTimeout(r, 50));
     assert.deepEqual(reports, [], 'nothing is delivered while a sibling still runs');
+    assert.deepEqual(held.at(-1), [`[${a}] a done`, `[${stopped}] stopped done`], 'finished reports are journaled at once, so a crash cannot lose them');
     releases.get('b')!();
     await until(() => !children.active);
     assert.deepEqual(reports, [`[${a}] a done\n\n[${b}] b done\n\n[${stopped}] stopped done`], 'one message, in spawn order');
+    assert.deepEqual(counts, [3]);
+    assert.deepEqual(held.at(-1), [], 'delivered, the held reports leave the journal');
+    const journaled = held.length;
 
     const [boss] = await children.spawn([{ task: 'boss' }], dir);
     const [x, y] = await children.spawn([{ task: 'x' }, { task: 'y' }], dir, undefined, boss);
@@ -183,6 +187,7 @@ test('one spawn\'s reports arrive together once its last child finishes, also to
     releases.get('y')!();
     await until(() => !children.active);
     assert.equal(reports.at(-1), `[${boss}] boss heard: [${x}] x done\n\n[${y}] y done`, 'the parent is woken once, with both reports');
+    assert.equal(held.length, journaled, 'a parent subagent holds its children\'s reports itself; they would not outlive it');
   } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

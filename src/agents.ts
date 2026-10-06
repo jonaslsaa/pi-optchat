@@ -29,6 +29,8 @@ export interface LiveRun {
 interface Options { parentSession?: string; usage?: UsageLedger; createSession?: typeof createAgentSession;
   /** Names of the built-in extensions the main session loaded (see `loadedBuiltins`). */
   builtins?: () => Iterable<string>;
+  /** Journals the reports a main-agent spawn has so far while its other children still run (none: the batch was delivered), so a crash cannot lose them. */
+  hold?: (batch: string, texts: string[]) => void;
   /** Read on every spawn, so a changed profile setting applies to the next one. Missing settings take their defaults. */
   settings?: () => Partial<Settings>;
   summarizeHandoff?: (run: RunInfo, messages: AgentMessage[], descendants?: HandoffEvidence[]) => Promise<string> }
@@ -74,7 +76,7 @@ export class Children {
   private readonly completions = new Set<Promise<void>>();
   constructor(private readonly memory: Memory, private readonly registry: ModelRegistry,
     private readonly choice: () => ModelChoice, private readonly instructions: () => string,
-    private readonly report: (text: string, once?: boolean) => Promise<void>, private readonly warn: (text: string) => void,
+    private readonly report: (text: string, options?: { once?: boolean; count?: number }) => Promise<void>, private readonly warn: (text: string) => void,
     private readonly profileDirectory = memory.directory, private readonly options: Options = {}) {
     this.history = new RunHistory(profileDirectory);
     for (const warning of this.history.warnings) warn(warning);
@@ -331,22 +333,25 @@ export class Children {
     try { this.save(info); } catch (error) { this.warn(`Could not save run metadata: ${String(error)}`); }
     let text = `[${info.id}] ${info.report}`;
     const batch = live.batch;
+    let count: number | undefined;
     if (batch) {
       batch.reports.set(info.id, text);
-      if (batch.reports.size < batch.ids.length) return;
-      text = batch.ids.map(id => batch.reports.get(id)).join('\n\n');
+      const texts = batch.ids.flatMap(id => batch.reports.get(id) ?? []);
+      if (texts.length < batch.ids.length) { if (!info.parentId) this.options.hold?.(batch.ids[0], texts); return; }
+      text = texts.join('\n\n'); count = texts.length;
     }
     if (info.parentId) {
       const parent = this.running.get(info.parentId);
       if (parent && parent.info.state !== 'stopping') { parent.pendingReports.push(text); this.changed(); }
       return;
     }
-    if (this.closing) { this.memory.append('user', text); return; }
-    try { await this.report(text); }
+    if (this.closing) this.memory.append('user', text);
+    else try { await this.report(text, { count }); }
     catch (error) {
       this.memory.append('user', text);
       this.warn(`Subagent report saved but could not wake the parent: ${String(error)}`);
     }
+    if (batch && batch.ids.length > 1) this.options.hold?.(batch.ids[0], []);
   }
   /** `caller` is the agent sending a manager message: undefined for the main agent, else the parent subagent's ID. */
   async tell(id: string, message: string, source: 'manager' | 'user' = 'manager', caller?: string) {
@@ -458,7 +463,7 @@ export class Children {
       handoff.text = `[${run.id}] Connected conversation ${handoff.reason === 'complete' ? 'completed by user' : `interrupted (${handoff.reason})`}. This describes the conversation ending, not proof that every task succeeded.\n${summary}\n${source}`;
       run.report = handoff.text; this.save(run);
     }
-    await this.report(handoff.text, true);
+    await this.report(handoff.text, { once: true });
     handoff.delivered = true; this.save(run);
   }
   async stop(id: string) {
