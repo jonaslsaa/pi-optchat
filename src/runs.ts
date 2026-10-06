@@ -26,7 +26,7 @@ const moves: Record<RunState, readonly RunState[]> = {
   // A finished run only takes the outcome of a connected handoff.
   completed: ['interrupted'], failed: ['completed', 'interrupted'], stopped: ['completed', 'interrupted'], interrupted: ['completed'],
 };
-/** Every run state change goes through here, so a late stop cannot rewrite a finished run. Returns whether the run moved. */
+/** Every run state change goes through here, so a late stop cannot rewrite a finished run. Returns whether the run is now in `to` (true for a repeat, so a second stop can still abort a child that ignored the first). */
 export function transition(run: RunInfo, to: RunState) {
   if (run.state !== to && !moves[run.state].includes(to)) return false;
   run.state = to; return true;
