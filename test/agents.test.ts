@@ -405,7 +405,7 @@ test('close() does not wait for a spawn that is still waiting for memory to be s
     memory.append('user', 'large message '.repeat(100));
     const refused = assert.rejects(children.spawn([{ task: 'quick' }], dir), /Memory wait cancelled/);
     await until(() => children.active);
-    const closed = await Promise.race([children.close().then(() => true), new Promise<boolean>(resolve => setTimeout(resolve, 2000, false))]);
+    const closed = await Promise.race([children.close().then(() => true), new Promise<boolean>(resolve => { setTimeout(resolve, 2000, false).unref(); })]);
     assert.ok(closed, 'close() is still waiting for the spawn');
     await memory.close();
     await refused;
