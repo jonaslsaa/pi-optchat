@@ -53,7 +53,7 @@ test('the last title is re-applied after Pi overwrites it, and a stale ctx is ig
   assert.deepEqual(written, ['π work', 'π work']);
 });
 
-test('the main window title follows the real Pi session: profile, working, running subagents, and restored after renames', async () => {
+test('the main window title follows the real Pi session: profile, working, running subagents, restored after renames, and cleared of working even when the status line fails', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-title-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
@@ -101,7 +101,9 @@ test('the main window title follows the real Pi session: profile, working, runni
     session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
       resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date', 'spawn'] })).session;
     const titles: string[] = [];
-    const uiContext: ExtensionUIContext = { ...session.extensionRunner.getUIContext(), setTitle: title => { titles.push(title); } };
+    let statusFails = false;
+    const uiContext: ExtensionUIContext = { ...session.extensionRunner.getUIContext(), setTitle: title => { titles.push(title); },
+      setStatus: () => { if (statusFails) throw new Error('status line failed'); } };
     await session.bindExtensions({ uiContext });
 
     assert.equal(titles[0], 'π fixture');
@@ -111,8 +113,10 @@ test('the main window title follows the real Pi session: profile, working, runni
     const running = session.prompt('Long task.');
     await held;
     assert.equal(titles.at(-1), '● π fixture');
+    statusFails = true;
     release(); await running; await session.agent.waitForIdle();
     await until(() => titles.at(-1) === 'π fixture');
+    statusFails = false;
 
     const before = titles.length;
     session.setSessionName('renamed'); // Pi retitles the tab on renames.

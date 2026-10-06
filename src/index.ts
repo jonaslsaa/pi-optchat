@@ -307,8 +307,8 @@ export default function optchat(pi: ExtensionAPI) {
     collectUsage(ctx);
     try { flush(); } catch (error) { fault = errorText(error); ctx.ui.notify(fault, 'error'); }
     if (runStarted) pi.appendEntry(RUN_BOUNDARY, { state: 'end' });
-    runStarted = false; status(ctx);
-    working = false; showTitle(ctx);
+    runStarted = false; working = false; showTitle(ctx);
+    status(ctx);
     if (active) {
       const dir = active.dir;
       checkpoints = checkpoints.then(() => checkpoint(dir)).catch(error => ctx.ui.notify(`Local checkpoint failed: ${errorText(error)}`, 'error'));
