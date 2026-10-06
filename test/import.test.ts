@@ -1,11 +1,12 @@
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { Memory, localDay, type Compressor } from '../src/memory.ts';
 import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
 import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate, chronological } from '../src/import/job.ts';
@@ -44,6 +45,32 @@ test('Claude imports user messages and final replies, omitting tool loops and re
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('Claude slash and shell commands stay as typed, with or without arguments, and their local output is dropped', async () => {
+  const dir = temp(), file = join(dir, 'claude.jsonl');
+  const user = (uuid: string, content: string) => ({ type: 'user', uuid, cwd: '/synthetic', timestamp: date, message: { role: 'user', content } });
+  const reply = (uuid: string, text: string) => ({ type: 'assistant', uuid, timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text }] } });
+  const raw = '<command-message>oreo-mode</command-message>\n<command-name>/oreo-mode</command-name>\n<command-args>ship the parser fix</command-args>';
+  lines(file, [
+    user('compact', '<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args></command-args>'),
+    user('stdout', '<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>'),
+    user('stderr', '<local-command-stderr>Unknown command</local-command-stderr>'),
+    user('shell', '<bash-input>git status</bash-input>'),
+    user('shell-out', '<bash-stdout>On branch main</bash-stdout><bash-stderr></bash-stderr>'),
+    user('skill', raw),
+    reply('a1', 'shipped'),
+    user('plain', 'what is next?'),
+    reply('a2', 'the docs'),
+  ]);
+  try {
+    const parsed = await readConversation(conversation('claude', file));
+    assert.deepEqual(parsed.entries.map(e => e.text.slice(e.text.indexOf(']\n') + 2)), ['/compact', '!git status', '/oreo-mode ship the parser fix', 'shipped', 'what is next?', 'the docs']);
+    assert.doesNotMatch(JSON.stringify(parsed.entries), /command-|bash-|Compacted|Unknown command|On branch/);
+    assert.equal(parsed.entries[2].receipt, `import:${createHash('sha256').update(JSON.stringify(['claude', 'conversation-1', 'skill', 'user', raw])).digest('hex')}`, 'the receipt still hashes the raw text');
+    const scan = await scanLocal('claude', [dir]);
+    assert.equal(scan.conversations[0].title, '/compact', 'the title is the command as typed, not its markup');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('Codex imports user messages and final answers once, excluding commentary, tools and agent traffic', async () => {
   const dir = temp(), file = join(dir, 'codex.jsonl');
   const row = (payload: unknown) => ({ type: 'response_item', timestamp: date, payload });
@@ -68,6 +95,35 @@ test('Codex imports user messages and final answers once, excluding commentary, 
     assert.match(parsed.entries[1].text, /ANSWER/);
     assert.equal(parsed.warnings.length, 1);
     assert.equal(new Set(parsed.entries.map(e => e.receipt)).size, 2);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+const codexFixture = new URL('./fixtures/codex-rollout.jsonl', import.meta.url).pathname;
+const receipt = (...identity: unknown[]) => `import:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+const body = (e: ImportedEntry) => e.text.slice(e.text.indexOf(']\n') + 2);
+
+test('Codex titles and entries skip the context Codex injects, and keep what the user typed, even in Codex\'s tag shapes', async () => {
+  const dir = temp();
+  writeFileSync(join(dir, 'rollout-2026-03-04T09-00-00.jsonl'), readFileSync(codexFixture));
+  try {
+    const scan = await scanLocal('codex', [dir]);
+    assert.equal(scan.conversations.length, 1);
+    const [c] = scan.conversations;
+    assert.deepEqual({ id: c.id, project: c.project, title: c.title, date: c.date },
+      { id: '0199c0de-1111-7222-8333-444455556666', project: '/home/dev/synthetic-app', title: 'Add a --dry-run flag to the sync command.', date: '2026-03-04T09:00:02.000Z' });
+    const parsed = await readConversation(c);
+    assert.deepEqual(parsed.entries.map(e => [e.kind, e.origin?.message, body(e)]), [
+      ['user', 'msg-1', 'Add a --dry-run flag to the sync command.'],
+      ['talk', 'msg-2', 'Added --dry-run to sync.'],
+      ['user', 'msg-3', 'Now document the flag in the README.'],
+      ['talk', 'msg-4', 'Documented --dry-run in the README.'],
+      ['user', 'msg-5', '<EXTERNAL_notes>my own notes</EXTERNAL_notes>'],
+    ]);
+    assert.doesNotMatch(JSON.stringify(parsed.entries), /AGENTS\.md|environment_context|external_repo|user_shell_command|<skill>|hook_prompt|codex_internal_context|turn_aborted|subagent_notification|SECRET|Reading the sync/);
+    assert.deepEqual(parsed.warnings, []);
+    const raw = '<environment_context>\n  <cwd>/home/dev/synthetic-app</cwd>\n</environment_context>\nNow document the flag in the README.';
+    assert.equal(parsed.entries[2].receipt, receipt('codex', c.id, 'msg-3', 'user', raw), 'the receipt still hashes the raw text');
+    assert.equal(parsed.entries[0].receipt, receipt('codex', c.id, 'msg-1', 'user', 'Add a --dry-run flag to the sync command.'));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -316,6 +372,7 @@ test('append activates only after complete indexing, retains original summaries,
     assert.deepEqual(activated.node({ l: 0, i: 0 }), original);
     assert.equal(activated.root[0].text, 'original exact message');
     assert.equal(activated.root[1].receipt, 'import:one');
+    assert.deepEqual(activated.root[1].origin, entry('one').origin);
     assert.match(activated.zoom(1, 1), /Imported one/);
     assert.deepEqual(deduplicate(activated.root, [entry('one')]), { added: [], skipped: 1 });
     assert.ok(existsSync(join(dir, 'main')));
@@ -351,13 +408,56 @@ test('discard leaves original memory active and a completed pointer swap can fin
     discardImport(dir); assert.equal(memoryDirectory(dir), dir); assert.equal(pendingImport(dir), undefined);
     const job = prepareImport(dir, old, [entry('keep')], 'append'); assert.ok(job);
     await runImport(dir, short, AbortSignal.timeout(5000));
-    // Simulate the durable pointer write succeeding immediately before journal removal crashed.
+    const staged = join(dir, job.target, 'staged.jsonl');
+    assert.ok(!existsSync(staged), 'an activated import keeps no second copy of its log');
+    // Simulate a crash right after the durable pointer write, before the staged plan and the journal were removed.
+    writeFileSync(staged, '');
     writeFileSync(join(dir, 'imports', 'pending.json'), JSON.stringify(job));
     await runImport(dir, short, AbortSignal.timeout(5000));
     assert.equal(pendingImport(dir), undefined);
+    assert.ok(!existsSync(staged));
     assert.equal(memoryDirectory(dir), join(dir, job.target));
     assert.ok(existsSync(join(dir, 'imports', `${job.id}.json`)));
   } finally { await old.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an import gives the compactor the same inputs as a live chat that sent the messages one at a time (recipe §10)', async () => {
+  // 300 lines of 500 bytes overflow the view, so merges run while later messages still wait to be summarized.
+  const dir = temp(), live = temp(), old = new Memory(dir, short);
+  const imported = Array.from({ length: 300 }, (_, i) => entry(`m${i}`, date, `${i} ${'imported detail '.repeat(40)}`));
+  const record = (calls: string[]) => async (input: Parameters<Compressor>[0]) => { calls.push(JSON.stringify([input.merge, input.historical, input.source, input.context])); return input.source.slice(0, 500); };
+  const fromImport: string[] = [], fromChat: string[] = [];
+  let chat: Memory | undefined;
+  try {
+    await old.close();
+    assert.ok(prepareImport(dir, old, imported, 'append'));
+    await runImport(dir, record(fromImport), AbortSignal.timeout(20000));
+    chat = new Memory(live, record(fromChat), () => {});
+    for (const e of imported) { chat.append(e.kind, e.text, e.date, e.receipt, e.origin); await chat.settle(AbortSignal.timeout(20000)); }
+    await chat.settle(AbortSignal.timeout(20000), true);
+    assert.ok(fromChat.some(call => call.startsWith('[true')), 'the view overflowed and merged');
+    assert.deepEqual(fromImport.sort(), fromChat.sort());
+  } finally { await chat?.close(); rmSync(dir, { recursive: true, force: true }); rmSync(live, { recursive: true, force: true }); }
+});
+
+test('a staged plan with an invalid entry, or missing lines, is refused before anything is written', async () => {
+  const dir = temp(), old = new Memory(dir, short);
+  try {
+    old.append('user', 'original'); await old.settle(undefined, true); await old.close();
+    const job = prepareImport(dir, old, [entry('a'), entry('b'), entry('c')], 'append'); assert.ok(job);
+    const staged = join(dir, job.target, 'staged.jsonl'), plan = readFileSync(staged, 'utf8'), lines = plan.split('\n').filter(Boolean);
+    const damaged = {
+      'a bad entry': plan.replace('"kind":"user","text":"Imported b"', '"kind":"bogus","text":"Imported b"'),
+      'a missing middle line': [lines[0], lines[1], lines[3]].join('\n') + '\n',
+      'a truncated tail': lines.slice(0, 3).join('\n') + '\n',
+    };
+    for (const [name, text] of Object.entries(damaged)) {
+      writeFileSync(staged, text);
+      await assert.rejects(runImport(dir, short, AbortSignal.timeout(5000)), /invalid/, name);
+      assert.equal(memoryDirectory(dir), dir);
+      assert.deepEqual(readdirSync(join(dir, job.target, 'main')), ['000-import.jsonl']);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('chronological rebuild keeps imported conversations and native turns together', () => {
