@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { Memory, localDay, type Compressor } from '../src/memory.ts';
-import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
+import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
 import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate, chronological } from '../src/import/job.ts';
 import { chooseImport, showProgress } from '../src/import/ui.ts';
 
@@ -391,4 +391,52 @@ test('preparation source dialog receives shutdown cancellation before staging an
     const task = chooseImport({ ui }, 'test', memory, 'fixture', controller.signal); controller.abort();
     assert.equal(await task, undefined); assert.equal(pendingImport(dir), undefined);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a time without a zone is UTC whatever the machine zone', () => {
+  const zone = process.env.TZ;
+  process.env.TZ = 'America/Sao_Paulo';
+  try {
+    assert.equal(timestamp('2026-01-02T12:00:00', 'x'), '2026-01-02T12:00:00.000Z');
+    assert.equal(timestamp('2026-01-02 12:00', 'x'), '2026-01-02T12:00:00.000Z');
+    assert.equal(timestamp('2026-01-02T12:00:00-03:00', 'x'), '2026-01-02T15:00:00.000Z');
+    assert.equal(timestamp(1767355200, 'x'), '2026-01-02T12:00:00.000Z');
+  } finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }
+});
+
+test('a number is seconds, or milliseconds when it is too large to be seconds', () => {
+  assert.equal(timestamp(1767261600.5, 'x'), '2026-01-01T10:00:00.500Z');
+  assert.equal(timestamp(1767261600123, 'x'), '2026-01-01T10:00:00.123Z');
+});
+
+test('an out-of-range or invalid time falls back without throwing', () => {
+  for (const bad of [1e20, -1e20, 1e16, NaN, Infinity, 'not a time', undefined, null]) assert.equal(timestamp(bad, 'fallback'), 'fallback');
+});
+
+test('a ChatGPT conversation with a very long chain of replies imports in order, and a parent cycle is still rejected', async () => {
+  const nodes = 20_000, mapping: Record<string, unknown> = {};
+  for (let i = nodes - 1; i >= 0; i--) mapping[`n${i}`] = { parent: i ? `n${i - 1}` : null,
+    message: { id: `m${i}`, author: { role: i % 2 ? 'assistant' : 'user' }, end_turn: true, content: { parts: [`message ${i}`] } } };
+  const chat = (exported: Record<string, unknown>) => ({ ...conversation('chatgpt', 'export.json'), exported });
+  const parsed = await readConversation(chat({ mapping, current_node: `n${nodes - 1}` }));
+  assert.deepEqual(parsed.entries.slice(0, 3).map(e => e.origin?.message), ['m0', 'm1', 'm2']);
+  const loop = { a: { parent: 'b', message: { author: { role: 'user' }, content: { parts: ['a'] } } }, b: { parent: 'a', message: { author: { role: 'user' }, content: { parts: ['b'] } } } };
+  await assert.rejects(readConversation(chat({ mapping: loop })), /cycle in ChatGPT conversation mapping/);
+});
+
+test('a Claude memory with a folded or literal YAML description imports the text, not the indicator', async () => {
+  const root = temp(), memory = join(root, '-tmp-alpha', 'memory'); mkdirSync(memory, { recursive: true });
+  const note = (name: string, description: string) => writeFileSync(join(memory, `${name}.md`), `---\nname: ${name}\n${description}\ntype: user\n---\nbody of ${name}\n`);
+  note('folded', 'description: >\n  a long\n  description: with a colon\n\n  second paragraph');
+  note('literal', 'description: |-\n  first line\n  second line');
+  note('plain', 'description: one line');
+  try {
+    const scan = await scanClaudeMemories(root);
+    const texts = new Map<string, string[]>();
+    for (const c of scan.conversations) texts.set(c.title, (await readConversation(c)).entries[0].text.split('\n'));
+    assert.deepEqual(texts.get('folded')?.slice(1, 3), ['a long description: with a colon second paragraph', '']);
+    assert.deepEqual(texts.get('literal')?.slice(1, 3), ['first line second line', '']);
+    assert.deepEqual(texts.get('plain')?.slice(1, 3), ['one line', '']);
+    for (const lines of texts.values()) assert.match(lines[0], /· type user · /, 'a key after the block still parses');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
