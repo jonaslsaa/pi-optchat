@@ -14,7 +14,7 @@ import { MASTER, VIEW_DOC } from './prompts.ts';
 import { cachePayload, record } from './cache.ts';
 import { asUser, boundedMessage, buildContext, logMessage, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer } from './report-message.ts';
-import { memoryTools, result } from './tools.ts';
+import { memoryTools, result, SEARCH_DOC, searchTool } from './tools.ts';
 import { Children, CWD_DOC, loadedBuiltins } from './agents.ts';
 import { exportBrowser } from './browser.ts';
 import { Inbox } from './inbox.ts';
@@ -250,7 +250,10 @@ export default function optchat(pi: ExtensionAPI) {
     startRun(ctx);
     const a = required();
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
-    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}`;
+    // Memory search is a setting: the tool and its prompt line change together, once per toggle, so the cached prefix stays stable.
+    const search = a.config.memorySearch, tools = pi.getActiveTools();
+    if (tools.includes('search') !== search) pi.setActiveTools(search ? [...tools, 'search'] : tools.filter(name => name !== 'search'));
+    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}${search ? SEARCH_DOC : ''}`;
     event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
     prompt = event.systemPrompt;
   });
@@ -324,6 +327,7 @@ export default function optchat(pi: ExtensionAPI) {
   registerConnectedRenderer(pi);
   registerReportRenderer(pi);
   for (const tool of memoryTools(() => required().memory)) pi.registerTool(tool);
+  pi.registerTool({ ...searchTool(() => required().memory), defaultActive: false });
   pi.registerTool({ name: 'spawn', label: 'Spawn background agents',
     description: 'Start background subagents, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Each receives the current memory view and read-only zoom/date. Whether children may delegate further, and how many agents may run at once, is set per profile. Completion reports arrive automatically; never poll or sleep waiting for them.',
     parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1 }) }),

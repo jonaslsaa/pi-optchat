@@ -244,6 +244,17 @@ export class Memory {
       return `${start(part)}+${2 ** l}|${flat(node.text)}`;
     }).join('\n');
   }
+  /** Original messages containing `text`, ignoring case, newest first, older than message `before`. Never summaries,
+   * nor the logged zoom/search calls and results, which only copy memory. */
+  search(text: string, before = this.root.length) {
+    const needle = text.toLowerCase(), hits: Entry[] = [];
+    for (let i = Math.min(before, this.root.length) - 1; i >= 0; i--) {
+      const entry = this.root[i];
+      if ((entry.kind === 'tool' || entry.kind === 'echo') && /^(zoom|search)[ :]/.test(entry.text)) continue;
+      if (entry.text.toLowerCase().includes(needle)) hits.push(entry);
+    }
+    return hits;
+  }
   date(id: number) {
     if (!Number.isSafeInteger(id) || !this.root[id]) throw new Error(`No message ${id}.`);
     return new Date(this.root[id].date).toString();

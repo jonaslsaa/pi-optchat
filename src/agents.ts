@@ -7,7 +7,7 @@ import * as sdk from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import { SUBAGENT, VIEW_DOC } from './prompts.ts';
-import { memoryTools } from './tools.ts';
+import { memoryTools, SEARCH_DOC, searchTool } from './tools.ts';
 import { type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cachePayload } from './cache.ts';
@@ -28,7 +28,7 @@ interface Options { parentSession?: string; usage?: UsageLedger; createSession?:
   /** Names of the built-in extensions the main session loaded (see `loadedBuiltins`). */
   builtins?: () => Iterable<string>;
   /** Read on every spawn, so a changed profile setting applies to the next one. */
-  settings?: () => Pick<Settings, 'subagentLevels' | 'maxAgents'>;
+  settings?: () => Partial<Settings>;
   summarizeHandoff?: (run: RunInfo, messages: AgentMessage[], descendants?: HandoffEvidence[]) => Promise<string> }
 
 // Subagents load the user's installed extensions, except any copy of OptChat itself: they get memory tools directly and must not open a profile.
@@ -84,7 +84,7 @@ export class Children {
       } catch (error) { warn(`Could not backfill child usage for ${run.id}: ${String(error)}`); }
     }
   }
-  private get settings() { return this.options.settings?.() ?? DEFAULT_SETTINGS; }
+  private get settings() { return { ...DEFAULT_SETTINGS, ...this.options.settings?.() }; }
   private full(extra: number) { return this.running.size + this.launching + extra > this.settings.maxAgents; }
   get ids() { return [...this.running.keys()]; }
   get active() { return this.completions.size > 0 || this.launching > 0 || this.settling > 0; }
@@ -195,7 +195,7 @@ export class Children {
   private async open(o: { id: string; directory: string; depth: number; parentId?: string; connected: boolean; provider: string; model: Model<Api>;
     thinking?: ModelChoice['thinking']; sessionManager: SessionManager }) {
     const { id, directory, depth, parentId, connected } = o;
-    const { subagentLevels, maxAgents } = this.settings, delegates = depth < subagentLevels;
+    const { subagentLevels, maxAgents, memorySearch } = this.settings, delegates = depth < subagentLevels;
     const delegation = delegates ? `You may delegate parts of your assigned task with spawn when useful. Child reports arrive automatically after your current run ends; the harness keeps you alive to receive them. Never poll, sleep, or wait in a tool for children. Finish your current work and return; you will be prompted with their results. The profile allows ${maxAgents} active agents total.` : 'You are at the maximum delegation depth. Complete your task with your own tools.';
     const instructions = [this.instructions(), delegation, connected ? 'You are speaking directly with the user in a connected window. Continue this conversation across requests. Use tell_parent for questions or findings the main agent needs now. A handoff will be generated when the user completes or disconnects the window.'
       : 'Use tell_parent only when your parent needs something now (a blocking question, an important early finding, or when asked to). Your final answer is delivered automatically; do not repeat it with tell_parent.'].filter(Boolean).join('\n\n');
@@ -209,7 +209,7 @@ export class Children {
         if (provider) pi.registerProvider(o.provider, provider);
         // Same prompt as the main agent (AGENTS.md files, skills, cwd); only the OptChat preamble differs.
         pi.on('before_agent_start', event => {
-          event.systemPromptOptions.customPrompt = `${SUBAGENT}\n\n${VIEW_DOC}`;
+          event.systemPromptOptions.customPrompt = `${SUBAGENT}\n\n${VIEW_DOC}${memorySearch ? SEARCH_DOC : ''}`;
           event.systemPromptOptions.sections.instructions = instructions;
         });
         pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
@@ -218,7 +218,7 @@ export class Children {
     await loader.reload();
     const { session } = await (this.options.createSession ?? createAgentSession)({ cwd: directory, resourceLoader: loader, settingsManager,
       model: o.model, thinkingLevel: o.thinking, sessionManager: o.sessionManager,
-      customTools: [...memoryTools(() => this.memory), ...(delegates ? this.delegationTools(id, directory, subagentLevels, maxAgents) : []), this.parentTool(id, parentId, connected)],
+      customTools: [...memoryTools(() => this.memory), ...(memorySearch ? [searchTool(() => this.memory)] : []), ...(delegates ? this.delegationTools(id, directory, subagentLevels, maxAgents) : []), this.parentTool(id, parentId, connected)],
       excludeTools: delegates ? [] : ['spawn', 'tell'],
     });
     // Callers track the session only after this returns: clean up here if its extensions fail to start.

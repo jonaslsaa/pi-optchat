@@ -78,6 +78,7 @@ Compression and subagents make extra model requests with your provider credentia
 | Max active agents | 8 | Subagents running at once in the profile, all levels together, so it also caps how deep a chain can go. |
 | Previous exchange | on | Replays your last request and answer in full with the next turn (see below). Off is the recipe. |
 | Previous exchange limit | 16 KB | A larger last exchange is left out. |
+| Memory search | off | Gives the agent, and subagents started or resumed after the change, a `search` tool over your original messages (see below). Off is the recipe: zoom and date only. Applies from the next turn. |
 | Summary size tolerance | 640 bytes | The compactor is always asked for 512-byte lines; a longer line up to this size is kept instead of retried. 512 is the recipe's strict rule. |
 
 Numbers must be whole numbers of at least 1 (512 for the summary size tolerance). Missing keys in an older `config.json` take their defaults.
@@ -218,8 +219,9 @@ Each run's context is the memory view, the previous exchange, and your new messa
 
 1. **Previous exchange kept verbatim.** Your last request (with any steering) and the final answer are included in full, so "why is that?" refers to what you actually read. Tool calls and reasoning are not carried over. It comes on top of the 128,000-byte view. If it is over 16,000 bytes (about 4,000 tokens, usually a big paste; Previous exchange limit) it is left out entirely, and the model relies on the view and zoom as in Victor's recipe. A new Pi session starts with the memory view only.
 2. **Subagents** are built in with Pi's SDK rather than a separate package. Children report individually instead of per batch, and with Subagent levels above 1 they can delegate further.
-3. **Profiles**, the **inspector**, the **usage ledger**, **import**, and **connected windows** are additions. Import adds historical-record guidance to the prompts.
-4. **Not done**: computer use and hosting on an always-on machine.
+3. **Memory search** (off by default). With the setting on, the agent also gets `search(text, before?)`: plain, case-insensitive text matching over the original messages, never the summaries (a summary can be wrong, and one fact repeats at every level of the tree), skipping logged zoom and search results. It returns 20 hits at a time, newest first, each with its id, date and a snippet; `before: id` pages back, and `zoom(id, 1)` reads a hit. One line about it is added to the system prompt. Turning it on or off changes the cached prompt once.
+4. **Profiles**, the **inspector**, the **usage ledger**, **import**, and **connected windows** are additions. Import adds historical-record guidance to the prompts.
+5. **Not done**: computer use and hosting on an always-on machine.
 
 ## Development
 
