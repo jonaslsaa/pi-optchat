@@ -93,14 +93,17 @@ test('a live profile cannot be opened by a second writer; other profiles can run
 });
 
 test('stable cache cuts preserve every character and cap marks at four', () => {
-  const view = '<chat>\n' + '0+1|summary of a decision\n'.repeat(5500) + '</chat>';
-  assert.equal(splitView(view).join(''), view);
-  const payload = { system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content: [{ type: 'text', text: view }, { type: 'text', text: 'new question', cache_control: { type: 'ephemeral' } }] }],
-  };
-  const output = JSON.stringify(cachePayload(payload));
-  assert.equal((output.match(/cache_control/g) ?? []).length, 4);
-  assert.equal(payload.messages[0].content.map(b => b.text).join(''), view + 'new question');
+  const line = '0+1|summary of a decision\n';
+  for (const quoted of [false, true]) {
+    const view = '<chat>\n' + line.repeat(2000) + (quoted ? '0+1|the summary quotes </chat> in passing\n' : '') + line.repeat(3500) + '</chat>';
+    assert.equal(splitView(view).join(''), view);
+    const payload = { system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: view }, { type: 'text', text: 'new question', cache_control: { type: 'ephemeral' } }] }],
+    };
+    const output = JSON.stringify(cachePayload(payload));
+    assert.equal((output.match(/cache_control/g) ?? []).length, 4, quoted ? 'a quoted closing tag keeps all marks' : 'plain view');
+    assert.equal(payload.messages[0].content.map(b => b.text).join(''), view + 'new question');
+  }
 });
 
 test('next turn excludes old conversation; current tool loop and reasoning remain verbatim', async () => {
