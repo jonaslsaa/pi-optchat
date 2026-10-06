@@ -22,9 +22,12 @@ const codexSubagent = (metadata: Record<string, unknown>) => metadata.source ===
   || record(metadata.source) && 'subagent' in metadata.source;
 const missingSource = (error: unknown) => record(error) && (error.code === 'ENOENT' || error.code === 'ENOTDIR');
 const missingWarning = (file: string) => `${file}: source file is no longer available; conversation skipped. Rescan to retry if it returns.`;
+const zoneless = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)$/;
+// A time without a zone is UTC, not the machine's zone. A number above 1e11 is milliseconds (1e11 seconds is the year 5138).
 export function timestamp(value: unknown, fallback: string): string {
-  const time = typeof value === 'number' ? value * 1000 : typeof value === 'string' ? Date.parse(value) : NaN;
-  return Number.isFinite(time) ? new Date(time).toISOString() : fallback;
+  const time = typeof value === 'number' ? (value > 1e11 ? value : value * 1000) : typeof value === 'string' ? Date.parse(value.trim().replace(zoneless, '$1T$2Z')) : NaN;
+  const date = new Date(time);
+  return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
 }
 function text(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -188,10 +191,19 @@ async function claudeProject(folder: string, name: string, signal?: AbortSignal)
 function frontmatter(content: string) {
   const match = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(content);
   const fields = new Map<string, string>();
-  for (const line of match ? match[1].split(/\r?\n/) : []) {
+  const lines = match ? match[1].split(/\r?\n/) : [];
+  for (let i = 0; i < lines.length; i++) {
     // Newer files nest type/modified under `metadata:`; the first occurrence of each key wins.
-    const m = /^\s*([A-Za-z]+):\s*(.+?)\s*$/.exec(line);
-    if (m && !fields.has(m[1])) fields.set(m[1], unquote(m[2]));
+    const m = /^(\s*)([A-Za-z]+):\s*(.+?)\s*$/.exec(lines[i]);
+    if (!m) continue;
+    let value: string;
+    if (/^[>|][+-]?\d?$/.test(m[3])) { // A folded or literal block is the indented lines after the key.
+      let end = i + 1;
+      while (end < lines.length && (!lines[end].trim() || lines[end].search(/\S/) > m[1].length)) end++;
+      value = lines.slice(i + 1, end).map(line => line.trim()).join(m[3].startsWith('>') ? ' ' : '\n').trim();
+      i = end - 1;
+    } else value = unquote(m[3]);
+    if (value && !fields.has(m[2])) fields.set(m[2], value);
   }
   return { fields, body: match ? content.slice(match[0].length) : content };
 }
@@ -233,16 +245,19 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
     const nodes = Object.entries(mapping).filter((pair): pair is [string, Record<string, unknown>] => record(pair[1]));
     nodes.sort((a, b) => timestamp(record(a[1].message) ? a[1].message.create_time : undefined, c.date)
       .localeCompare(timestamp(record(b[1].message) ? b[1].message.create_time : undefined, c.date)));
-    const ordered: typeof nodes = [], visited = new Set<string>(), visiting = new Set<string>();
-    const visit = (key: string, node: Record<string, unknown>) => {
-      if (visited.has(key)) return;
-      if (visiting.has(key)) throw new Error(`${c.title}: cycle in ChatGPT conversation mapping.`);
-      visiting.add(key);
-      const parent = typeof node.parent === 'string' ? mapping[node.parent] : undefined;
-      if (typeof node.parent === 'string' && record(parent)) visit(node.parent, parent);
-      visiting.delete(key); visited.add(key); ordered.push([key, node]);
-    };
-    for (const [key, node] of nodes) visit(key, node);
+    const ordered: typeof nodes = [], visited = new Set<string>();
+    for (const first of nodes) {
+      const chain: typeof nodes = [], inChain = new Set<string>();
+      let link: (typeof nodes)[number] | undefined = first;
+      while (link && !visited.has(link[0])) {
+        const [key, node]: (typeof nodes)[number] = link;
+        if (inChain.has(key)) throw new Error(`${c.title}: cycle in ChatGPT conversation mapping.`);
+        inChain.add(key); chain.push(link);
+        const parent = typeof node.parent === 'string' ? mapping[node.parent] : undefined;
+        link = typeof node.parent === 'string' && record(parent) ? [node.parent, parent] : undefined;
+      }
+      for (const done of chain.reverse()) { visited.add(done[0]); ordered.push(done); }
+    }
     const selected = new Set<string>();
     let cursor = string(c.exported?.current_node);
     const hasSelectedBranch = !!cursor;
