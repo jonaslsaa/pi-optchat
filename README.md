@@ -41,6 +41,7 @@ For headless use, pass `--optchat-profile work`.
 | --- | --- |
 | `/optchat` | Status and actions menu. |
 | `/optchat profile` | Select or create a profile. Switching starts a fresh Pi session. |
+| `/optchat settings` | This profile's settings: models, subagent levels and limits, previous exchange, summary size tolerance. |
 | `/optchat model` | Compactor model and effort for this profile. |
 | `/optchat agents` | Live agent tree and saved run history. |
 | `/optchat agents model` | Subagent model and effort for this profile. |
@@ -63,6 +64,26 @@ Subagent and compactor settings are saved per profile and do not follow the main
 
 Compression and subagents make extra model requests with your provider credentials.
 
+## Settings
+
+`/optchat settings` opens this profile's settings. Each row shows its value and default, the selected row says what it does and when a change applies, and a change is saved right away to the profile's `config.json`. Defaults follow Victor's recipe, except Previous exchange and Summary size tolerance, which keep OptChat's earlier behaviour.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Compactor model | Sonnet 5.5, medium | Same as `/optchat model`. Applies to the next summary. |
+| Subagent model | Opus 5.5, high | Same as `/optchat agents model`. Applies to new subagents. |
+| Subagent levels | 1 | 1: only the main agent starts subagents (the recipe). 2 or more: subagents may start their own, that many levels deep. Applies to subagents started or resumed after the change. |
+| Max active agents | 8 | Subagents running at once in the profile, all levels together, so it also caps how deep a chain can go. |
+| Previous exchange | on | Replays your last request and answer in full with the next turn (see below). Off is the recipe. |
+| Previous exchange limit | 16 KB | A larger last exchange is left out. |
+| Summary size tolerance | 640 bytes | The compactor is always asked for 512-byte lines; a longer line up to this size is kept instead of retried. 512 is the recipe's strict rule. |
+
+Numbers must be whole numbers of at least 1 (512 for the summary size tolerance). Missing keys in an older `config.json` take their defaults.
+
+**Upgrading from 0.6.x:** subagent levels used to be fixed at 3 and now default to 1, so subagents no longer start their own subagents until you set Subagent levels to 2 or 3.
+
+![Settings page](docs/screenshots/settings.png)
+
 ## Subagents
 
 Ask in plain words, for example: "Spawn an agent to investigate this repository and report back."
@@ -72,9 +93,9 @@ Ask in plain words, for example: "Spawn an agent to investigate this repository 
 - Each child reports back on its own when it finishes. The parent stays alive to receive reports; it never polls.
 - In the main chat, subagent messages and reports appear in a dark grey box labelled `↳ subagent <id> · still running` or `· report`, so they don't look like something you typed. The model still receives them as ordinary user messages. (One exception: reports recovered at startup, before your first message in the session, still show as plain user messages.)
 - The parent can send a running child guidance with `tell`, and the child can message its parent mid-run with `tell_parent` (a question, an early finding). It reaches the parent like a report, marked "still running": between tool calls if the parent is busy, or waking it if it's waiting.
-- `tell` to a finished child resumes it: the same agent (ID, parent, model, directory) reopens its saved transcript, gets the message as a new prompt, and sends a new report. This also works for children from earlier Pi sessions. Only the agent that started the child can resume it, and the resumed child takes one of the 8 slots. Connected windows can't be resumed, and a child whose transcript is missing must be spawned fresh.
-- Delegation goes up to three levels below the main agent (child, grandchild, great-grandchild).
-- At most 8 agents can be active per profile, including parents waiting on descendants. Going over a limit returns an error; there is no queue.
+- `tell` to a finished child resumes it: the same agent (ID, parent, model, directory) reopens its saved transcript, gets the message as a new prompt, and sends a new report. This also works for children from earlier Pi sessions. Only the agent that started the child can resume it, and the resumed child takes one active slot. Connected windows can't be resumed, and a child whose transcript is missing must be spawned fresh.
+- By default only the main agent starts subagents. Set **Subagent levels** in `/optchat settings` to let them delegate further (3 means child, grandchild, great-grandchild).
+- **Max active agents** (8 by default) caps how many agents can be active per profile, including parents waiting on descendants. Going over a limit returns an error; there is no queue.
 - Stopping an agent stops its whole subtree. A failed parent stops its descendants.
 - Agents run inside the Pi process. Closing Pi stops them; there is no detached mode.
 
@@ -189,12 +210,12 @@ To delete a profile, delete its folder. Your original Pi sessions are kept in Pi
 
 ## How it differs from the recipe
 
-The recipe's four prompts are kept verbatim in `src/prompts.ts`, along with its numbers: 512-byte summary nodes (summaries up to 640 bytes are accepted without a retry, as long as they are smaller than what they replace), a 128,000-byte memory view, binary merges, 8 compression workers, fixed retry delays, 5 shortening attempts, and a 30,000-character tool output cap. Anthropic requests get stable cache breakpoints on the view, and when that view is not cached yet, one compactor call goes first and the others wait until it starts answering, so they read the cache instead of each writing it. See `docs/victor-recipe.md` for notes.
+The recipe's four prompts are kept verbatim in `src/prompts.ts`, along with its numbers: 512-byte summary nodes (by default summaries up to 640 bytes are accepted without a retry, as long as they are smaller than what they replace; see Summary size tolerance), a 128,000-byte memory view, binary merges, 8 compression workers, fixed retry delays, 5 shortening attempts, and a 30,000-character tool output cap. Anthropic requests get stable cache breakpoints on the view, and when that view is not cached yet, one compactor call goes first and the others wait until it starts answering, so they read the cache instead of each writing it. See `docs/victor-recipe.md` for notes.
 
-Each run's context is the memory view, the previous exchange, and your new message. Deliberate additions:
+Each run's context is the memory view, the previous exchange, and your new message. Deliberate additions (the ones that change the recipe's behaviour are settings, see [Settings](#settings)):
 
-1. **Previous exchange kept verbatim.** Your last request (with any steering) and the final answer are included in full, so "why is that?" refers to what you actually read. Tool calls and reasoning are not carried over. It comes on top of the 128,000-byte view. If it is over 16,000 bytes (about 4,000 tokens, usually a big paste) it is left out entirely, and the model relies on the view and zoom as in Victor's recipe. A new Pi session starts with the memory view only.
-2. **Subagents** are built in with Pi's SDK rather than a separate package. Children report individually instead of per batch, and can delegate two extra levels.
+1. **Previous exchange kept verbatim.** Your last request (with any steering) and the final answer are included in full, so "why is that?" refers to what you actually read. Tool calls and reasoning are not carried over. It comes on top of the 128,000-byte view. If it is over 16,000 bytes (about 4,000 tokens, usually a big paste; Previous exchange limit) it is left out entirely, and the model relies on the view and zoom as in Victor's recipe. A new Pi session starts with the memory view only.
+2. **Subagents** are built in with Pi's SDK rather than a separate package. Children report individually instead of per batch, and with Subagent levels above 1 they can delegate further.
 3. **Profiles**, the **inspector**, the **usage ledger**, **import**, and **connected windows** are additions. Import adds historical-record guidance to the prompts.
 4. **Not done**: computer use and hosting on an always-on machine.
 

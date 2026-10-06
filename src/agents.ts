@@ -17,6 +17,7 @@ import { textContent } from './transcript.ts';
 import { Type } from 'typebox';
 import { result } from './tools.ts';
 import type { HandoffEvidence } from './handoff.ts';
+import { DEFAULT_SETTINGS, type Settings } from './settings.ts';
 
 export interface LiveRun {
   session: AgentSession; info: RunInfo; updated: number; streaming?: AgentMessage;
@@ -26,6 +27,8 @@ export interface LiveRun {
 interface Options { parentSession?: string; usage?: UsageLedger; createSession?: typeof createAgentSession;
   /** Names of the built-in extensions the main session loaded (see `loadedBuiltins`). */
   builtins?: () => Iterable<string>;
+  /** Read on every spawn, so a changed profile setting applies to the next one. */
+  settings?: () => Pick<Settings, 'subagentLevels' | 'maxAgents'>;
   summarizeHandoff?: (run: RunInfo, messages: AgentMessage[], descendants?: HandoffEvidence[]) => Promise<string> }
 
 // Subagents load the user's installed extensions, except any copy of OptChat itself: they get memory tools directly and must not open a profile.
@@ -81,6 +84,8 @@ export class Children {
       } catch (error) { warn(`Could not backfill child usage for ${run.id}: ${String(error)}`); }
     }
   }
+  private get settings() { return this.options.settings?.() ?? DEFAULT_SETTINGS; }
+  private full(extra: number) { return this.running.size + this.launching + extra > this.settings.maxAgents; }
   get ids() { return [...this.running.keys()]; }
   get active() { return this.completions.size > 0 || this.launching > 0 || this.settling > 0; }
   live(id: string) { return this.running.get(id); }
@@ -126,9 +131,10 @@ export class Children {
     const cancelled = () => this.closing || (parentId !== undefined && this.running.get(parentId)?.info.state !== 'running');
     if (parentId && (!parent || parent.info.state !== 'running')) throw new Error('The parent is no longer running.');
     const depth = parent ? parent.info.depth + 1 : 1;
-    if (depth > 3) throw new Error('Delegation depth limit reached: great-grandchildren cannot spawn.');
+    const { subagentLevels, maxAgents } = this.settings;
+    if (depth > subagentLevels) throw new Error(`Delegation depth limit reached: this profile allows ${subagentLevels} level${subagentLevels === 1 ? '' : 's'} of subagents.`);
     if (this.closing) throw new Error('Profile is closing.');
-    if (this.running.size + this.launching + tasks.length > 8) throw new Error('Profile limit: at most 8 active agents, including parents and descendants. Reduce the batch or continue without delegating.');
+    if (this.full(tasks.length)) throw new Error(`Profile limit: at most ${maxAgents} active agents, including parents and descendants. Reduce the batch or continue without delegating.`);
     const view = this.memory.render();
     const selected = this.choice();
     const model = this.registry.find(selected.provider, selected.model);
@@ -189,7 +195,8 @@ export class Children {
   private async open(o: { id: string; directory: string; depth: number; parentId?: string; connected: boolean; provider: string; model: Model<Api>;
     thinking?: ModelChoice['thinking']; sessionManager: SessionManager }) {
     const { id, directory, depth, parentId, connected } = o;
-    const delegation = depth < 3 ? 'You may delegate parts of your assigned task with spawn when useful. Child reports arrive automatically after your current run ends; the harness keeps you alive to receive them. Never poll, sleep, or wait in a tool for children. Finish your current work and return; you will be prompted with their results. The profile allows 8 active agents total.' : 'You are at the maximum delegation depth. Complete your task with your own tools.';
+    const { subagentLevels, maxAgents } = this.settings, delegates = depth < subagentLevels;
+    const delegation = delegates ? `You may delegate parts of your assigned task with spawn when useful. Child reports arrive automatically after your current run ends; the harness keeps you alive to receive them. Never poll, sleep, or wait in a tool for children. Finish your current work and return; you will be prompted with their results. The profile allows ${maxAgents} active agents total.` : 'You are at the maximum delegation depth. Complete your task with your own tools.';
     const instructions = [this.instructions(), delegation, connected ? 'You are speaking directly with the user in a connected window. Continue this conversation across requests. Use tell_parent for questions or findings the main agent needs now. A handoff will be generated when the user completes or disconnects the window.'
       : 'Use tell_parent only when your parent needs something now (a blocking question, an important early finding, or when asked to). Your final answer is delivered automatically; do not repeat it with tell_parent.'].filter(Boolean).join('\n\n');
     // The user's settings list their installed packages; a copy in memory keeps the child from writing them back.
@@ -211,17 +218,17 @@ export class Children {
     await loader.reload();
     const { session } = await (this.options.createSession ?? createAgentSession)({ cwd: directory, resourceLoader: loader, settingsManager,
       model: o.model, thinkingLevel: o.thinking, sessionManager: o.sessionManager,
-      customTools: [...memoryTools(() => this.memory), ...(depth < 3 ? this.delegationTools(id, directory) : []), this.parentTool(id, parentId, connected)],
-      excludeTools: depth < 3 ? [] : ['spawn', 'tell'],
+      customTools: [...memoryTools(() => this.memory), ...(delegates ? this.delegationTools(id, directory, subagentLevels, maxAgents) : []), this.parentTool(id, parentId, connected)],
+      excludeTools: delegates ? [] : ['spawn', 'tell'],
     });
     // Callers track the session only after this returns: clean up here if its extensions fail to start.
     try { await session.bindExtensions({}); }
     catch (error) { await this.shutdown(session); this.dispose(session); throw error; }
     return session;
   }
-  private delegationTools(parentId: string, cwd: string) {
-    return [{ name: 'spawn', label: 'Delegate task', description: 'Delegate parts of your task. Results arrive automatically after this run; never poll or sleep waiting. Maximum depth 3 and 8 active agents per profile.',
-      parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1, maxItems: 8 }) }),
+  private delegationTools(parentId: string, cwd: string, levels: number, maxAgents: number) {
+    return [{ name: 'spawn', label: 'Delegate task', description: `Delegate parts of your task. Results arrive automatically after this run; never poll or sleep waiting. Maximum depth ${levels} and ${maxAgents} active agents per profile.`,
+      parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1 }) }),
       execute: async (_id: string, args: { tasks: { task: string; cwd?: string }[] }, signal?: AbortSignal) => result(`Started: ${(await this.spawn(args.tasks, cwd, signal, parentId)).join(', ')}. Results will arrive automatically.`),
     }, { name: 'tell', label: 'Guide child', description: 'Send guidance to one of your direct children. A finished child is resumed with its earlier conversation, and its new report arrives automatically.',
       parameters: Type.Object({ id: Type.String(), message: Type.String() }),
@@ -354,7 +361,7 @@ export class Children {
         : `Only ${id}'s parent ${run.parentId} can resume it, and that parent is no longer running. Resume ${run.parentId} instead, or spawn a new subagent.`);
     }
     if (this.closing) throw new Error('Profile is closing.');
-    if (this.running.size + this.launching + 1 > 8) throw new Error(`Profile limit: at most 8 active agents, including parents and descendants. ${id} can be resumed when one finishes.`);
+    if (this.full(1)) throw new Error(`Profile limit: at most ${this.settings.maxAgents} active agents, including parents and descendants. ${id} can be resumed when one finishes.`);
     let manager: SessionManager | undefined;
     try { if (run.sessionFile && existsSync(run.sessionFile)) manager = SessionManager.open(run.sessionFile); } catch { manager = undefined; }
     if (!manager?.getEntries().some(e => e.type === 'message')) throw new Error(`The saved transcript of ${id} is missing or unreadable, so it cannot be resumed. Spawn a fresh subagent and give it the context it needs.`);

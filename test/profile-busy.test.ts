@@ -158,7 +158,7 @@ test('a second writer that got past the lock is refused on its next turn, with t
   let session: Awaited<ReturnType<typeof start>>['session'] | undefined;
   try {
     createProfile('shared');
-    saveConfig(profilePath('shared'), { compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' }, subagent: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    saveConfig(profilePath('shared'), { ...loadConfig(profilePath('shared')), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' }, subagent: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
     const opened = await start(dir, { select: async () => 'shared' });
     session = opened.session;
     const other = new Memory(profilePath('shared'), async () => 'summary', () => {});
