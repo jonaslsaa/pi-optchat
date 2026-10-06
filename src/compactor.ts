@@ -55,6 +55,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       let reply: AssistantMessage;
       try {
         const stream = registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
+          sessionId: 'optchat-compactor', transport: 'sse',
           reasoning: selected.thinking === 'off' ? undefined : selected.thinking, signal, cacheRetention: 'short',
           onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload) : payload,
         });
