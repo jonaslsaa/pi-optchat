@@ -381,7 +381,7 @@ test('a child stopped before its first request ends stopped without running its 
   } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-async function quickChildren(dir: string) {
+async function quickChildren(dir: string, memory = new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {})) {
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider('optchat-test', {
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
@@ -393,9 +393,24 @@ async function quickChildren(dir: string) {
       return stream;
     },
   });
-  return new Children(new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+  return new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
     async () => {}, () => {}, join(dir, 'profile'), { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
 }
+
+test('close() does not wait for a spawn that is still waiting for memory to be summarized', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-close-settling-'));
+  const memory = new Memory(join(dir, 'profile'), async () => { throw new Error('compactor outage'); }, () => {});
+  const children = await quickChildren(dir, memory);
+  try {
+    memory.append('user', 'large message '.repeat(100));
+    const refused = assert.rejects(children.spawn([{ task: 'quick' }], dir), /Memory wait cancelled/);
+    await until(() => children.active);
+    const closed = await Promise.race([children.close().then(() => true), new Promise<boolean>(resolve => { setTimeout(resolve, 2000, false).unref(); })]);
+    assert.ok(closed, 'close() is still waiting for the spawn');
+    await memory.close();
+    await refused;
+  } finally { await memory.close(); await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('a task cwd may start with ~ or be relative to the spawning agent; a missing one is refused', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-cwd-'));
