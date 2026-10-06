@@ -87,7 +87,7 @@ export class Inspector implements Component, Focusable {
   handleInput(data: string) {
     if (this.ended) return;
     if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) return this.finish();
-    if (data === 'u' || matchesKey(data, 'tab')) {
+    if (matchesKey(data, 'tab')) {
       this.page = nextPage(this.page); this.scroll = 0;
     } else if (this.page === 'activity') this.scrollInput(data);
     else if (this.page === 'usage') {
