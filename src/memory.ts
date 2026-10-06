@@ -169,6 +169,8 @@ export class Memory {
   }
   private pump() {
     if (this.stopped) return;
+    // One clock reading: skipping a part and arming its retry timer must agree on what is due.
+    const now = Date.now();
     const total = this.root.length;
     const first = this.view.find(p => !this.node(p));
     const boundary = first ? start(first) : total;
@@ -180,7 +182,7 @@ export class Memory {
         if (this.busy.size >= this.jobs) return;
         const part = { l, i }, id = key(part);
         if ((l === 0 ? i : end(part)) > boundary) break;
-        if (this.node(part) || this.busy.has(id) || (this.retryAt.get(id) ?? 0) > Date.now()) continue;
+        if (this.node(part) || this.busy.has(id) || (this.retryAt.get(id) ?? 0) > now) continue;
         if (l && (!this.node({ l: l - 1, i: 2 * i }) || !this.node({ l: l - 1, i: 2 * i + 1 }))) continue;
         const promise = this.build(part).catch(error => {
           if (this.stopped) return;
@@ -193,8 +195,8 @@ export class Memory {
       }
     }
     // A later failure can have a later deadline than the timer installed by the first.
-    const deadlines = [...this.retryAt.values()].filter(t => t > Date.now());
-    if (deadlines.length && !this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.schedule(); }, Math.max(1, Math.min(...deadlines) - Date.now()));
+    const deadlines = [...this.retryAt.values()].filter(t => t > now);
+    if (deadlines.length && !this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.schedule(); }, Math.max(1, Math.min(...deadlines) - now));
   }
   private async build(part: Part) {
     const source = part.l === 0 ? `${this.root[part.i].kind}: ${this.root[part.i].text}`
