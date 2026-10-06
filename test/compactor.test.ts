@@ -19,7 +19,7 @@ async function setup() {
     models: [{ id: 'compactor', name: 'Synthetic compactor', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1000 }],
     streamSimple(model, context) {
       const stream = createAssistantMessageEventStream();
-      const source = textContent(context.messages.findLast(m => m.role === 'user')?.content).split('\n').at(-1) ?? '';
+      const source = textContent(context.messages.findLast(m => m.role === 'user')?.content).split('\n').at(-2) ?? ''; // the last input line, before </input>
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `summary of ${source}` }], api: model.api, provider: model.provider,
         model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
       stream.push({ type: 'start', partial: message });
