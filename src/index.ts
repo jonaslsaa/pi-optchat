@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { createHash } from 'node:crypto';
+import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
@@ -72,7 +73,12 @@ export default function optchat(pi: ExtensionAPI) {
   const required = () => { if (!active) throw new Error('Choose an OptChat profile first: /optchat profile'); return active; };
   const status = (ctx: ExtensionContext) => {
     const a = active;
-    ctx.ui.setStatus('optchat', a ? `OptChat: ${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending · ${a.children.ids.length} agents${importing ? ' · importing' : pendingImport(a.dir) ? ' · import paused: /optchat import' : ''}` : 'OptChat: choose profile');
+    if (!a) { ctx.ui.setStatus('optchat', 'OptChat: choose profile'); return; }
+    // A display only: a broken import journal is refused where it matters, never here.
+    let note = '';
+    try { note = importing ? ' · importing' : pendingImport(a.dir) ? ' · import paused: /optchat import' : ''; }
+    catch { note = ' · import journal invalid'; }
+    ctx.ui.setStatus('optchat', `OptChat: ${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending · ${a.children.ids.length} agents${note}`);
   };
   const saveReports = () => { if (active) atomicWrite(join(active.dir, 'pending-reports.json'), JSON.stringify(reports)); };
   const flush = () => {
@@ -333,12 +339,14 @@ export default function optchat(pi: ExtensionAPI) {
 
   const pickModel = async (ctx: ExtensionContext, role: 'compactor' | 'subagent') => {
     const a = required(), current = a.config[role];
-    const choices = ctx.modelRegistry.getAvailable().map(m => `${m.provider}/${m.id}`);
+    const available = ctx.modelRegistry.getAvailable(), choices = available.map(m => `${m.provider}/${m.id}`);
     choices.sort((a, b) => Number(b === `${current.provider}/${current.model}`) - Number(a === `${current.provider}/${current.model}`) || a.localeCompare(b));
     const selected = await ctx.ui.select(`${a.name}: ${role} model`, choices);
     if (!selected) return;
-    const picked = await ctx.ui.select('Thinking level', [...THINKING]);
-    const thinking = THINKING.find(level => level === picked);
+    const model = available.find(m => `${m.provider}/${m.id}` === selected);
+    const levels = model ? getSupportedThinkingLevels(model) : THINKING;
+    const picked = await ctx.ui.select('Thinking level', [...levels]);
+    const thinking = levels.find(level => level === picked);
     if (!thinking) return;
     const separator = selected.indexOf('/');
     a.config[role] = { provider: selected.slice(0, separator), model: selected.slice(separator + 1), thinking };
@@ -423,7 +431,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (action === 'settings') {
       const a = required();
       if (ctx.mode !== 'tui') throw new Error('/optchat settings requires interactive Pi. Edit config.json in the profile directory instead.');
-      return showSettings(ctx, { profile: a.name, config: a.config, models: ctx.modelRegistry.getAvailable().map(m => `${m.provider}/${m.id}`).sort(),
+      return showSettings(ctx, { profile: a.name, config: a.config, models: ctx.modelRegistry.getAvailable().map(m => ({ name: `${m.provider}/${m.id}`, thinking: getSupportedThinkingLevels(m) })).sort((a, b) => a.name.localeCompare(b.name)),
         save: config => saveConfig(a.dir, config) });
     }
     if (action === 'model') return pickModel(ctx, 'compactor');

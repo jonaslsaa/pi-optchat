@@ -146,7 +146,7 @@ Pick the destination profile, then run `/optchat import`.
 3. **Mode** (only if the profile already has history):
    - **Append**: keep existing summaries and add the import. Faster and cheaper.
    - **Rebuild by conversation start date**: regenerate the whole tree, ordered by conversation start.
-4. **Preview**: destination, new and duplicate counts, text size, rough token estimate, and compactor. This is not a price quote.
+4. **Preview**: destination, new and duplicate counts, text size, rough token estimate, and compactor. This is not a price quote: a big import costs about 3x that estimate in compactor input, because every message is summarized and then re-read in merges, each with the memory view as (mostly cached) context.
 
 **What gets imported**: user messages and final assistant replies, with original dates and source labels, as in Victor's recipe. Tool calls and results, intermediate commentary, reasoning, subagent transcripts, replayed context, and image/audio/file bytes are left out. So is the text Claude Code adds around what you typed: slash-command and shell-command output, and a slash command without arguments. A typed command stays as `/name args` or `!command`. None of these becomes a conversation's title. ChatGPT alternate branches are labelled as alternatives. Imported records are marked as historical so old requests are not treated as new instructions.
 

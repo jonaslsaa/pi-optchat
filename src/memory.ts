@@ -63,7 +63,7 @@ function records(dir: string, warn: (s: string) => void): unknown[] {
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
-function isEntry(value: unknown): value is Entry {
+export function isEntry(value: unknown): value is Entry {
   return object(value) && Number.isSafeInteger(value.i) && typeof value.kind === 'string'
     && ['user', 'talk', 'tool', 'echo', 'note'].includes(value.kind)
     && typeof value.text === 'string' && typeof value.date === 'string';
@@ -116,9 +116,9 @@ export class Memory {
     const main = dirname(next), names = readdirSync(main).filter(n => n.endsWith('.jsonl'));
     if (names.length !== this.lastSeenBytes.size || names.some(n => statSync(join(main, n)).size !== this.lastSeenBytes.get(join(main, n)))) throw otherWriter(next);
   }
-  append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string) {
+  append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string, origin?: Origin) {
     if (this.stopped) throw new Error('Memory is closed.');
-    const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}) };
+    const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}) };
     const file = join(this.directory, 'main', `${localDay()}.jsonl`);
     if (!this.lastSeenBytes.has(file)) this.checkLog(file);
     this.lastSeenBytes.set(file, appendJson(file, entry, this.lastSeenBytes.get(file) ?? 0));
@@ -169,6 +169,8 @@ export class Memory {
   }
   private pump() {
     if (this.stopped) return;
+    // One clock reading: skipping a part and arming its retry timer must agree on what is due.
+    const now = Date.now();
     const total = this.root.length;
     const first = this.view.find(p => !this.node(p));
     const boundary = first ? start(first) : total;
@@ -180,7 +182,7 @@ export class Memory {
         if (this.busy.size >= this.jobs) return;
         const part = { l, i }, id = key(part);
         if ((l === 0 ? i : end(part)) > boundary) break;
-        if (this.node(part) || this.busy.has(id) || (this.retryAt.get(id) ?? 0) > Date.now()) continue;
+        if (this.node(part) || this.busy.has(id) || (this.retryAt.get(id) ?? 0) > now) continue;
         if (l && (!this.node({ l: l - 1, i: 2 * i }) || !this.node({ l: l - 1, i: 2 * i + 1 }))) continue;
         const promise = this.build(part).catch(error => {
           if (this.stopped) return;
@@ -193,8 +195,8 @@ export class Memory {
       }
     }
     // A later failure can have a later deadline than the timer installed by the first.
-    const deadlines = [...this.retryAt.values()].filter(t => t > Date.now());
-    if (deadlines.length && !this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.schedule(); }, Math.max(1, Math.min(...deadlines) - Date.now()));
+    const deadlines = [...this.retryAt.values()].filter(t => t > now);
+    if (deadlines.length && !this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.schedule(); }, Math.max(1, Math.min(...deadlines) - now));
   }
   private async build(part: Part) {
     const source = part.l === 0 ? `${this.root[part.i].kind}: ${this.root[part.i].text}`
