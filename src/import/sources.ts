@@ -41,6 +41,19 @@ function text(value: unknown): string {
   if (typeof value.content_type === 'string') return `[${value.content_type} attachment; binary content is not imported]`;
   return '';
 }
+/**
+ * Claude Code logs slash commands, `!` shell commands, and their local output as user messages. Returns undefined
+ * for anything else, '' for scaffolding to drop, or what the user typed (`/name args`, `!command`), a real request.
+ */
+function claudeCommand(content: string): string | undefined {
+  const s = content.trimStart();
+  if (/^<(local-command|bash)-(stdout|stderr)>/.test(s)) return '';
+  const shell = /^<bash-input>([\s\S]*?)<\/bash-input>/.exec(s)?.[1].trim();
+  if (shell !== undefined) return shell && `!${shell}`;
+  if (!/^<command-(name|message|args)>/.test(s)) return undefined;
+  const name = /<command-name>([^<]*)<\/command-name>/.exec(s)?.[1].trim(), args = /<command-args>([\s\S]*?)<\/command-args>/.exec(s)?.[1].trim();
+  return name && args ? `${name} ${args}` : '';
+}
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
 function imported(c: Conversation, id: string, kind: Kind, content: string, date: string, identity = content): ImportedEntry | undefined {
   if (!content.trim()) return undefined;
@@ -102,8 +115,10 @@ export async function scanLocal(source: 'claude' | 'codex', roots?: string[], si
           if (v.type === 'custom-title' || v.type === 'ai-title') title = string(v.customTitle ?? v.aiTitle) ?? title;
         }
         const m = source === 'claude' ? v.message : v.type === 'response_item' ? v.payload : undefined;
-        if (record(m) && m.role === 'user' && !title) {
-          title = text(m.content).replace(/\s+/g, ' ').slice(0, 110);
+        const typed = record(m) && m.role === 'user' && !title ? text(m.content) : '';
+        const first = source === 'claude' ? claudeCommand(typed) ?? typed : typed;
+        if (first.trim()) {
+          title = first.replace(/\s+/g, ' ').slice(0, 110);
           date = timestamp(v.timestamp, date);
         }
       }
@@ -332,7 +347,8 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
               warnings.push(`${c.file}:${line}: unsupported Claude content block ${String(b.type)} skipped`);
             return [];
           });
-          if (m.role === 'user' && parts.length) { finish(); for (const part of parts) add(part.id, 'user', part.content, date); }
+          // Receipts keep the raw text, so a command already imported is still recognized.
+          if (m.role === 'user' && parts.length) { finish(); for (const part of parts) add(part.id, 'user', claudeCommand(part.content) ?? part.content, date, part.content); }
           else if (m.role === 'assistant') {
             const final = m.stop_reason === 'end_turn' || m.stop_reason === 'stop_sequence';
             if (toolActivity || v.isApiErrorMessage === true || m.stop_reason && !final) pending = [];
