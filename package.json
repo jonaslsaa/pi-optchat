@@ -6,7 +6,7 @@
     "extensions": [
       "./src/index.ts"
     ],
-    "image": "https://raw.githubusercontent.com/jonaslsaa/pi-optchat/main/docs/banner.png"
+    "image": "https://raw.githubusercontent.com/jonaslsaa/pi-optchat/main/docs/banner.jpg"
   },
   "scripts": {
     "check": "tsc --noEmit",
