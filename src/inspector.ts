@@ -159,7 +159,8 @@ export class Inspector implements Component, Focusable {
       const text = `  ${line.padEnd(widths[0])}  ${level.padEnd(widths[1])}  ${time}`;
       lines.push(tone ? color(tone, text) : text);
     }
-    if (retrying.length && lastError) lines.push(`  ${color('error', `Last error: ${oneLine(lastError)}`)}`);
+    // Kept until every failed part succeeds, so it also explains a retry that is running now.
+    if (lastError) lines.push(`  ${color('error', `Last error: ${oneLine(lastError)}`)}`);
     if (rows.length) lines.push('');
     lines.push(`${color('muted', 'Agents'.padEnd('Summaries'.length))}  ${agents} running  ${color('dim', 'Tab → Agents')}`);
     return lines.flatMap(l => l ? wrapTextWithAnsi(l, width) : ['']);

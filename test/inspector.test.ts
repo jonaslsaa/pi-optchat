@@ -79,6 +79,9 @@ test('Tab cycles Agents, Usage and Activity; Activity shows summaries in flight,
     assert.ok(page.includes('Last error: 401 invalid x-api-key'));
     assert.ok(page.includes('Agents     1 running  Tab → Agents'));
     assert.doesNotMatch(page.join('\n'), /review/, 'the agent list stays on its own page');
+    // A retry that is running again is in flight, not waiting, and the error behind it stays visible.
+    state = { ...state, retrying: [], building: [...state.building, { l: 1, i: 1024, started: now }] };
+    assert.ok(inspector.render(100).map(l => l.trim()).includes('Last error: 401 invalid x-api-key'));
     inspector.handleInput('\t'); assert.equal(title(), 'OptChat · personal · Agents');
   } finally { inspector.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
