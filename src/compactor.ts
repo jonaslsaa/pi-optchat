@@ -13,8 +13,9 @@ export const reasoningFor = (model: Model<Api>, level: ThinkingLevel) => {
   const thinking = clampThinkingLevel(model, level);
   return thinking === 'off' ? undefined : thinking;
 };
-/** A realistic summary line of exactly NODE bytes, on a topic no real chat shares so its wording can't leak into summaries. */
-export const SCALE = 'user: Plan the Lisbon trip for 14-18 May: four adults, one in a wheelchair, 2400 EUR budget, no flights before 09:00. talk: Suggested Baixa; skip tram 28 (not step-free). tool: searched TAP, easyJet fares; echo: TAP TP1205 at 08:40 (too early), easyJet U27652 at 11:15 is 162 EUR each. user: "Book easyJet; step-free rooms matter more than a view." work: [4c1e9a20] Casa do Rio has two step-free rooms at 138 EUR/night, free cancellation to 10 May, held to 2 May. talk: Asked about a Sintra day trip, unanswered.';
+/** The size example: a line of exactly NODE bytes about OptChat itself. Every claim in it is true and timeless (no ids, PRs or decisions),
+ * so a summary that copies it states nothing false; the request also fences it off from the input. */
+export const SCALE = 'note: How OptChat memory works. Each message becomes a leaf line: a short message is its own line, a longer one is compressed to about 512 bytes. Adjacent lines merge in pairs into a binary tree: two lines into one line covering both, two of those into one covering four, and so on. The view shows recent messages one per line and older ones more per line, within a fixed byte budget. zoom(id, n) opens line id+n into the two lines it was made from, down to the original message; date(id) tells when it was sent.';
 const WARM_MS = 4 * 60_000; // Anthropic's short cache lives 5 minutes from its last use.
 
 /** Parallel calls can't read a cache entry that isn't written yet, so one call primes a cold prefix and the rest wait until it answers. */
@@ -51,7 +52,8 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const model = registry.find(selected.provider, selected.model);
     if (!model) throw new Error(`Compactor model unavailable: ${selected.provider}/${selected.model}. Use /optchat model.`);
     const thinking = reasoningFor(model, selected.thinking);
-    const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}For scale, this line is exactly 512 bytes:\n${SCALE}\n\n${input.merge ? 'Merge these two lines into one' : 'Compress this message into one line'}, in at most 512 bytes:\n${input.source}`;
+    // Shown bare between the view and the input, the example was sometimes summarized as if it were chat, so it is labelled and both are tagged.
+    const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}For scale only, here is an example line, not from this chat; it is exactly 512 bytes and is never part of your input or your line:\n<example>${SCALE}</example>\n\n${input.merge ? 'Merge these two lines into one' : 'Compress this message into one line'}, in at most 512 bytes:\n<input>\n${input.source}\n</input>`;
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;

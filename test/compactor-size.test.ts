@@ -12,6 +12,7 @@ import { bytes, NODE } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 
 let sentReasoning: string | undefined;
+let sentStep = '';
 /** A fake model whose first reply is `first` bytes long and whose retries fit. */
 async function attempts(first: number, { source = 'user: ' + 'a long message '.repeat(70), merge = false, accepted }: { source?: string; merge?: boolean; accepted?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-size-'));
@@ -21,8 +22,10 @@ async function attempts(first: number, { source = 'user: ' + 'a long message '.r
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
     // Like Sonnet 5.5: thinking can't be turned off.
     models: [{ id: 'compactor', name: 'Synthetic compactor', reasoning: true, thinkingLevelMap: { off: null, minimal: null }, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple(model, _context, options) {
+    streamSimple(model, context, options) {
       sentReasoning = options?.reasoning;
+      const request = context.messages.find(m => m.role === 'user')?.content;
+      sentStep = Array.isArray(request) ? request.map(c => c.type === 'text' ? c.text : '').at(-1) ?? '' : request ?? '';
       const stream = createAssistantMessageEventStream();
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(calls++ ? 400 : first) }], api: model.api,
         provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
@@ -62,6 +65,15 @@ test('a merge that is not smaller than the two lines it replaces is retried', as
 test('the size example the compactor is shown is a real line of exactly NODE bytes, not padding', () => {
   assert.equal(bytes(SCALE), NODE);
   assert.doesNotMatch(SCALE, /([^\w\s])\1\1/);
+  // A copied example must not add plausible fake facts to memory: no PR numbers, commit-like ids or dates.
+  assert.doesNotMatch(SCALE, /#\d|\b[0-9a-f]{7,}\b|\b20\d\d\b/);
+});
+
+test('the size example is fenced off from the input, so it is never summarized as chat', async () => {
+  const source = 'user: ' + 'a long message '.repeat(70);
+  await attempts(400, { source });
+  assert.ok(sentStep.includes(`<example>${SCALE}</example>`));
+  assert.ok(sentStep.endsWith(`<input>\n${source}\n</input>`));
 });
 
 test('handoffs clamp the compactor\'s thinking level too', async () => {
