@@ -257,7 +257,7 @@ test('turning Previous exchange off also reaches a turn that a subagent report s
   }
 });
 
-test('Memory search turned on and off in /optchat settings adds and removes the tool and its prompt line', async () => {
+test('Memory search turned on and off in /optchat settings adds and removes the tool and its prompt line, also for a report turn', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'oc-search-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
@@ -291,7 +291,9 @@ test('Memory search turned on and off in /optchat settings adds and removes the 
     assert.deepEqual(search(turns.at(-1)!), [false, false], 'off by default');
     await session.prompt('/optchat settings');
     assert.equal(loadConfig(profilePath('fixture')).memorySearch, true);
-    await session.prompt('Find it.');
+    // A report turn started while idle skips before_agent_start, and still gets the change.
+    await session.sendCustomMessage({ customType: REPORT_TYPE, content: '[8964a512] Done.', display: true }, { triggerTurn: true, deliverAs: 'steer' });
+    await session.agent.waitForIdle();
     assert.deepEqual(search(turns.at(-1)!), [true, true]);
     await session.prompt('/optchat settings');
     await session.prompt('Again.');

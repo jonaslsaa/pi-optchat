@@ -34,8 +34,10 @@ import { showSettings } from './settings-page.ts';
 
 const binding = 'optchat.profile';
 const CONTINUITY = '\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text; left out when very long), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.';
-/** A report run while idle reuses the last built prompt, so a Previous exchange change since then is applied here. */
-const continuity = (prompt: string, on: boolean) => on === prompt.includes(CONTINUITY) ? prompt : on ? prompt.replace(VIEW_DOC, VIEW_DOC + CONTINUITY) : prompt.replace(CONTINUITY, '');
+const toggle = (prompt: string, line: string, on: boolean, after: string) => on === prompt.includes(line) ? prompt : on ? prompt.replace(after, after + line) : prompt.replace(line, '');
+/** A report run while idle reuses the last built prompt, so Previous exchange and Memory search changes since then are applied here. */
+const promptFor = (prompt: string, { previousExchange, memorySearch }: ProfileConfig) =>
+  toggle(toggle(prompt, CONTINUITY, previousExchange, VIEW_DOC), SEARCH_DOC, memorySearch, previousExchange ? VIEW_DOC + CONTINUITY : VIEW_DOC);
 interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
 export default function optchat(pi: ExtensionAPI) {
@@ -250,10 +252,8 @@ export default function optchat(pi: ExtensionAPI) {
     startRun(ctx);
     const a = required();
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
-    // Memory search is a setting: the tool and its prompt line change together, once per toggle, so the cached prefix stays stable.
-    const search = a.config.memorySearch, tools = pi.getActiveTools();
-    if (tools.includes('search') !== search) pi.setActiveTools(search ? [...tools, 'search'] : tools.filter(name => name !== 'search'));
-    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}${search ? SEARCH_DOC : ''}`;
+    syncSearch(a.config);
+    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}${a.config.memorySearch ? SEARCH_DOC : ''}`;
     event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
     prompt = event.systemPrompt;
   });
@@ -292,7 +292,7 @@ export default function optchat(pi: ExtensionAPI) {
         view = a.memory.render(); // Capture old history before logging the new input.
         flush();
       }
-      return { messages: buildContext(event.messages, run, view, continuity(prompt, a.config.previousExchange), previous) };
+      return { messages: buildContext(event.messages, run, view, promptFor(prompt, a.config), previous) };
     } catch (error) {
       // Pi catches extension errors. Explicitly abort so it cannot fall back to old context.
       ctx.abort();
@@ -328,6 +328,12 @@ export default function optchat(pi: ExtensionAPI) {
   registerReportRenderer(pi);
   for (const tool of memoryTools(() => required().memory)) pi.registerTool(tool);
   pi.registerTool({ ...searchTool(() => required().memory), defaultActive: false });
+  // The tool and its prompt line change together, once per toggle, so the cached prefix is otherwise stable.
+  // Synced on save too: a report turn started while idle reuses the tool set without before_agent_start.
+  const syncSearch = ({ memorySearch }: ProfileConfig) => {
+    const tools = pi.getActiveTools();
+    if (tools.includes('search') !== memorySearch) pi.setActiveTools(memorySearch ? [...tools, 'search'] : tools.filter(name => name !== 'search'));
+  };
   pi.registerTool({ name: 'spawn', label: 'Spawn background agents',
     description: 'Start background subagents, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Each receives the current memory view and read-only zoom/date. Whether children may delegate further, and how many agents may run at once, is set per profile. Completion reports arrive automatically; never poll or sleep waiting for them.',
     parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1 }) }),
@@ -436,7 +442,7 @@ export default function optchat(pi: ExtensionAPI) {
       const a = required();
       if (ctx.mode !== 'tui') throw new Error('/optchat settings requires interactive Pi. Edit config.json in the profile directory instead.');
       return showSettings(ctx, { profile: a.name, config: a.config, models: ctx.modelRegistry.getAvailable().map(m => ({ name: `${m.provider}/${m.id}`, thinking: getSupportedThinkingLevels(m) })).sort((a, b) => a.name.localeCompare(b.name)),
-        save: config => saveConfig(a.dir, config) });
+        save: config => { saveConfig(a.dir, config); syncSearch(config); } });
     }
     if (action === 'model') return pickModel(ctx, 'compactor');
     if (action === 'agents model') return pickModel(ctx, 'subagent');

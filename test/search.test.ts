@@ -11,7 +11,7 @@ test('search finds original messages newest first, pages backwards, and never re
   // Every summary the compactor writes mentions a trip no message talks about.
   const memory = new Memory(dir, async () => 'user: planned the Lisbon trip', () => {});
   try {
-    memory.append('user', `${'filler '.repeat(100)}then the Banner moved`);
+    memory.append('user', `${'filler '.repeat(100)}then the Banner moved, then the\nfinal line`);
     for (let i = 1; i <= 24; i++) memory.append(i % 2 ? 'user' : 'talk', `note ${i} about the banner`);
     memory.append('tool', 'zoom {"id":3,"n":1}');
     memory.append('echo', 'zoom: 3+0|user: note 3 about the banner');
@@ -29,7 +29,8 @@ test('search finds original messages newest first, pages backwards, and never re
     const rest = searchPage(memory, 'banner', 5).split('\n');
     assert.equal(rest[0], '5 older messages contain "banner", newest first:');
     assert.deepEqual(rest.slice(1).map(line => Number(line.split(' ')[0])), [4, 3, 2, 1, 0]);
-    assert.match(rest[5], /^0 · .* · user: …[a-z ]{40,} then the Banner moved$/, 'a long message is cut around its match');
+    assert.match(rest[5], /^0 · .* · user: …[a-z ]{40,} then the Banner moved, then the final line$/, 'a long message is cut around its match');
     assert.equal(searchPage(memory, 'banner', 0), 'No older messages contain "banner".');
+    assert.match(searchPage(memory, 'the\nfinal line', 1), /\n0 · .* · user: …[\w ,]+ the final line$/, 'a match across lines is shown, flattened');
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });

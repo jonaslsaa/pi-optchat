@@ -12,9 +12,10 @@ export function searchPage(memory: Memory, text: string, before?: number) {
   if (!hits.length) return `No ${older}messages contain "${text}".`;
   const page = hits.slice(0, SEARCH_PAGE), needle = text.toLowerCase();
   const lines = page.map(entry => {
-    const body = flat(entry.text), at = Math.max(0, body.toLowerCase().indexOf(needle) - SNIPPET / 4);
-    const snippet = body.slice(at, at + SNIPPET).replace(/^[\udc00-\udfff]|[\ud800-\udbff]$/g, '');
-    return `${entry.i} · ${new Date(entry.date).toString().slice(0, 21)} · ${entry.kind}: ${at ? '…' : ''}${snippet}${at + SNIPPET < body.length ? '…' : ''}`;
+    // Cut the original text, whose match may span lines, and flatten only the cut.
+    const at = Math.max(0, entry.text.toLowerCase().indexOf(needle) - SNIPPET / 4);
+    const snippet = flat(entry.text.slice(at, at + SNIPPET).replace(/^[\udc00-\udfff]|[\ud800-\udbff]$/g, ''));
+    return `${entry.i} · ${new Date(entry.date).toString().slice(0, 21)} · ${entry.kind}: ${at ? '…' : ''}${snippet}${at + SNIPPET < entry.text.length ? '…' : ''}`;
   });
   const more = hits.length > page.length ? `\nOlder matches: search again with before: ${page[page.length - 1].i}.` : '';
   return `${hits.length} ${older}${hits.length === 1 ? 'message contains' : 'messages contain'} "${text}", newest first:\n${lines.join('\n')}${more}`;
