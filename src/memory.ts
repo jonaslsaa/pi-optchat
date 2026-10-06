@@ -63,7 +63,7 @@ function records(dir: string, warn: (s: string) => void): unknown[] {
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
-function isEntry(value: unknown): value is Entry {
+export function isEntry(value: unknown): value is Entry {
   return object(value) && Number.isSafeInteger(value.i) && typeof value.kind === 'string'
     && ['user', 'talk', 'tool', 'echo', 'note'].includes(value.kind)
     && typeof value.text === 'string' && typeof value.date === 'string';
@@ -116,9 +116,9 @@ export class Memory {
     const main = dirname(next), names = readdirSync(main).filter(n => n.endsWith('.jsonl'));
     if (names.length !== this.lastSeenBytes.size || names.some(n => statSync(join(main, n)).size !== this.lastSeenBytes.get(join(main, n)))) throw otherWriter(next);
   }
-  append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string) {
+  append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string, origin?: Origin) {
     if (this.stopped) throw new Error('Memory is closed.');
-    const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}) };
+    const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}) };
     const file = join(this.directory, 'main', `${localDay()}.jsonl`);
     if (!this.lastSeenBytes.has(file)) this.checkLog(file);
     this.lastSeenBytes.set(file, appendJson(file, entry, this.lastSeenBytes.get(file) ?? 0));
