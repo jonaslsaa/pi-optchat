@@ -200,7 +200,7 @@ test('the settings page saves a valid number and explains an invalid one', () =>
 });
 
 test('turning Previous exchange off also reaches a turn that a subagent report starts while idle', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'optchat-report-prompt-'));
+  const dir = mkdtempSync(join(tmpdir(), 'oc-report-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
   const systems: string[] = [];
