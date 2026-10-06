@@ -98,6 +98,58 @@ test('Codex imports user messages and final answers once, excluding commentary, 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+const codexFixture = new URL('./fixtures/codex-rollout.jsonl', import.meta.url).pathname;
+const receipt = (...identity: unknown[]) => `import:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+const body = (e: ImportedEntry) => e.text.slice(e.text.indexOf(']\n') + 2);
+
+test('Codex titles and entries skip the contextual messages Codex injects, and keep what the user typed', async () => {
+  const dir = temp();
+  writeFileSync(join(dir, 'rollout-2026-03-04T09-00-00.jsonl'), readFileSync(codexFixture));
+  try {
+    const scan = await scanLocal('codex', [dir]);
+    assert.equal(scan.conversations.length, 1);
+    const [c] = scan.conversations;
+    assert.deepEqual({ id: c.id, project: c.project, title: c.title, date: c.date },
+      { id: '0199c0de-1111-7222-8333-444455556666', project: '/home/dev/synthetic-app', title: 'Add a --dry-run flag to the sync command.', date: '2026-03-04T09:00:02.000Z' });
+    const parsed = await readConversation(c);
+    assert.deepEqual(parsed.entries.map(e => [e.kind, e.origin?.message, body(e)]), [
+      ['user', 'msg-1', 'Add a --dry-run flag to the sync command.'],
+      ['talk', 'msg-2', 'Added --dry-run to sync.'],
+      ['user', 'msg-3', 'Now document the flag in the README.'],
+      ['talk', 'msg-4', 'Documented --dry-run in the README.'],
+    ]);
+    assert.doesNotMatch(JSON.stringify(parsed.entries), /AGENTS\.md|environment_context|user_shell_command|<skill>|hook_prompt|codex_internal_context|turn_aborted|subagent_notification|SECRET|Reading the sync/);
+    assert.deepEqual(parsed.warnings, []);
+    const raw = '<environment_context>\n  <cwd>/home/dev/synthetic-app</cwd>\n</environment_context>\nNow document the flag in the README.';
+    assert.equal(parsed.entries[2].receipt, receipt('codex', c.id, 'msg-3', 'user', raw), 'the receipt still hashes the raw text');
+    assert.equal(parsed.entries[0].receipt, receipt('codex', c.id, 'msg-1', 'user', 'Add a --dry-run flag to the sync command.'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('Codex drops only the fragments Codex itself marks as injected context', async () => {
+  const dir = temp(), file = join(dir, 'codex.jsonl');
+  const user = (id: string, ...texts: string[]) => ({ type: 'response_item', timestamp: date, payload: { type: 'message', id, role: 'user', content: texts.map(text => ({ type: 'input_text', text })) } });
+  const injected = [
+    '# AGENTS.md instructions for /p\n\n<INSTRUCTIONS>\nbe nice\n</INSTRUCTIONS>', '  <ENVIRONMENT_CONTEXT>x</environment_context>  ', '<skill>\n<name>demo</name>\n</skill>',
+    '<user_shell_command>\n<command>ls</command>\n</user_shell_command>', '<turn_aborted>\ninterrupted\n</turn_aborted>', '<subagent_notification>{}</subagent_notification>',
+    '<hook_prompt hook_run_id="run-1">Retry</hook_prompt>', '<agent_message_board_notification>x</agent_message_board_notification>', '<recommended_plugins>\n- Drive\n</recommended_plugins>',
+    '<codex_internal_context source="extension">\nsteer\n</codex_internal_context>', '<goal_context>\ngo\n</goal_context>', '<external_notes>value</external_notes>',
+    'Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.',
+    'Warning: Your account was flagged for potentially high-risk cyber activity and routed to another model.',
+    'Warning: The maximum number of unified exec processes you can keep open is 60.',
+  ];
+  const typed = [
+    'fix the parser', '<project_context>\nbody\n</project_context>', '<environment_context>\nno closing tag', 'see the # AGENTS.md instructions for details',
+    '<codex_internal_context source="Extension">\nbody\n</codex_internal_context>', '<hook_prompt>no run id</hook_prompt>', '<external_a>x</external_b>',
+  ];
+  lines(file, [...injected.map((t, i) => user(`i${i}`, t)), ...typed.map((t, i) => user(`t${i}`, t)),
+    user('mixed', '<environment_context>x</environment_context>', 'real', '<skill>y</skill>')]);
+  try {
+    const parsed = await readConversation(conversation('codex', file));
+    assert.deepEqual(parsed.entries.map(body), [...typed, 'real']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('Codex phase markers exclude commentary and commit explicit final answers immediately', async () => {
   const dir = temp(), file = join(dir, 'phases.jsonl');
   const message = (id: string, phase: string, channel?: string | null) => ({ type: 'response_item', timestamp: date,
