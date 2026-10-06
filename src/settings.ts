@@ -34,7 +34,7 @@ export function invalid(key: SettingKey, value: unknown) {
 /** Missing keys take their defaults, so config files written before a setting existed keep working. */
 export function readSettings(value: Record<string, unknown>): Settings {
   return Object.fromEntries(SETTING_KEYS.map(key => {
-    const raw = value[key] ?? SETTINGS[key].default, problem = invalid(key, raw);
+    const raw = Object.hasOwn(value, key) ? value[key] : SETTINGS[key].default, problem = invalid(key, raw);
     if (problem) throw new Error(problem);
     return [key, raw];
   })) as Settings;

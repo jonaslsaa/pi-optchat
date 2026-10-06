@@ -11,6 +11,9 @@ const ROLES: Record<Role, { label: string; description: string; applies: string 
 };
 const modelName = (choice: ModelChoice) => `${choice.provider}/${choice.model}`;
 const showModel = (choice: ModelChoice) => `${modelName(choice)} · ${choice.thinking}`;
+/** The value column: the model, then whether it is the default (shown short, without its provider). */
+const modelValue = (theme: Theme, role: Role, choice: ModelChoice) => `${showModel(choice)}${theme.fg('dim', showModel(choice) === showModel(defaults[role])
+  ? '  default' : `  default ${defaults[role].model} · ${defaults[role].thinking}`)}`;
 const show = (key: SettingKey, value: number | boolean) => {
   const spec = SETTINGS[key];
   return typeof value === 'boolean' ? value ? 'on' : 'off' : spec.kind === 'number' && spec.unit ? `${value} ${spec.unit}` : String(value);
@@ -113,12 +116,12 @@ export function settingsPage(theme: Theme, o: Options, close: () => void, redraw
     return undefined;
   };
   const models = (['compactor', 'subagent'] as const).map((role): SettingItem => {
-    const { label, description, applies } = ROLES[role], same = showModel(config[role]) === showModel(defaults[role]);
+    const { label, description, applies } = ROLES[role];
     return { id: role, label, description: `${description} Default ${showModel(defaults[role])}. ${applies}`,
-      currentValue: `${showModel(config[role])}${same ? marker(true, '') : ''}`,
+      currentValue: modelValue(theme, role, config[role]),
       submenu: (_value, done) => new ModelStep(theme, role, o.models, config[role], choice => {
         const problem = apply({ [role]: choice }, `${label.toLowerCase()} ${showModel(choice)}`, applies);
-        if (!problem) done(`${showModel(choice)}${showModel(choice) === showModel(defaults[role]) ? marker(true, '') : ''}`);
+        if (!problem) done(modelValue(theme, role, choice));
         return problem;
       }, () => done()),
     };

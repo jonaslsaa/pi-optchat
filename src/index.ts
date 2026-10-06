@@ -32,6 +32,9 @@ import { mainTitle, TabTitle } from './title.ts';
 import { showSettings } from './settings-page.ts';
 
 const binding = 'optchat.profile';
+const CONTINUITY = '\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text; left out when very long), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.';
+/** A report run while idle reuses the last built prompt, so a Previous exchange change since then is applied here. */
+const continuity = (prompt: string, on: boolean) => on === prompt.includes(CONTINUITY) ? prompt : on ? prompt.replace(VIEW_DOC, VIEW_DOC + CONTINUITY) : prompt.replace(CONTINUITY, '');
 interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
 export default function optchat(pi: ExtensionAPI) {
@@ -241,7 +244,7 @@ export default function optchat(pi: ExtensionAPI) {
     startRun(ctx);
     const a = required();
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
-    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? '\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text; left out when very long), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.' : ''}`;
+    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}`;
     event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
     prompt = event.systemPrompt;
   });
@@ -280,7 +283,7 @@ export default function optchat(pi: ExtensionAPI) {
         view = a.memory.render(); // Capture old history before logging the new input.
         flush();
       }
-      return { messages: buildContext(event.messages, run, view, prompt, previous) };
+      return { messages: buildContext(event.messages, run, view, continuity(prompt, a.config.previousExchange), previous) };
     } catch (error) {
       // Pi catches extension errors. Explicitly abort so it cannot fall back to old context.
       ctx.abort();
