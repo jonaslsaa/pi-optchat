@@ -3,6 +3,7 @@ import { DynamicBorder, type ExtensionContext, type Theme } from '@earendil-work
 import { defaults, THINKING, type ProfileConfig } from './profiles.ts';
 import { invalid, isNumberKey, SETTING_KEYS, SETTINGS, type NumberKey, type SettingKey } from './settings.ts';
 import type { ModelChoice } from './compactor.ts';
+import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 
 type Role = 'compactor' | 'subagent';
 const ROLES: Record<Role, { label: string; description: string; applies: string }> = {
@@ -20,7 +21,9 @@ const show = (key: SettingKey, value: number | boolean) => {
 };
 
 interface Options {
-  profile: string; config: ProfileConfig; models: string[];
+  profile: string; config: ProfileConfig;
+  /** Each model with the thinking levels Pi can send it (Sonnet 5.5 has no "off"). */
+  models: { name: string; thinking: readonly ThinkingLevel[] }[];
   /** Saves the whole profile config; throws if it can't be written. */
   save: (config: ProfileConfig) => void;
 }
@@ -61,21 +64,21 @@ class NumberStep extends Container {
 /** Model first (type to filter), then thinking level; Esc goes back a step. */
 class ModelStep extends Container {
   private active: { handleInput(data: string): void } = { handleInput: () => {} };
-  constructor(private readonly theme: Theme, private readonly role: Role, private readonly models: string[], private readonly current: ModelChoice,
+  constructor(private readonly theme: Theme, private readonly role: Role, private readonly models: Options['models'], private readonly current: ModelChoice,
     private readonly submit: (choice: ModelChoice) => string | undefined, private readonly cancel: () => void) {
     super();
     this.pickModel();
   }
   private pickModel() {
     const { theme, current } = this, filter = new Input();
-    const items: SelectItem[] = this.models.map(value => ({ value, label: value }));
+    const items: SelectItem[] = this.models.map(({ name }) => ({ value: name, label: name }));
     let list = new SelectList(items, 10, listTheme(theme));
     const build = () => {
       list = new SelectList(filter.getValue() ? fuzzyFilter(items, filter.getValue(), i => i.value) : items, 10, listTheme(theme));
       list.onSelect = item => this.pickThinking(item.value); list.onCancel = this.cancel;
       return list;
     };
-    build(); list.setSelectedIndex(Math.max(0, this.models.indexOf(modelName(current))));
+    build(); list.setSelectedIndex(Math.max(0, this.models.findIndex(m => m.name === modelName(current))));
     filter.focused = true;
     const box = step(theme, ROLES[this.role].label, `${ROLES[this.role].description} Now ${showModel(current)}.`, filter, 'Type to filter · Enter to choose · Esc to go back', [new Spacer(1), list]);
     this.show(box, data => {
@@ -87,11 +90,12 @@ class ModelStep extends Container {
   }
   private pickThinking(model: string) {
     const { theme, current } = this, error = new Text('', 0, 0);
-    const list = new SelectList(THINKING.map(value => ({ value, label: value })), THINKING.length, listTheme(theme));
-    list.setSelectedIndex(Math.max(0, THINKING.indexOf(current.thinking)));
+    const levels = this.models.find(m => m.name === model)?.thinking ?? THINKING;
+    const list = new SelectList(levels.map(value => ({ value, label: value })), levels.length, listTheme(theme));
+    list.setSelectedIndex(Math.max(0, levels.indexOf(current.thinking)));
     list.onCancel = () => this.pickModel();
     list.onSelect = item => {
-      const thinking = THINKING.find(level => level === item.value);
+      const thinking = levels.find(level => level === item.value);
       const slash = model.indexOf('/');
       const problem = thinking && this.submit({ provider: model.slice(0, slash), model: model.slice(slash + 1), thinking });
       if (problem) error.setText(theme.fg('error', problem));
