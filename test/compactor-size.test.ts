@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
@@ -24,12 +24,14 @@ async function attempts(first: number) {
       return stream;
     },
   });
-  const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }));
-  const line = await compress({ context: '<chat>\n</chat>', source: 'user: a long message', merge: false }, new AbortController().signal);
-  return { calls, bytes: line.length };
+  try {
+    const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }));
+    const line = await compress({ context: '<chat>\n</chat>', source: 'user: a long message', merge: false }, new AbortController().signal);
+    return { calls, bytes: line.length };
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
-test('a summary a little over 512 bytes is kept; one far over is retried', async () => {
-  assert.deepEqual(await attempts(600), { calls: 1, bytes: 600 });
-  assert.deepEqual(await attempts(700), { calls: 2, bytes: 400 });
+test('a summary up to 640 bytes is kept; one over 640 is retried', async () => {
+  assert.deepEqual(await attempts(640), { calls: 1, bytes: 640 });
+  assert.deepEqual(await attempts(641), { calls: 2, bytes: 400 });
 });
