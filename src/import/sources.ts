@@ -43,7 +43,7 @@ function text(value: unknown): string {
 }
 /**
  * Claude Code logs slash commands, `!` shell commands, and their local output as user messages. Returns undefined
- * for anything else, '' for scaffolding to drop, or what the user typed (`/name args`, `!command`), a real request.
+ * for anything else, '' for output to drop, or what the user typed (`/name args`, `/name`, `!command`).
  */
 function claudeCommand(content: string): string | undefined {
   const s = content.trimStart();
@@ -52,7 +52,7 @@ function claudeCommand(content: string): string | undefined {
   if (shell !== undefined) return shell && `!${shell}`;
   if (!/^<command-(name|message|args)>/.test(s)) return undefined;
   const name = /<command-name>([^<]*)<\/command-name>/.exec(s)?.[1].trim(), args = /<command-args>([\s\S]*?)<\/command-args>/.exec(s)?.[1].trim();
-  return name && args ? `${name} ${args}` : '';
+  return name ? `${name} ${args ?? ''}`.trimEnd() : '';
 }
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
 function imported(c: Conversation, id: string, kind: Kind, content: string, date: string, identity = content): ImportedEntry | undefined {

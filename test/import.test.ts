@@ -45,7 +45,7 @@ test('Claude imports user messages and final replies, omitting tool loops and re
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('Claude slash commands keep only typed arguments, shell commands stay plain and local command output is dropped', async () => {
+test('Claude slash and shell commands stay as typed, with or without arguments, and their local output is dropped', async () => {
   const dir = temp(), file = join(dir, 'claude.jsonl');
   const user = (uuid: string, content: string) => ({ type: 'user', uuid, cwd: '/synthetic', timestamp: date, message: { role: 'user', content } });
   const reply = (uuid: string, text: string) => ({ type: 'assistant', uuid, timestamp: date, message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text }] } });
@@ -63,11 +63,11 @@ test('Claude slash commands keep only typed arguments, shell commands stay plain
   ]);
   try {
     const parsed = await readConversation(conversation('claude', file));
-    assert.deepEqual(parsed.entries.map(e => e.text.slice(e.text.indexOf(']\n') + 2)), ['!git status', '/oreo-mode ship the parser fix', 'shipped', 'what is next?', 'the docs']);
+    assert.deepEqual(parsed.entries.map(e => e.text.slice(e.text.indexOf(']\n') + 2)), ['/compact', '!git status', '/oreo-mode ship the parser fix', 'shipped', 'what is next?', 'the docs']);
     assert.doesNotMatch(JSON.stringify(parsed.entries), /command-|bash-|Compacted|Unknown command|On branch/);
-    assert.equal(parsed.entries[1].receipt, `import:${createHash('sha256').update(JSON.stringify(['claude', 'conversation-1', 'skill', 'user', raw])).digest('hex')}`, 'the receipt still hashes the raw text');
+    assert.equal(parsed.entries[2].receipt, `import:${createHash('sha256').update(JSON.stringify(['claude', 'conversation-1', 'skill', 'user', raw])).digest('hex')}`, 'the receipt still hashes the raw text');
     const scan = await scanLocal('claude', [dir]);
-    assert.equal(scan.conversations[0].title, '!git status', 'a bare command never becomes the title');
+    assert.equal(scan.conversations[0].title, '/compact', 'the title is the command as typed, not its markup');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
