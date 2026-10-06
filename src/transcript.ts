@@ -63,8 +63,18 @@ function completedExchange(history: readonly AgentMessage[]) {
   return [...requests, { ...answer, content }];
 }
 
-/** Recover the latest successful run on this branch, skipping failed and unfinished runs. */
+/** Bytes of text (~4,000 tokens). Most exchanges are 1-7 KB; a larger one, usually a big paste, is left out entirely
+ * and the model falls back to its summaries in the memory view, zooming for the full text if it needs it. */
+export const PREVIOUS_EXCHANGE = 16_000;
+
+/** The latest successful run on this branch, skipping failed and unfinished runs; none if it is too large to replay. */
 export function previousExchange(branch: readonly SessionEntry[]) {
+  const exchange = latestExchange(branch);
+  const bytes = exchange.reduce((sum, message) => sum + Buffer.byteLength(textContent(message.content)), 0);
+  return bytes <= PREVIOUS_EXCHANGE ? exchange : [];
+}
+
+function latestExchange(branch: readonly SessionEntry[]) {
   let end = -1;
   let legacyEnd = branch.length;
   const messages = (entries: readonly SessionEntry[]) => entries.flatMap(entry => entry.type === 'message' ? [asUser(entry.message)] : entry.type === 'custom_message' && entry.customType === REPORT_TYPE ? [asUser({ role: 'custom', customType: entry.customType, content: entry.content, display: entry.display, timestamp: Date.parse(entry.timestamp) })] : []);

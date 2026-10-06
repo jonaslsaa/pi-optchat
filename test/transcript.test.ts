@@ -8,7 +8,7 @@ import { createAssistantMessageEventStream, type AssistantMessage, type Context,
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
-import { buildContext, previousExchange, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
+import { buildContext, PREVIOUS_EXCHANGE, previousExchange, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 
@@ -72,6 +72,20 @@ test('unsuccessful or unsettled runs preserve the earlier completed exchange', (
   appendRun(orphan, [answer('Unpaired answer')]);
   assert.deepEqual(previousExchange(orphan.getBranch()), []);
   assert.deepEqual(previousExchange([]), []);
+});
+
+test('a previous exchange up to the size limit is replayed in full', () => {
+  const manager = SessionManager.inMemory();
+  const request = 'x'.repeat(PREVIOUS_EXCHANGE / 2), reply = 'y'.repeat(PREVIOUS_EXCHANGE / 2);
+  appendRun(manager, [user(request), answer(reply)]);
+  assert.deepEqual(previousExchange(manager.getBranch()).map(m => textContent(m.content)), [request, reply]);
+});
+
+test('an oversized previous exchange is left out entirely, not swapped for an older one', () => {
+  const manager = SessionManager.inMemory();
+  appendRun(manager, [user('Earlier'), answer('Earlier answer')]);
+  appendRun(manager, [user('Paste: ' + 'x'.repeat(PREVIOUS_EXCHANGE)), answer('Done.')]);
+  assert.deepEqual(previousExchange(manager.getBranch()), []);
 });
 
 test('legacy sessions recover the last successful exchange before run markers were available', () => {

@@ -193,7 +193,7 @@ The recipe's four prompts are kept verbatim in `src/prompts.ts`, along with its 
 
 Each run's context is the memory view, the previous exchange, and your new message. Deliberate additions:
 
-1. **Previous exchange kept verbatim.** Your last request (with any steering) and the final answer are included in full, so "why is that?" refers to what you actually read. Tool calls and reasoning are not carried over. It comes on top of the 128,000-byte view and is not truncated. A new Pi session starts with the memory view only.
+1. **Previous exchange kept verbatim.** Your last request (with any steering) and the final answer are included in full, so "why is that?" refers to what you actually read. Tool calls and reasoning are not carried over. It comes on top of the 128,000-byte view. If it is over 16,000 bytes (about 4,000 tokens, usually a big paste) it is left out entirely, and the model relies on the view and zoom as in Victor's recipe. A new Pi session starts with the memory view only.
 2. **Subagents** are built in with Pi's SDK rather than a separate package. Children report individually instead of per batch, and can delegate two extra levels.
 3. **Profiles**, the **inspector**, the **usage ledger**, **import**, and **connected windows** are additions. Import adds historical-record guidance to the prompts.
 4. **Not done**: computer use and hosting on an always-on machine.

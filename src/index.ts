@@ -239,7 +239,7 @@ export default function optchat(pi: ExtensionAPI) {
     startRun(ctx);
     const a = required();
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
-    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.`;
+    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text; left out when very long), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.`;
     event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
     prompt = event.systemPrompt;
   });
