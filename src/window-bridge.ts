@@ -3,7 +3,7 @@ import { createConnection, createServer, type Socket } from 'node:net';
 import type { Children } from './agents.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './cache.ts';
-import { profileSocket } from './profiles.ts';
+import { checkSocketPath, profileSocket } from './profiles.ts';
 import { textContent } from './transcript.ts';
 import { isActiveRun } from './runs.ts';
 
@@ -83,7 +83,7 @@ function wire(socket: Socket, receive: (frame: Frame) => void) {
 /** Call only while holding the profile lock. The owner hosts every child session. */
 export async function serveWindows(directory: string, children: Children, available: () => boolean,
   report: (text: string) => Promise<void>) {
-  const path = profileSocket(directory, 'windows');
+  const path = profileSocket(directory, 'windows'); checkSocketPath(path);
   if (existsSync(path)) unlinkSync(path); // A previous owner can no longer hold the profile lock.
   const connections = new Set<Socket>();
   const work = new Set<Promise<void>>();
