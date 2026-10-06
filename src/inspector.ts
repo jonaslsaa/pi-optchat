@@ -152,7 +152,7 @@ export class Inspector implements Component, Focusable {
     const lines = [`${color('muted', 'Memory')} · ${count(memory.root.length)} messages · view ${Math.round(memory.size / 1000)} KB / ${Math.round(memory.budget / 1000)} KB`,
       total ? `Catching up · ${count(done)} of ${count(total)} summaries  ${color('accent', '█'.repeat(filled))}${color('dim', '░'.repeat(10 - filled))}` : color('dim', 'Settled')];
     if (memory.lastError) lines.push(color('dim', `${oneLine(memory.lastError)}${retryIn === undefined ? '' : ` · retry in ${elapsed(retryIn)}`}`));
-    lines.push('', `${color('muted', 'Agents')} · ${agents} running  ${color('dim', 'Tab → Agents')}`);
+    lines.push('', `${color('muted', 'Agents')} · ${agents} running`);
     return lines.flatMap(l => l ? wrapTextWithAnsi(l, width) : ['']);
   }
   render(width: number): string[] {

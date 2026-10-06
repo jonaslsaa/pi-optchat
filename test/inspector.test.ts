@@ -70,11 +70,11 @@ test('Tab cycles Agents, Usage and Activity; Activity is a memory gauge with an 
     assert.equal(title(), 'OptChat · personal · Agents');
     inspector.handleInput('\t'); assert.equal(title(), 'OptChat · personal · Usage');
     inspector.handleInput('\t'); assert.equal(title(), 'OptChat · personal · Activity');
-    assert.deepEqual(page(), ['Memory · 3 messages · view 97 KB / 128 KB', 'Settled', 'Agents · 0 running  Tab → Agents']);
+    assert.deepEqual(page(), ['Memory · 3 messages · view 97 KB / 128 KB', 'Settled', 'Agents · 0 running']);
     progress = { done: 12, total: 40, retryIn: 7_000 }; fake.lastError = '429 rate_limit_error';
     children.history.records.set('run', { id: 'run', task: 'review', cwd: dir, model: 'test', thinking: 'high', parentSession: 'parent', depth: 1, started: Date.now(), state: 'running', guidance: [] });
     assert.deepEqual(page(), ['Memory · 3 messages · view 97 KB / 128 KB', 'Catching up · 12 of 40 summaries  ███░░░░░░░', '429 rate_limit_error · retry in 7s',
-      'Agents · 1 running  Tab → Agents']);
+      'Agents · 1 running']);
     inspector.handleInput('\t'); assert.equal(title(), 'OptChat · personal · Agents');
   } finally { inspector.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
