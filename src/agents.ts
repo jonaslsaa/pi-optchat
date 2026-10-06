@@ -11,7 +11,7 @@ import { memoryTools } from './tools.ts';
 import { type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cachePayload } from './cache.ts';
-import { RunHistory, sessionMessages, type RunInfo, type FinishReason } from './runs.ts';
+import { RunHistory, transition, sessionMessages, type RunInfo, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { textContent } from './transcript.ts';
 import { Type } from 'typebox';
@@ -68,6 +68,7 @@ export class Children {
   private launching = 0;
   private readonly resuming = new Set<string>();
   private settling = 0;
+  private readonly launches = new Set<Promise<unknown>>();
   private readonly completions = new Set<Promise<void>>();
   constructor(private readonly memory: Memory, private readonly registry: ModelRegistry,
     private readonly choice: () => ModelChoice, private readonly instructions: () => string,
@@ -138,6 +139,26 @@ export class Children {
     const selected = this.choice();
     const model = this.registry.find(selected.provider, selected.model);
     if (!model) throw new Error(`Subagent model unavailable: ${selected.provider}/${selected.model}`);
+    const launched = await this.track(this.launchBatch({ tasks, cwd, depth, parentId, connected, selected, model, signal, cancelled }));
+    // Each child reports independently. A slow sibling must not hold back a finished result.
+    for (const live of launched) {
+      const work = this.execute(live, `${view}\n\nYour task:\n${live.info.task}`).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
+        .finally(() => { this.completions.delete(work); this.changed(); });
+      this.completions.add(work);
+      live.completion = work;
+    }
+    this.changed();
+    return launched.map(c => c.info.id);
+  }
+  /** close() waits for launches, so shutdown never unlocks the profile under a child that is still opening. */
+  private track<T>(launch: Promise<T>) {
+    this.launches.add(launch);
+    const done = () => { this.launches.delete(launch); };
+    launch.then(done, done);
+    return launch;
+  }
+  private async launchBatch({ tasks, cwd, depth, parentId, connected, selected, model, signal, cancelled }: { tasks: { task: string; cwd?: string }[]; cwd: string; depth: number; parentId?: string; connected: boolean;
+    selected: ModelChoice; model: Model<Api>; signal?: AbortSignal; cancelled: () => boolean }) {
     const launched: LiveRun[] = [];
     let reserved = tasks.length;
     this.launching += reserved;
@@ -161,22 +182,14 @@ export class Children {
       for (const child of launched) {
         await this.shutdown(child.session); // Extensions such as MCP close their connections and stop their server processes.
         this.dispose(child.session); this.running.delete(child.info.id);
-        child.info.state = 'failed'; child.info.ended = Date.now(); child.info.report = `Launch failed: ${String(error)}`;
+        transition(child.info, 'failed'); child.info.ended = Date.now(); child.info.report = `Launch failed: ${String(error)}`;
         if (child.info.connected) child.info.handoff = { reason: signal?.aborted ? 'disconnected' : 'failed' };
         this.save(child.info);
         if (child.info.connected) await this.deliverHandoff(child.info).catch(error => this.warn(`Handoff saved for recovery: ${String(error)}`));
       }
       throw error;
     } finally { this.launching -= reserved; }
-    // Each child reports independently. A slow sibling must not hold back a finished result.
-    for (const live of launched) {
-      const work = this.execute(live, `${view}\n\nYour task:\n${live.info.task}`).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
-        .finally(() => { this.completions.delete(work); this.changed(); });
-      this.completions.add(work);
-      live.completion = work;
-    }
-    this.changed();
-    return launched.map(c => c.info.id);
+    return launched;
   }
   /** Builds a child session with the same prompt, tools and extensions whether it is new or resumed. */
   private async open(o: { id: string; directory: string; depth: number; parentId?: string; connected: boolean; provider: string; model: Model<Api>;
@@ -261,28 +274,28 @@ export class Children {
         const last = session.messages.findLast(m => m.role === 'assistant');
         if (last?.role === 'assistant' && (last.stopReason === 'error' || last.stopReason === 'aborted')) break;
         if (live.pendingGuidance.length) {
-          info.state = 'running'; this.save(info);
+          transition(info, 'running'); this.save(info);
           await session.prompt(live.pendingGuidance.shift()!);
           continue;
         }
         if (live.pendingReports.length) {
-          info.state = 'running'; this.save(info);
+          transition(info, 'running'); this.save(info);
           await session.prompt(live.pendingReports.splice(0).join('\n\n'));
           continue;
         }
         const children = this.directChildren(info.id).flatMap(child => child.completion ? [child.completion] : []);
         if (!children.length && !info.connected) break;
         const wake = new Promise<void>(resolve => { live.wake = resolve; });
-        info.state = 'waiting'; this.save(info);
+        transition(info, 'waiting'); this.save(info);
         await Promise.race([...children, wake]); live.wake = undefined;
       }
       const last = session.messages.findLast(m => m.role === 'assistant');
-      info.state = info.state === 'stopping' || last?.role === 'assistant' && last.stopReason === 'aborted' ? 'stopped'
-        : last?.role === 'assistant' && last.stopReason === 'error' ? 'failed' : 'completed';
+      transition(info, info.state === 'stopping' || last?.role === 'assistant' && last.stopReason === 'aborted' ? 'stopped'
+        : last?.role === 'assistant' && last.stopReason === 'error' ? 'failed' : 'completed');
       info.report = last?.role === 'assistant' && (last.stopReason === 'error' || last.stopReason === 'aborted')
         ? `Task ${last.stopReason}: ${last.errorMessage ?? 'No details'}` : session.getLastAssistantText() || 'Finished without a text report.';
     } catch (error) {
-      info.state = info.state === 'stopping' ? 'stopped' : 'failed'; info.report = `${info.state}: ${String(error)}`;
+      transition(info, info.state === 'stopping' ? 'stopped' : 'failed'); info.report = `${info.state}: ${String(error)}`;
     } finally {
       const children = this.directChildren(info.id);
       await Promise.allSettled(children.map(child => this.stop(child.info.id)));
@@ -295,7 +308,7 @@ export class Children {
     }
     if (info.connected) {
       info.handoff ??= { reason: 'failed' };
-      info.state = info.handoff.reason === 'complete' ? 'completed' : 'interrupted';
+      transition(info, info.handoff.reason === 'complete' ? 'completed' : 'interrupted');
       this.save(info);
       await this.deliverHandoff(info);
       return;
@@ -318,7 +331,7 @@ export class Children {
   /** `caller` is the agent sending a manager message: undefined for the main agent, else the parent subagent's ID. */
   async tell(id: string, message: string, source: 'manager' | 'user' = 'manager', caller?: string) {
     const live = this.running.get(id);
-    if (!live && source === 'manager' && this.history.records.has(id)) return this.resume(id, message, caller);
+    if (!live && source === 'manager' && this.history.records.has(id)) return this.track(this.resume(id, message, caller));
     if (live && !['running', 'waiting'].includes(live.info.state)) throw new Error(`${id} is finishing. Its report will arrive on its own${live.info.connected || source === 'user' ? '' : '; tell it again after that to resume it'}.`);
     if (!live) throw new Error(`No running subagent ${id}.`);
     const text = live.info.connected && source === 'manager' ? `[Main agent guidance]\n${message.trim()}` : message.trim(); if (!message.trim()) throw new Error('Message is empty.');
@@ -330,6 +343,7 @@ export class Children {
       else await live.session.steer(text);
     }
     catch (error) { guidance.state = 'undelivered'; this.save(live.info); throw error; }
+    if (guidance.state === 'undelivered') throw new Error(`${id} finished before it read the message. Tell it again to resume it.`);
     return 'Message queued for the next tool boundary.';
   }
   /** Reopens a finished child from its saved transcript, same ID, parent and model, and gives it a new message. */
@@ -394,7 +408,7 @@ export class Children {
     const recovery = (async () => {
       for (const run of eligible) {
         run.handoff ??= { reason: 'owner-stopped' };
-        run.state = run.handoff.reason === 'complete' ? 'completed' : 'interrupted'; this.save(run);
+        transition(run, run.handoff.reason === 'complete' ? 'completed' : 'interrupted'); this.save(run);
         await this.deliverHandoff(run);
       }
     })();
@@ -433,17 +447,18 @@ export class Children {
     const descendants: LiveRun[] = [];
     const collect = (run: LiveRun) => { descendants.push(run); for (const child of this.directChildren(run.info.id)) collect(child); };
     collect(live);
-    for (const run of descendants) {
+    const stopping = descendants.filter(run => transition(run.info, 'stopping'));
+    for (const run of stopping) {
       if (run.info.connected) run.info.handoff ??= { reason: 'owner-stopped' };
-      run.info.state = 'stopping';
       run.wake?.();
       try { this.save(run.info); } catch (error) { this.warn(`Could not save stop status: ${String(error)}`); }
     }
-    await Promise.allSettled(descendants.map(run => run.session.abort()));
+    await Promise.allSettled(stopping.map(run => run.session.abort()));
   }
   async close() {
     this.closing = true;
     await Promise.allSettled([...this.running.keys()].map(id => this.stop(id)));
+    await Promise.allSettled(this.launches);
     await Promise.allSettled(this.completions);
   }
 }

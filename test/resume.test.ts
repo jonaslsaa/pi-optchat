@@ -232,3 +232,61 @@ test('a resume whose record cannot be saved leaves the child finished and resuma
     assert.equal(reports.at(-1), `[${solo}] solo resumed after "solo first report" heard: after recovery`);
   } finally { await cleanup(children); }
 });
+
+test('a stop that arrives while a finished child shuts down leaves it completed', async () => {
+  const { dir, hooks, make, cleanup } = await setup('optchat-late-stop-');
+  const children = make('session');
+  let finish!: () => void;
+  const finishing = new Promise<void>(resolve => { finish = resolve; });
+  try {
+    hooks.opened = session => { const emit = session.extensionRunner.emit.bind(session.extensionRunner);
+      session.extensionRunner.emit = (async (event: Parameters<typeof emit>[0]) => { if (event.type === 'session_shutdown') await finishing; return emit(event); }) as typeof emit; };
+    const [id] = await children.spawn([{ task: 'quick' }], dir);
+    await until(() => children.history.records.get(id)?.state === 'completed' && !!children.live(id));
+    await children.stop(id);
+    finish();
+    await until(() => !children.active);
+    assert.equal(children.history.records.get(id)?.state, 'completed', 'a finished run never moves to stopping again');
+  } finally { finish(); await cleanup(children); }
+});
+
+for (const [name, launch] of [['resume', (children: Children, id: string, dir: string) => children.tell(id, 'more')],
+  ['spawn', (children: Children, _id: string, dir: string) => children.spawn([{ task: 'late' }], dir)]] as const) {
+  test(`close() waits for a ${name} that is still opening its session`, async () => {
+    const { dir, hooks, make, cleanup } = await setup(`optchat-close-${name}-`);
+    const children = make('session');
+    try {
+      const [id] = await children.spawn([{ task: 'solo' }], dir);
+      await until(() => !children.active);
+      let opening!: () => void, opened!: () => void, disposed = 0;
+      const started = new Promise<void>(resolve => { opening = resolve; });
+      hooks.beforeSession = () => { opening(); return new Promise<void>(resolve => { opened = resolve; }); };
+      hooks.opened = session => { const dispose = session.dispose.bind(session); session.dispose = () => { disposed++; dispose(); }; };
+      const refused = assert.rejects(launch(children, id, dir), /Parent or profile is stopping|Profile is closing/);
+      await started;
+      const closing = children.close();
+      hooks.beforeSession = undefined; opened();
+      await closing;
+      assert.equal(disposed, 1, 'close() returned while a session was still being created');
+      await refused;
+    } finally { await cleanup(children); }
+  });
+}
+
+test('a tell that loses the race with the child finishing is refused, not reported as queued', async () => {
+  const { dir, hooks, releases, make, cleanup } = await setup('optchat-tell-race-');
+  const children = make('session');
+  try {
+    let open!: () => void;
+    const steering = new Promise<void>(resolve => { open = resolve; });
+    hooks.opened = session => { const steer = session.steer.bind(session); session.steer = async text => { await steering; return steer(text); }; };
+    const [id] = await children.spawn([{ task: 'hold a' }], dir);
+    await until(() => releases.has('hold a'));
+    const refused = assert.rejects(children.tell(id, 'please do X'), /finished before it read the message/);
+    releases.get('hold a')!();
+    await until(() => children.history.records.get(id)?.state === 'completed');
+    open();
+    await refused;
+    assert.equal(children.history.records.get(id)?.guidance[0].state, 'undelivered');
+  } finally { await cleanup(children); }
+});

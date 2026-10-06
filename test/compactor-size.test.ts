@@ -10,7 +10,7 @@ import { bytes, NODE } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 
 /** A fake model whose first reply is `first` bytes long and whose retries fit. */
-async function attempts(first: number, accepted?: number) {
+async function attempts(first: number, { source = 'user: ' + 'a long message '.repeat(70), merge = false, accepted }: { source?: string; merge?: boolean; accepted?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-size-'));
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
   let calls = 0;
@@ -28,7 +28,7 @@ async function attempts(first: number, accepted?: number) {
   try {
     const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }), undefined,
       accepted === undefined ? undefined : () => accepted);
-    const line = await compress({ context: '<chat>\n</chat>', source: 'user: a long message', merge: false }, new AbortController().signal);
+    const line = await compress({ context: '<chat>\n</chat>', source, merge }, new AbortController().signal);
     return { calls, bytes: line.length };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
@@ -39,8 +39,14 @@ test('a summary up to 640 bytes is kept; one over 640 is retried', async () => {
 });
 
 test('the profile\'s summary size tolerance decides when a line is retried', async () => {
-  assert.deepEqual(await attempts(513, 512), { calls: 2, bytes: 400 }, '512 is Victor\'s strict rule');
-  assert.deepEqual(await attempts(700, 700), { calls: 1, bytes: 700 });
+  assert.deepEqual(await attempts(513, { accepted: 512 }), { calls: 2, bytes: 400 }, '512 is Victor\'s strict rule');
+  assert.deepEqual(await attempts(700, { accepted: 700 }), { calls: 1, bytes: 700 });
+});
+
+test('a merge that is not smaller than the two lines it replaces is retried', async () => {
+  const children = ['a'.repeat(280), 'b'.repeat(280)].join('\n'); // 561 bytes
+  assert.deepEqual(await attempts(590, { source: children, merge: true }), { calls: 2, bytes: 400 });
+  assert.deepEqual(await attempts(590, { source: 'c'.repeat(1000), merge: true }), { calls: 1, bytes: 590 });
 });
 
 test('the size example the compactor is shown is a real line of exactly NODE bytes, not padding', () => {

@@ -19,6 +19,18 @@ export interface RunInfo {
   /** `from` is missing on runs saved before senders were recorded. */
   guidance: { text: string; date: number; state: 'queued' | 'delivered' | 'undelivered'; from?: 'user' | 'manager' }[];
 }
+const moves: Record<RunState, readonly RunState[]> = {
+  running: ['waiting', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'],
+  waiting: ['running', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'],
+  stopping: ['stopped', 'failed', 'interrupted'],
+  // A finished run only takes the outcome of a connected handoff.
+  completed: ['interrupted'], failed: ['completed', 'interrupted'], stopped: ['completed', 'interrupted'], interrupted: ['completed'],
+};
+/** Every run state change goes through here, so a late stop cannot rewrite a finished run. Returns whether the run is now in `to` (true for a repeat, so a second stop can still abort a child that ignored the first). */
+export function transition(run: RunInfo, to: RunState) {
+  if (run.state !== to && !moves[run.state].includes(to)) return false;
+  run.state = to; return true;
+}
 export const isActiveRun = (run: RunInfo) => run.state === 'running' || run.state === 'waiting' || run.state === 'stopping';
 function isRun(value: unknown): value is RunInfo {
   return record(value) && ['id', 'task', 'cwd', 'model', 'thinking', 'parentSession'].every(k => typeof value[k] === 'string')
@@ -57,7 +69,7 @@ export class RunHistory {
         this.records.set(run.id, run);
         if (isActiveRun(run)) {
           if (run.connected) run.handoff ??= { reason: 'owner-stopped' };
-          run.state = 'interrupted'; run.ended = Date.now();
+          transition(run, 'interrupted'); run.ended = Date.now();
           run.report = 'Pi closed before this agent finished. Its partial transcript is retained.';
           for (const g of run.guidance) if (g.state === 'queued') g.state = 'undelivered';
           this.save(run);
