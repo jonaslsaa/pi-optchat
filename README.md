@@ -1,3 +1,5 @@
+![Pi-OptChat: persistent memory for Pi](docs/banner.png)
+
 # pi-optchat
 
 A Pi extension that implements [Victor Taelin's OptChat recipe](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449): one endless chat per profile, remembered through a summary tree instead of compaction.
