@@ -220,7 +220,7 @@ test('tool images survive active-context truncation while text is bounded', () =
   assert.equal(bounded.role, 'toolResult');
   if (bounded.role !== 'toolResult') throw new Error('unexpected role');
   assert.ok(bounded.content.includes(image));
-  assert.ok(bounded.content.filter(c => c.type === 'text').reduce((n, c) => n + c.text.length, 0) <= 30_000);
+  assert.ok(bounded.content.filter(c => c.type === 'text').reduce((n, c) => n + c.text.length, 0) <= CAP);
 });
 
 test('crash recovery saves unconsumed inputs once, including append-before-ack crash', async () => {
