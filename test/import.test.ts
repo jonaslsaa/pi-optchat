@@ -369,7 +369,7 @@ test('an import gives the compactor the same inputs as a live chat that sent the
   // 300 lines of 500 bytes overflow the view, so merges run while later messages still wait to be summarized.
   const dir = temp(), live = temp(), old = new Memory(dir, short);
   const imported = Array.from({ length: 300 }, (_, i) => entry(`m${i}`, date, `${i} ${'imported detail '.repeat(40)}`));
-  const record = (calls: string[]) => async (input: Parameters<Compressor>[0]) => { calls.push(JSON.stringify([input.merge, input.source, input.context])); return input.source.slice(0, 500); };
+  const record = (calls: string[]) => async (input: Parameters<Compressor>[0]) => { calls.push(JSON.stringify([input.merge, input.historical, input.source, input.context])); return input.source.slice(0, 500); };
   const fromImport: string[] = [], fromChat: string[] = [];
   let chat: Memory | undefined;
   try {
@@ -377,23 +377,30 @@ test('an import gives the compactor the same inputs as a live chat that sent the
     assert.ok(prepareImport(dir, old, imported, 'append'));
     await runImport(dir, record(fromImport), AbortSignal.timeout(20000));
     chat = new Memory(live, record(fromChat), () => {});
-    for (const e of imported) { chat.append(e.kind, e.text, e.date, e.receipt); await chat.settle(AbortSignal.timeout(20000)); }
+    for (const e of imported) { chat.append(e.kind, e.text, e.date, e.receipt, e.origin); await chat.settle(AbortSignal.timeout(20000)); }
     await chat.settle(AbortSignal.timeout(20000), true);
     assert.ok(fromChat.some(call => call.startsWith('[true')), 'the view overflowed and merged');
     assert.deepEqual(fromImport.sort(), fromChat.sort());
   } finally { await chat?.close(); rmSync(dir, { recursive: true, force: true }); rmSync(live, { recursive: true, force: true }); }
 });
 
-test('a staged plan with an invalid entry is refused before anything is written', async () => {
+test('a staged plan with an invalid entry, or missing lines, is refused before anything is written', async () => {
   const dir = temp(), old = new Memory(dir, short);
   try {
     old.append('user', 'original'); await old.settle(undefined, true); await old.close();
-    const job = prepareImport(dir, old, [entry('a'), entry('b')], 'append'); assert.ok(job);
-    const staged = join(dir, job.target, 'staged.jsonl');
-    writeFileSync(staged, readFileSync(staged, 'utf8').replace('"kind":"user","text":"Imported b"', '"kind":"bogus","text":"Imported b"'));
-    await assert.rejects(runImport(dir, short, AbortSignal.timeout(5000)), /invalid/);
-    assert.equal(memoryDirectory(dir), dir);
-    assert.deepEqual(readdirSync(join(dir, job.target, 'main')), ['000-import.jsonl']);
+    const job = prepareImport(dir, old, [entry('a'), entry('b'), entry('c')], 'append'); assert.ok(job);
+    const staged = join(dir, job.target, 'staged.jsonl'), plan = readFileSync(staged, 'utf8'), lines = plan.split('\n').filter(Boolean);
+    const damaged = {
+      'a bad entry': plan.replace('"kind":"user","text":"Imported b"', '"kind":"bogus","text":"Imported b"'),
+      'a missing middle line': [lines[0], lines[1], lines[3]].join('\n') + '\n',
+      'a truncated tail': lines.slice(0, 3).join('\n') + '\n',
+    };
+    for (const [name, text] of Object.entries(damaged)) {
+      writeFileSync(staged, text);
+      await assert.rejects(runImport(dir, short, AbortSignal.timeout(5000)), /invalid/, name);
+      assert.equal(memoryDirectory(dir), dir);
+      assert.deepEqual(readdirSync(join(dir, job.target, 'main')), ['000-import.jsonl']);
+    }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
