@@ -1,6 +1,7 @@
 import { CustomEditor, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { matchesKey, truncateToWidth, visibleWidth, type KeyId } from '@earendil-works/pi-tui';
 import type { Children } from './agents.ts';
+import type { Memory } from './memory.ts';
 import { inspectorShowing, nextPage, type InspectorPage } from './inspector.ts';
 import { isActiveRun } from './runs.ts';
 
@@ -30,7 +31,7 @@ export class BarNavigation {
   }
 }
 
-export function mountNavigation(ctx: ExtensionContext, children: Children, shortcut: string, open: (page: InspectorPage) => void) {
+export function mountNavigation(ctx: ExtensionContext, children: Children, memory: Pick<Memory, 'progress' | 'onChange'>, shortcut: string, open: (page: InspectorPage) => void) {
   const navigation = new BarNavigation();
   const previous = ctx.ui.getEditorComponent();
   let redraw = () => {};
@@ -53,16 +54,16 @@ export function mountNavigation(ctx: ExtensionContext, children: Children, short
         if (inspectorShowing()) return []; // The open panel replaces the editor and this bar.
         const list = children.history.list(), running = list.filter(isActiveRun).length;
         const label = (page: InspectorPage, text: string) => navigation.selected === page ? theme.fg('accent', `› ${text}`) : theme.fg('muted', text);
-        const left = `${label('agents', `Agents: ${running} running · ${list.length - running} saved`)}   ${label('usage', 'Usage')}   ${label('activity', 'Activity')}`;
+        const left = `${label('agents', `Agents: ${running} running · ${list.length - running} saved`)}   ${label('usage', 'Usage')}   ${memory.progress().total || running ? theme.fg('accent', '● ') : ''}${label('activity', 'Activity')}`;
         const hint = theme.fg('dim', navigation.selected ? '←→ select · Enter open · Esc input' : `${previous ? '' : '↓ select · '}${shortcut} inspect`);
         const gap = width - visibleWidth(left) - visibleWidth(hint);
         return [truncateToWidth(gap >= 3 ? `${left}${' '.repeat(gap)}${hint}` : `${left}   ${hint}`, width)];
       },
     };
   }, { placement: 'belowEditor' });
-  const unsubscribe = children.subscribe(() => redraw());
+  const unsubscribe = [children.subscribe(() => redraw()), memory.onChange(() => redraw())];
   return () => {
-    unsubscribe(); ctx.ui.setWidget('optchat-agents', undefined);
+    unsubscribe.forEach(stop => stop()); ctx.ui.setWidget('optchat-agents', undefined);
     if (!previous && ctx.ui.getEditorComponent() === factory) ctx.ui.setEditorComponent(undefined);
   };
 }

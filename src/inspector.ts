@@ -42,7 +42,7 @@ export const nextPage = (page: InspectorPage, delta = 1) => pages[(pages.indexOf
 export type InspectorAction = 'model' | { open: string };
 type Tone = 'accent' | 'muted' | 'dim' | 'error' | 'warning' | 'border';
 interface Options {
-  profile: string; session: string; children: Children; usage: UsageLedger; memory: Pick<Memory, 'activity' | 'onChange'>; page: InspectorPage;
+  profile: string; session: string; children: Children; usage: UsageLedger; memory: Pick<Memory, 'root' | 'size' | 'budget' | 'lastError' | 'progress' | 'onChange'>; page: InspectorPage;
   rows: () => number; redraw: () => void; done: (action?: InspectorAction) => void;
   color: (tone: Tone, text: string) => string;
   context: () => number | null | undefined;
@@ -143,26 +143,16 @@ export class Inspector implements Component, Focusable {
     lines.push('', color('dim', 'Estimated at API prices, not your subscription bill.'), ...usage.warnings.map(w => color('warning', w)));
     return lines.flatMap(l => l ? wrapTextWithAnsi(l, width) : ['']);
   }
-  /** Background work: summaries being built or waiting to retry, and how many agents run (their list is one Tab away). */
+  /** Memory as a gauge: how full the view is, whether summaries are catching up, and how many agents run (their list is one Tab away). */
   private activityLines(width: number) {
     const { memory, children, color } = this.options;
-    const { pending, lastError, building, retrying } = memory.activity(), now = Date.now();
+    const { done, total, retryIn } = memory.progress();
     const agents = children.history.list().filter(isActiveRun).length;
-    if (!building.length && !retrying.length && !pending && !agents) return [color('muted', 'Nothing running.')];
-    const rows = [...building.sort((a, b) => a.started - b.started).map(p => ({ p, time: elapsed(now - p.started), tone: undefined })),
-      ...retrying.map(p => ({ p, time: `retry in ${elapsed(p.in)}`, tone: 'warning' as const }))]
-      .map(({ p, time, tone }) => ({ cells: [`${p.i * 2 ** p.l}+${2 ** p.l}`, `level ${p.l}`, time], tone }));
-    const widths = [0, 1].map(c => Math.max(...rows.map(r => r.cells[c].length)));
-    const headline = [`${building.length} in flight`, `${count(pending)} ${pending === 1 ? 'message' : 'messages'} pending`, ...retrying.length ? [`${retrying.length} retrying`] : []];
-    const lines = [`${color('muted', 'Summaries')}  ${headline.join(' · ')}`, ''];
-    for (const { cells: [line, level, time], tone } of rows) {
-      const text = `  ${line.padEnd(widths[0])}  ${level.padEnd(widths[1])}  ${time}`;
-      lines.push(tone ? color(tone, text) : text);
-    }
-    // Kept until every failed part succeeds, so it also explains a retry that is running now.
-    if (lastError) lines.push(`  ${color('error', `Last error: ${oneLine(lastError)}`)}`);
-    if (rows.length) lines.push('');
-    lines.push(`${color('muted', 'Agents'.padEnd('Summaries'.length))}  ${agents} running  ${color('dim', 'Tab → Agents')}`);
+    const filled = total ? Math.floor(10 * done / total) : 0;
+    const lines = [`${color('muted', 'Memory')} · ${count(memory.root.length)} messages · view ${Math.round(memory.size / 1000)} KB / ${Math.round(memory.budget / 1000)} KB`,
+      total ? `Catching up · ${count(done)} of ${count(total)} summaries  ${color('accent', '█'.repeat(filled))}${color('dim', '░'.repeat(10 - filled))}` : color('dim', 'Settled')];
+    if (memory.lastError) lines.push(color('dim', `${oneLine(memory.lastError)}${retryIn === undefined ? '' : ` · retry in ${elapsed(retryIn)}`}`));
+    lines.push('', `${color('muted', 'Agents')} · ${agents} running  ${color('dim', 'Tab → Agents')}`);
     return lines.flatMap(l => l ? wrapTextWithAnsi(l, width) : ['']);
   }
   render(width: number): string[] {

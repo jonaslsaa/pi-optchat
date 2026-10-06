@@ -70,27 +70,23 @@ test('a turn waits for the view to be built, not for merges that bring it under 
   } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('activity lists a summary while the compactor builds it, then as retrying with the error', async () => {
+test('progress counts summaries against the largest backlog since it was last empty', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
   let release = () => {};
-  const merging = new Promise<void>(resolve => { release = resolve; });
-  const memory = new Memory(dir, async input => { if (input.merge) { await merging; throw new Error('401 invalid x-api-key'); } return 'merged'; }, () => {}, 500, 8, 60_000);
-  const until = async (done: () => boolean, deadline = Date.now() + 2000) => { while (!done()) { assert.ok(Date.now() < deadline, 'timed out'); await new Promise(resolve => setTimeout(resolve, 5)); } };
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  // Every 600-byte message needs the compactor, which holds all of them until released.
+  const memory = new Memory(dir, async () => { await gate; return 'summary'; }, () => {});
   try {
-    const before = Date.now();
-    memory.append('user', 'a'.repeat(300)); memory.append('user', 'b'.repeat(300));
-    await until(() => memory.activity().building.some(p => p.l === 1));
-    const { building, retrying } = memory.activity();
-    assert.deepEqual(building.map(({ l, i }) => ({ l, i })), [{ l: 1, i: 0 }]);
-    assert.ok(building[0].started >= before && building[0].started <= Date.now());
-    assert.deepEqual(retrying, []);
+    assert.deepEqual(memory.progress(), { done: 0, total: 0, retryIn: undefined });
+    memory.append('user', 'a'.repeat(600)); memory.append('user', 'b'.repeat(600));
+    assert.deepEqual(memory.progress(), { done: 0, total: 3, retryIn: undefined }, 'two leaves and their parent');
+    memory.append('user', 'c'.repeat(600)); memory.append('user', 'd'.repeat(600));
+    assert.equal(memory.progress().total, 7, 'grows with the backlog');
     release();
-    await until(() => memory.activity().retrying.length > 0);
-    const after = memory.activity();
-    assert.deepEqual(after.building, []);
-    assert.deepEqual(after.retrying.map(({ l, i }) => ({ l, i })), [{ l: 1, i: 0 }]);
-    assert.ok(after.retrying[0].in > 50_000);
-    assert.equal(after.lastError, '401 invalid x-api-key');
+    await memory.settle(AbortSignal.timeout(2000), true);
+    assert.deepEqual(memory.progress(), { done: 0, total: 0, retryIn: undefined }, 'resets when the backlog drains');
+    memory.append('user', 'e'.repeat(600));
+    assert.deepEqual(memory.progress(), { done: 0, total: 1, retryIn: undefined }, 'a new backlog starts from zero');
   } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

@@ -13,7 +13,6 @@ export interface Summary extends Part { text: string; size: number }
 export interface Compression { context: string; source: string; merge: boolean; historical?: boolean }
 export type Compressor = (input: Compression, signal: AbortSignal) => Promise<string>;
 const key = ({ l, i }: Part) => l * 2 ** 40 + i;
-const unkey = (id: number): Part => ({ l: Math.floor(id / 2 ** 40), i: id % 2 ** 40 });
 const UNBUILT = '(not summarized yet: zoom it)';
 export const start = ({ l, i }: Part) => i * 2 ** l;
 export const end = (part: Part) => start(part) + 2 ** part.l;
@@ -81,7 +80,7 @@ export class Memory {
   readonly view: Part[] = [];
   private readonly events = new EventEmitter();
   private readonly controller = new AbortController();
-  private readonly busy = new Map<number, { started: number; done: Promise<void> }>();
+  private readonly busy = new Map<number, Promise<void>>();
   private readonly retryAt = new Map<number, number>();
   private readonly reported = new Set<number>();
   private readonly lastSeenBytes = new Map<string, number>();
@@ -90,6 +89,8 @@ export class Memory {
   /** Per level, every node below this index is built. */
   private readonly low: number[] = [];
   private retryTimer?: ReturnType<typeof setTimeout>;
+  /** The most summaries owed at once since none were last owed. */
+  private peak = 0;
   private scheduled = false;
   private stopped = false;
   lastError?: string;
@@ -135,12 +136,12 @@ export class Memory {
   get pending() { return this.root.length - this.leaves; }
   get active() { return this.busy.size; }
   get size() { return this.viewBytes; }
-  /** A snapshot of background summarizing, for display: parts being built now and parts waiting to retry after a failure. */
-  activity(now = Date.now()) {
-    return { pending: this.pending, lastError: this.lastError,
-      building: [...this.busy].map(([id, { started }]) => ({ ...unkey(id), started })),
-      retrying: [...this.retryAt].filter(([id]) => !this.busy.has(id)).map(([id, at]) => ({ ...unkey(id), in: Math.max(0, at - now) })) };
+  /** Summaries built out of the backlog since it was last empty, and when the next failed one is retried. */
+  progress(now = Date.now()) {
+    const due = Math.min(...[...this.retryAt.values()].filter(t => t > now));
+    return { done: this.peak - this.owed(), total: this.peak, retryIn: Number.isFinite(due) ? due - now : undefined };
   }
+  private owed() { return this.expectedNodes() - this.tree.size; }
   onChange(listener: () => void) { this.events.on('change', listener); return () => { this.events.off('change', listener); }; }
   /** The view line covering message `at`. The view tiles the log in order, so a binary search finds it. */
   covering(at: number): Part | undefined {
@@ -167,6 +168,8 @@ export class Memory {
       this.viewBytes += this.partBytes(parent) - this.partBytes(a) - this.partBytes(b);
       this.view.splice(best, 2, parent);
     }
+    const owed = this.owed();
+    this.peak = owed > 0 ? Math.max(this.peak, owed) : 0;
     this.events.emit('change');
   }
   private schedule() {
@@ -191,14 +194,14 @@ export class Memory {
         if ((l === 0 ? i : end(part)) > boundary) break;
         if (this.node(part) || this.busy.has(id) || (this.retryAt.get(id) ?? 0) > now) continue;
         if (l && (!this.node({ l: l - 1, i: 2 * i }) || !this.node({ l: l - 1, i: 2 * i + 1 }))) continue;
-        const done = this.build(part).catch(error => {
+        const promise = this.build(part).catch(error => {
           if (this.stopped) return;
           this.lastError = error instanceof Error ? error.message : String(error);
           if (!this.reported.has(id)) { this.reported.add(id); this.warn(`Compactor ${start(part)}+${2 ** l}: ${this.lastError}`); }
           this.retryAt.set(id, Date.now() + this.retryMs);
           if (!this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.schedule(); }, this.retryMs);
         }).finally(() => { this.busy.delete(id); this.events.emit('change'); this.schedule(); });
-        this.busy.set(id, { started: now, done });
+        this.busy.set(id, promise);
       }
     }
     // A later failure can have a later deadline than the timer installed by the first.
@@ -268,6 +271,6 @@ export class Memory {
   }
   async close() {
     this.stopped = true; this.controller.abort(); clearTimeout(this.retryTimer);
-    this.events.emit('change'); await Promise.allSettled([...this.busy.values()].map(b => b.done));
+    this.events.emit('change'); await Promise.allSettled(this.busy.values());
   }
 }

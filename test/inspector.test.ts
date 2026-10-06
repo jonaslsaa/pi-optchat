@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
-import { visibleWidth } from '@earendil-works/pi-tui';
+import { ModelRegistry, ModelRuntime, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { visibleWidth, type Component } from '@earendil-works/pi-tui';
 import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { fit, Inspector, short, type InspectorAction } from '../src/inspector.ts';
 import { UsageLedger } from '../src/usage.ts';
 import { RunHistory } from '../src/runs.ts';
+import { mountNavigation } from '../src/navigation.ts';
 
 // Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
@@ -53,37 +54,47 @@ test('inspector reaches old runs, opens the selected agent, shows usage, resizes
   } finally { inspector.dispose(); usagePage.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('Tab cycles Agents, Usage and Activity; Activity shows summaries in flight, retrying with the error, and an agent count', async () => {
+test('Tab cycles Agents, Usage and Activity; Activity is a memory gauge with an agent count', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-activity-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, refreshOnCreate: false });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'test', model: 'test', thinking: 'high' }), () => '', async () => {}, () => {}, dir);
-  const now = Date.now();
-  let state: ReturnType<Memory['activity']> = { pending: 0, lastError: undefined, building: [], retrying: [] };
-  const fake = { activity: () => state, onChange: () => () => {} };
+  let progress: ReturnType<Memory['progress']> = { done: 0, total: 0, retryIn: undefined };
+  const fake = { root: memory.root, size: 97_400, budget: 128_000, lastError: undefined as string | undefined, progress: () => progress, onChange: () => () => {} };
+  for (let i = 0; i < 3; i++) memory.append('user', `message ${i}`);
   const inspector = new Inspector({ profile: 'personal', session: 'parent', children, usage: new UsageLedger(dir), memory: fake, page: 'agents',
     rows: () => 40, redraw: () => {}, done: () => {}, color: (_tone, text) => text, context: () => undefined });
   const title = () => inspector.render(100)[1].trim().split(/\s{2,}/)[0];
+  const page = () => inspector.render(100).slice(3, -3).map(l => l.trim()).filter(Boolean);
   try {
     assert.equal(title(), 'OptChat · personal · Agents');
     inspector.handleInput('\t'); assert.equal(title(), 'OptChat · personal · Usage');
     inspector.handleInput('\t'); assert.equal(title(), 'OptChat · personal · Activity');
-    assert.match(inspector.render(100).join('\n'), /Nothing running\./);
-    state = { pending: 14, lastError: '401 invalid x-api-key', building: [{ l: 0, i: 4096, started: now - 3_000 }, { l: 10, i: 3, started: now - 64_000 }],
-      retrying: [{ l: 1, i: 1024, in: 7_000 }] };
-    children.history.records.set('run', { id: 'run', task: 'review', cwd: dir, model: 'test', thinking: 'high', parentSession: 'parent', depth: 1, started: now, state: 'running', guidance: [] });
-    const page = inspector.render(100).map(l => l.trim());
-    assert.ok(page.includes('Summaries  2 in flight · 14 messages pending · 1 retrying'));
-    // Oldest first, the view line each summary will fill, then retrying parts with their countdown and the error behind them.
-    assert.deepEqual(page.filter(l => /^\d+\+\d+/.test(l)).map(l => l.split(/\s{2,}/)), [['3072+1024', 'level 10', '1m 4s'], ['4096+1', 'level 0', '3s'], ['2048+2', 'level 1', 'retry in 7s']]);
-    assert.ok(page.includes('Last error: 401 invalid x-api-key'));
-    assert.ok(page.includes('Agents     1 running  Tab → Agents'));
-    assert.doesNotMatch(page.join('\n'), /review/, 'the agent list stays on its own page');
-    // A retry that is running again is in flight, not waiting, and the error behind it stays visible.
-    state = { ...state, retrying: [], building: [...state.building, { l: 1, i: 1024, started: now }] };
-    assert.ok(inspector.render(100).map(l => l.trim()).includes('Last error: 401 invalid x-api-key'));
+    assert.deepEqual(page(), ['Memory · 3 messages · view 97 KB / 128 KB', 'Settled', 'Agents · 0 running  Tab → Agents']);
+    progress = { done: 12, total: 40, retryIn: 7_000 }; fake.lastError = '429 rate_limit_error';
+    children.history.records.set('run', { id: 'run', task: 'review', cwd: dir, model: 'test', thinking: 'high', parentSession: 'parent', depth: 1, started: Date.now(), state: 'running', guidance: [] });
+    assert.deepEqual(page(), ['Memory · 3 messages · view 97 KB / 128 KB', 'Catching up · 12 of 40 summaries  ███░░░░░░░', '429 rate_limit_error · retry in 7s',
+      'Agents · 1 running  Tab → Agents']);
     inspector.handleInput('\t'); assert.equal(title(), 'OptChat · personal · Agents');
   } finally { inspector.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the Activity bar item shows a dot only while summaries or agents are at work', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-bar-'));
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, refreshOnCreate: false });
+  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'test', model: 'test', thinking: 'high' }), () => '', async () => {}, () => {}, dir);
+  let total = 0, widget: Component | undefined;
+  const fake = { progress: () => ({ done: 0, total, retryIn: undefined }), onChange: () => () => {} };
+  const ctx = { ui: { getEditorComponent: () => () => undefined, setWidget: (_key: string, factory?: (tui: unknown, theme: unknown) => Component) => { widget = factory?.({ requestRender() {} }, { fg: (_tone: string, text: string) => text }); } } };
+  const unmount = mountNavigation(ctx as unknown as ExtensionContext, children, fake, 'f6', () => {});
+  const bar = () => widget?.render(120).join('') ?? '';
+  try {
+    assert.doesNotMatch(bar(), /●/);
+    total = 5; assert.match(bar(), /Usage {3}● Activity/);
+    total = 0; children.history.records.set('run', { id: 'run', task: 'review', cwd: dir, model: 'test', thinking: 'high', parentSession: 'parent', depth: 1, started: Date.now(), state: 'running', guidance: [] });
+    assert.match(bar(), /● Activity/);
+  } finally { unmount(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('unfinished persisted runs recover as interrupted with undelivered guidance', () => {

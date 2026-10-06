@@ -48,7 +48,7 @@ For headless use, pass `--optchat-profile work`.
 | `/optchat agents` | Live agent tree and saved run history. |
 | `/optchat agents model` | Subagent model and effort for this profile. |
 | `/optchat usage` | Token usage and cost estimates. |
-| `/optchat activity` | Summaries being built or retrying, and how many agents run. |
+| `/optchat activity` | Memory gauge: view size, summaries catching up, running agents. |
 | `/optchat instructions` | Edit this profile's `AGENTS.md`. |
 | `/optchat browse` | Open a readable snapshot of memory: the shape of what the model sees, summaries you can open down to the original messages, and search that shows where each message is folded. Run again to refresh. |
 | `/optchat import` | Import history, or resume/discard a paused import. |
@@ -135,7 +135,7 @@ Guidance shows as queued until delivered, or undelivered if the child stops firs
 
 ![Usage page](docs/screenshots/usage.png)
 
-**Activity** shows the background work you otherwise only see as a footer count: each summary the compactor is building (its view line, level and elapsed time), how many messages still wait for one, and summaries waiting to retry with the countdown and the last error, so a bad key or a rate limit is visible. It also counts running agents; their list is on Agents.
+**Activity** is a memory gauge: how many messages the profile holds and how much of the 128 KB view they fill, then either **Settled** or **Catching up · 12 of 40 summaries** with a progress bar counted from when the backlog last grew from empty. If summarizing keeps failing, the last error and the retry countdown show under it. It also counts running agents; their list is on Agents. While summaries or agents are at work, the bar's Activity item gets a **●**.
 
 ![Activity page](docs/screenshots/activity.png)
 
