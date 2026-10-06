@@ -17,5 +17,7 @@
 {"timestamp":"2026-03-04T09:05:01.000Z","type":"response_item","payload":{"type":"message","id":"msg-3","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/home/dev/synthetic-app</cwd>\n</environment_context>"},{"type":"input_text","text":"Now document the flag in the README."}]}}
 {"timestamp":"2026-03-04T09:05:02.000Z","type":"response_item","payload":{"type":"message","id":"msg-4","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Documented --dry-run in the README."}]}}
 {"timestamp":"2026-03-04T09:05:02.100Z","type":"event_msg","payload":{"type":"task_complete"}}
+{"timestamp":"2026-03-04T09:05:30.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<external_repo_notes>\nSynthetic injected context.\n</external_repo_notes>"}]}}
+{"timestamp":"2026-03-04T09:05:31.000Z","type":"response_item","payload":{"type":"message","id":"msg-5","role":"user","content":[{"type":"input_text","text":"<EXTERNAL_notes>my own notes</EXTERNAL_notes>"}]}}
 {"timestamp":"2026-03-04T09:06:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}
 {"timestamp":"2026-03-04T09:06:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<subagent_notification>\n{\"agent_path\":\"worker\",\"status\":\"completed\"}\n</subagent_notification>"}]}}

@@ -43,7 +43,7 @@ function text(value: unknown): string {
 }
 /**
  * Claude Code logs slash commands, `!` shell commands, and their local output as user messages. Returns undefined
- * for anything else, '' for scaffolding to drop, or what the user typed (`/name args`, `!command`), a real request.
+ * for anything else, '' for output to drop, or what the user typed (`/name args`, `/name`, `!command`).
  */
 function claudeCommand(content: string): string | undefined {
   const s = content.trimStart();
@@ -52,21 +52,17 @@ function claudeCommand(content: string): string | undefined {
   if (shell !== undefined) return shell && `!${shell}`;
   if (!/^<command-(name|message|args)>/.test(s)) return undefined;
   const name = /<command-name>([^<]*)<\/command-name>/.exec(s)?.[1].trim(), args = /<command-args>([\s\S]*?)<\/command-args>/.exec(s)?.[1].trim();
-  return name && args ? `${name} ${args}` : '';
+  return name ? `${name} ${args ?? ''}`.trimEnd() : '';
 }
-const claudeScaffold = (content: unknown) => { const typed = text(content); return claudeCommand(typed) ?? typed; };
-const tagged = (tag: string, open = `<${tag}>`) => new RegExp(`^${open}[\\s\\S]*</${tag}>$`, 'i');
-/** The messages Codex itself recognizes as context it injected, not typed by the user (codex-rs core/src/context/contextual_user_message.rs). */
-const codexContext = [
-  tagged('INSTRUCTIONS', '# AGENTS\\.md instructions'), tagged('environment_context'), tagged('user_shell_command'), tagged('turn_aborted'),
-  tagged('subagent_notification'), tagged('skill'), tagged('agent_message_board_notification'), tagged('recommended_plugins'), tagged('goal_context'),
-  tagged('hook_prompt', '<hook_prompt hook_run_id="[^"]+">'), /^<codex_internal_context source="[a-z][a-z0-9_]*">[\s\S]*<\/codex_internal_context>$/,
-  /^<external_([^>]+)>[\s\S]*<\/external_\1>$/i,
-  /^Warning: apply_patch was requested via [\s\S]*Use the apply_patch tool instead of exec_command\.$/,
-  /^Warning: Your account was flagged for potentially high-risk cyber activity/,
-  /^Warning: The maximum number of unified exec processes you can keep open is/,
-];
-const codexScaffold = (content: unknown) => (Array.isArray(content) ? content : [content]).map(text).filter(piece => piece && !codexContext.some(re => re.test(piece.trim()))).join('\n');
+/**
+ * Context Codex injects as user messages, as codex-rs recognizes it (core/src/context/contextual_user_message.rs).
+ * Codex matches marked fragments ignoring case, but the `<external_…>` context, the internal-context source and the warnings exactly.
+ */
+const CODEX_MARKED = /^(?:# AGENTS\.md instructions[\s\S]*<\/INSTRUCTIONS>|<(environment_context|user_shell_command|turn_aborted|subagent_notification|skill|agent_message_board_notification|recommended_plugins|goal_context)>[\s\S]*<\/\1>|<hook_prompt hook_run_id="[^"]+">[\s\S]*<\/hook_prompt>)$/i;
+const CODEX_EXACT = /^(?:<external_([^>]+)>[\s\S]*<\/external_\1>|<codex_internal_context source="[a-z][a-z0-9_]*">[\s\S]*<\/codex_internal_context>|Warning: apply_patch was requested via [\s\S]*Use the apply_patch tool instead of exec_command\.|Warning: (?:Your account was flagged for potentially high-risk cyber activity|The maximum number of unified exec processes you can keep open is)[\s\S]*)$/;
+/** What the user typed in a Codex message: every part except the context Codex injected. */
+const codexTyped = (content: unknown) => (Array.isArray(content) ? content : [content]).map(text)
+  .filter(piece => piece && !CODEX_MARKED.test(piece.trim()) && !CODEX_EXACT.test(piece.trim())).join('\n');
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
 function imported(c: Conversation, id: string, kind: Kind, content: string, date: string, identity = content): ImportedEntry | undefined {
   if (!content.trim()) return undefined;
@@ -114,7 +110,6 @@ export async function scanLocal(source: 'claude' | 'codex', roots?: string[], si
       const info = await stat(file);
       let id = basename(file, '.jsonl'), project = dirname(file), date = info.mtime.toISOString(), title = '';
       let sidechain = false;
-      const scaffold = source === 'claude' ? claudeScaffold : codexScaffold;
       for await (const { value: v, line } of jsonLines(file, warnings, source === 'claude' ? Infinity : 60, signal)) {
         // Sidechain markers can appear late; picker metadata still comes from the first 60 lines.
         if (source === 'claude' && v.isSidechain === true) { sidechain = true; break; }
@@ -129,9 +124,10 @@ export async function scanLocal(source: 'claude' | 'codex', roots?: string[], si
           if (v.type === 'custom-title' || v.type === 'ai-title') title = string(v.customTitle ?? v.aiTitle) ?? title;
         }
         const m = source === 'claude' ? v.message : v.type === 'response_item' ? v.payload : undefined;
-        const typed = record(m) && m.role === 'user' && !title ? scaffold(m.content) : '';
-        if (typed.trim()) {
-          title = typed.replace(/\s+/g, ' ').slice(0, 110);
+        const user = record(m) && m.role === 'user' && !title;
+        const first = !user ? '' : source === 'claude' ? claudeCommand(text(m.content)) ?? text(m.content) : codexTyped(m.content);
+        if (first.trim()) {
+          title = first.replace(/\s+/g, ' ').slice(0, 110);
           date = timestamp(v.timestamp, date);
         }
       }
@@ -376,7 +372,7 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
         }
         if (c.source === 'codex' && v.type === 'response_item' && record(v.payload)) {
           const m = v.payload, id = string(m.id) ?? string(m.call_id) ?? `line:${line}`;
-          if (m.type === 'message' && m.role === 'user') { finish(); add(id, 'user', codexScaffold(m.content), date, text(m.content)); }
+          if (m.type === 'message' && m.role === 'user') { finish(); add(id, 'user', codexTyped(m.content), date, text(m.content)); }
           else if (m.type === 'message' && m.role === 'assistant') {
             pending = [];
             const channel = m.channel ?? m.phase;
