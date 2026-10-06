@@ -1,4 +1,4 @@
-import type { AssistantMessage, Message } from '@earendil-works/pi-ai';
+import { clampThinkingLevel, type AssistantMessage, type Message } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { COMPACT } from './prompts.ts';
@@ -45,17 +45,19 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const selected = choice();
     const model = registry.find(selected.provider, selected.model);
     if (!model) throw new Error(`Compactor model unavailable: ${selected.provider}/${selected.model}. Use /optchat model.`);
+    // A level the model can't take would be sent as no level, which Sonnet 5.5 runs at high effort; Pi's own sessions clamp the same way.
+    const thinking = clampThinkingLevel(model, selected.thinking);
     const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}For scale, this line is exactly 512 bytes:\n${SCALE}\n\n${input.merge ? 'Merge these two lines into one' : 'Compress this message into one line'}, in at most 512 bytes:\n${input.source}`;
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
     const view = splitView(input.context);
-    const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${selected.thinking}\n${view.slice(0, -1).join('')}` : undefined;
+    const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking}\n${view.slice(0, -1).join('')}` : undefined;
     const tries: string[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
       const warmed = prefix ? await gate(prefix, signal) : () => {};
       let reply: AssistantMessage;
       try {
         const stream = registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
-          reasoning: selected.thinking === 'off' ? undefined : selected.thinking, signal, cacheRetention: 'short',
+          reasoning: thinking === 'off' ? undefined : thinking, signal, cacheRetention: 'short',
           onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload) : payload,
         });
         // The cache entry is usable once the model starts answering.
