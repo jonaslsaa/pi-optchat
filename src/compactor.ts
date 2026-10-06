@@ -61,6 +61,8 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       let reply: AssistantMessage;
       try {
         const stream = registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
+          // A shared session id is the OpenAI prompt-cache key; SSE because over a websocket Codex would chain unrelated parallel calls on one cached connection.
+          sessionId: 'optchat-compactor', transport: 'sse',
           reasoning: thinking, signal, cacheRetention: 'short',
           onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload) : payload,
         });
