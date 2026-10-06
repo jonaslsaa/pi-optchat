@@ -189,7 +189,7 @@ To delete a profile, delete its folder. Your original Pi sessions are kept in Pi
 
 ## How it differs from the recipe
 
-The recipe's four prompts are kept verbatim in `src/prompts.ts`, along with its numbers: 512-byte summary nodes (summaries up to 640 bytes are accepted without a retry), a 128,000-byte memory view, binary merges, 8 compression workers, fixed retry delays, 5 shortening attempts, and a 30,000-character tool output cap. Anthropic requests get stable cache breakpoints on the view, and when that view is not cached yet, one compactor call goes first and the others wait until it starts answering, so they read the cache instead of each writing it. See `docs/victor-recipe.md` for notes.
+The recipe's four prompts are kept verbatim in `src/prompts.ts`, along with its numbers: 512-byte summary nodes (summaries up to 640 bytes are accepted without a retry, as long as they are smaller than what they replace), a 128,000-byte memory view, binary merges, 8 compression workers, fixed retry delays, 5 shortening attempts, and a 30,000-character tool output cap. Anthropic requests get stable cache breakpoints on the view, and when that view is not cached yet, one compactor call goes first and the others wait until it starts answering, so they read the cache instead of each writing it. See `docs/victor-recipe.md` for notes.
 
 Each run's context is the memory view, the previous exchange, and your new message. Deliberate additions:
 
