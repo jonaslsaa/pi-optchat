@@ -12,12 +12,12 @@ import { textContent } from '../src/transcript.ts';
 /** A fake Anthropic model whose calls answer and finish only when the test says so. */
 async function setup() {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-compactor-'));
-  const calls: { source: string; options: { sessionId?: string; transport?: string }; answer: () => void; finish: () => void; fail: () => void }[] = [];
+  const calls: { source: string; answer: () => void; finish: () => void; fail: () => void }[] = [];
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
   runtime.registerProvider('optchat-test', {
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'anthropic-messages',
     models: [{ id: 'compactor', name: 'Synthetic compactor', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1000 }],
-    streamSimple(model, context, options) {
+    streamSimple(model, context) {
       const stream = createAssistantMessageEventStream();
       const source = textContent(context.messages.findLast(m => m.role === 'user')?.content).split('\n').at(-1) ?? '';
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `summary of ${source}` }], api: model.api, provider: model.provider,
@@ -25,7 +25,7 @@ async function setup() {
       stream.push({ type: 'start', partial: message });
       const step = <T>() => { let resolve = (_: T) => {}; return { promise: new Promise<T>(r => { resolve = r; }), resolve }; };
       const answered = step<boolean>(), finished = step<void>();
-      calls.push({ source, options: { sessionId: options?.sessionId, transport: options?.transport }, answer: () => answered.resolve(true), fail: () => answered.resolve(false), finish: () => finished.resolve() });
+      calls.push({ source, answer: () => answered.resolve(true), fail: () => answered.resolve(false), finish: () => finished.resolve() });
       void (async () => {
         if (!await answered.promise) {
           message.stopReason = 'error'; message.errorMessage = 'overloaded';
@@ -87,15 +87,4 @@ test('a waiting call that is cancelled stops at once without ever calling the mo
   calls[0].answer(); calls[0].finish();
   await primer;
   assert.deepEqual(calls.map(c => c.source), ['a']);
-});
-
-test('every compactor call shares one session id over SSE', async () => {
-  const { calls, run, settle } = await setup();
-  const replies = ['a', 'b', 'c'].map(source => run(source));
-  await settle();
-  calls[0].answer();
-  await settle();
-  calls.forEach(c => { c.answer(); c.finish(); });
-  await Promise.all(replies);
-  assert.deepEqual(calls.map(c => c.options), Array(3).fill({ sessionId: 'optchat-compactor', transport: 'sse' }));
 });

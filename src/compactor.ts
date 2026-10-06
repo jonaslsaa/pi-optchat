@@ -1,4 +1,4 @@
-import type { AssistantMessage, Message } from '@earendil-works/pi-ai';
+import { clampThinkingLevel, type Api, type AssistantMessage, type Message, type Model } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { COMPACT } from './prompts.ts';
@@ -8,6 +8,11 @@ import { IMPORT_GUIDANCE } from './import/guidance.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
+/** A level the model can't take would be sent as no level, which Sonnet 5.5 runs at high effort; Pi's own sessions clamp the same way. */
+export const reasoningFor = (model: Model<Api>, level: ThinkingLevel) => {
+  const thinking = clampThinkingLevel(model, level);
+  return thinking === 'off' ? undefined : thinking;
+};
 /** A realistic summary line of exactly NODE bytes, on a topic no real chat shares so its wording can't leak into summaries. */
 export const SCALE = 'user: Plan the Lisbon trip for 14-18 May: four adults, one in a wheelchair, 2400 EUR budget, no flights before 09:00. talk: Suggested Baixa; skip tram 28 (not step-free). tool: searched TAP, easyJet fares; echo: TAP TP1205 at 08:40 (too early), easyJet U27652 at 11:15 is 162 EUR each. user: "Book easyJet; step-free rooms matter more than a view." work: [4c1e9a20] Casa do Rio has two step-free rooms at 138 EUR/night, free cancellation to 10 May, held to 2 May. talk: Asked about a Sintra day trip, unanswered.';
 const WARM_MS = 4 * 60_000; // Anthropic's short cache lives 5 minutes from its last use.
@@ -45,18 +50,20 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const selected = choice();
     const model = registry.find(selected.provider, selected.model);
     if (!model) throw new Error(`Compactor model unavailable: ${selected.provider}/${selected.model}. Use /optchat model.`);
+    const thinking = reasoningFor(model, selected.thinking);
     const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}For scale, this line is exactly 512 bytes:\n${SCALE}\n\n${input.merge ? 'Merge these two lines into one' : 'Compress this message into one line'}, in at most 512 bytes:\n${input.source}`;
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
     const view = splitView(input.context);
-    const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${selected.thinking}\n${view.slice(0, -1).join('')}` : undefined;
+    const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
     const tries: string[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
       const warmed = prefix ? await gate(prefix, signal) : () => {};
       let reply: AssistantMessage;
       try {
         const stream = registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
+          // A shared session id is the OpenAI prompt-cache key; SSE because over a websocket Codex would chain unrelated parallel calls on one cached connection.
           sessionId: 'optchat-compactor', transport: 'sse',
-          reasoning: selected.thinking === 'off' ? undefined : selected.thinking, signal, cacheRetention: 'short',
+          reasoning: thinking, signal, cacheRetention: 'short',
           onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload) : payload,
         });
         // The cache entry is usable once the model starts answering.
