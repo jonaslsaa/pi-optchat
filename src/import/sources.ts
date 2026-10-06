@@ -29,6 +29,8 @@ export function timestamp(value: unknown, fallback: string): string {
   const date = new Date(time);
   return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
 }
+/** Header time: minutes are enough to place a message, and the rest of an ISO stamp costs summary bytes. */
+const minute = (date: string) => `${date.slice(0, 16).replace('T', ' ')}Z`;
 function text(value: unknown): string {
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) return value.map(text).filter(Boolean).join('\n');
@@ -46,7 +48,9 @@ function imported(c: Conversation, id: string, kind: Kind, content: string, date
   if (!content.trim()) return undefined;
   // Text provenance survives compression. Stable per-message receipts survive moved files and repeated exports.
   const origin: Origin = { source: c.source, conversation: c.id, message: id, title: c.title, project: c.project };
-  return { kind, date, origin, text: `[Historical ${c.source} · ${date} · conversation ${c.id} · ${c.title}]\n${content}`,
+  // The agent reads only text, so the id's first 13 characters stay in it: enough to find a Claude or Codex transcript by
+  // glob. Codex ids are UUIDv7, whose first 8 characters are a coarse timestamp shared by many sessions.
+  return { kind, date, origin, text: `[Historical ${c.source} · ${minute(date)} · ${c.id.slice(0, 13)} · ${c.title}]\n${content}`,
     receipt: `import:${digest(JSON.stringify([c.source, c.id, id, kind, identity]))}` };
 }
 async function* jsonLines(file: string, warnings: string[], limit = Infinity, signal?: AbortSignal) {
@@ -229,7 +233,7 @@ async function readMemory(c: Conversation, signal?: AbortSignal): Promise<{ entr
   const date = timestamp(fields.get('modified'), modified.toISOString());
   return { warnings: [], entries: [{ kind: 'note', date,
     origin: { source: c.source, conversation: c.id, message: hash.slice(0, 16), title: name, project: c.project },
-    text: `[Historical Claude Code memory · ${date} · project ${c.project}${type ? ` · type ${one(type)}` : ''} · ${name}]\n${description ? one(description) + '\n\n' : ''}${body.trim()}`,
+    text: `[Historical Claude Code memory · ${minute(date)} · project ${c.project}${type ? ` · type ${one(type)}` : ''} · ${name}]\n${description ? one(description) + '\n\n' : ''}${body.trim()}`,
     receipt: `import:${digest(JSON.stringify([c.source, c.id, hash]))}` }] };
 }
 

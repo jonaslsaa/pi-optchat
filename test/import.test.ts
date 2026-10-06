@@ -290,7 +290,7 @@ test('Claude memories import each topic file once as a dated note, and an edited
       ['note', '2026-03-04T05:06:07.000Z', '/tmp/alpha', 'Deploys'],
       ['note', date, '-work-beta', 'PR status'],
     ]);
-    assert.equal(first[0].text, '[Historical Claude Code memory · 2026-03-04T05:06:07.000Z · project /tmp/alpha · type feedback · Deploys]\nNever deploy on "Fridays"\n\nWait until Monday.');
+    assert.equal(first[0].text, '[Historical Claude Code memory · 2026-03-04 05:06Z · project /tmp/alpha · type feedback · Deploys]\nNever deploy on "Fridays"\n\nWait until Monday.');
     assert.match(first[1].text, /project -work-beta · type project · PR status\]\nTracking PR\n\nPR #7023 is open\.$/);
     assert.doesNotMatch(JSON.stringify(first), /INDEX ONLY|SESSION SUMMARY/);
     const existing = first.map((e, i) => ({ ...e, i, size: 0 }));
@@ -391,6 +391,19 @@ test('preparation source dialog receives shutdown cancellation before staging an
     const task = chooseImport({ ui }, 'test', memory, 'fixture', controller.signal); controller.abort();
     assert.equal(await task, undefined); assert.equal(pendingImport(dir), undefined);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an imported message header names the source, the minute, 13 characters of the conversation id and the title, and the full id stays in the origin', async () => {
+  const dir = temp(), claude = join(dir, 'claude.jsonl'), codex = join(dir, 'codex.jsonl');
+  lines(claude, [{ type: 'user', uuid: 'u', timestamp: date, message: { role: 'user', content: 'question' } }]);
+  lines(codex, [{ type: 'response_item', timestamp: date, payload: { type: 'message', id: 'u', role: 'user', content: [{ type: 'input_text', text: 'question' }] } }]);
+  try {
+    for (const [source, file, id] of [['claude', claude, 'cbcb64a5-871a-4179-a897-e3683852d011'], ['codex', codex, '0199c0de-1111-7222-8333-444455556666']] as const) {
+      const [entry] = (await readConversation({ ...conversation(source, file), id })).entries;
+      assert.equal(entry.text.split('\n')[0], `[Historical ${source} · 2026-01-02 12:00Z · ${id.slice(0, 13)} · Fixture]`);
+      assert.equal(entry.origin?.conversation, id);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('a time without a zone is UTC whatever the machine zone', () => {
