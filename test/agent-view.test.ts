@@ -175,6 +175,15 @@ test('agent view drives a running agent: streaming, guidance from the input, dra
     await until(() => children.history.records.get(id)?.guidance[0].state === 'delivered');
     await until(() => children.messages(id).some(m => m.role === 'user' && textContent(m.content) === 'Interrupted by the user:\n\nMain agent note.'));
     assert.equal(children.history.records.get(id)?.state, 'running', 'an interrupt with a queued message keeps the agent going');
+    view.handleInput('\x03');
+    await until(() => children.history.records.get(id)?.state === 'paused');
+    assert.equal(closed, 0, 'with nothing queued it only pauses; the view stays');
+    assert.match(text().split('\n')[0], /interrupted · waiting for you/);
+    assert.doesNotMatch(text(), /Ctrl\+C interrupt/);
+    for (const key of 'Go on.') view.handleInput(key);
+    view.handleInput('\r');
+    await until(() => children.history.records.get(id)?.state === 'running');
+    assert.equal(children.history.records.get(id)?.guidance.at(-1)?.text, 'Go on.');
     view.handleInput('\x18');
     assert.match(text(), /Press Ctrl\+X again/);
     assert.equal(children.history.records.get(id)?.state, 'running', 'one press only asks');

@@ -125,19 +125,19 @@ Set a different shortcut with `OPTCHAT_INSPECT_KEY=ctrl+shift+a pi`. If another 
 | Key | Action |
 | --- | --- |
 | **Escape** | Clear a draft, else back to the main chat |
-| **Ctrl+C** | Clear a draft, else interrupt: abort the agent's current step and hand it your queued messages at once; with none queued, stop it (its parent can resume it with `tell`) |
+| **Ctrl+C** | Clear a draft, else interrupt the agent's current step. Never ends the agent: queued messages go to it at once and it carries on; with none queued it waits for you (**interrupted · waiting for you**) until your next message, or a `tell` from the main agent, resumes it |
 | **Up** (empty input) | Take your newest queued message back to edit; send it again, or clear it to drop it |
-| **Ctrl+X** twice | Stop this agent and the agents it started |
+| **Ctrl+X** twice | Stop this agent and the agents it started (the only key that ends it) |
 | **Page Up/Down**, mouse wheel | Scroll; back at the bottom it follows again. The wheel needs Pi's default fullscreen mode |
 | **Ctrl+O** | Expand tool output (Pi's own toggle) |
 
-Guidance shows as queued until delivered, or undelivered if the child stops first. Guidance you send is also saved in main memory. Reasoning is not shown. Transcripts stay browsable after restart, and browsing them makes no model calls.
+Guidance shows as queued until delivered, or undelivered if the child stops first. When you interrupt an agent with nothing queued, the agent that started it gets a one-line note instead of a report, so it isn't left waiting. Guidance you send is also saved in main memory. Reasoning is not shown. Transcripts stay browsable after restart, and browsing them makes no model calls.
 
 **Usage** shows this session, last hour, today, last 7 days, or all time (**Left/Right**): one row per role and model (main agent, subagents, compactor, imports) with estimated cost, share of the total, output tokens, and how much input came from the cache. Costs are API prices, not your subscription bill.
 
 ![Usage page](docs/screenshots/usage.png)
 
-**Activity** is a memory gauge: how many messages the profile holds and how much of the 128 KB view they fill, then either **Settled** or **Catching up · 12 of 40 summaries** with a progress bar counted from when the backlog last grew from empty. If summarizing keeps failing, the last error and the retry countdown show under it. It also counts running agents; their list is on Agents. While summaries or agents are at work, the bar's Activity item gets a **●**.
+**Activity** is a memory gauge: how many messages the profile holds and how much of the 128 KB view they fill, then either **Settled** or **Catching up · 12 of 40 summaries** with a progress bar counted from when the backlog last grew from empty. If summarizing keeps failing, the last error and the retry countdown show under it. It also counts running agents, and interrupted ones waiting for you; their list is on Agents. While summaries or agents are at work, the bar's Activity item gets a **●**.
 
 ![Activity page](docs/screenshots/activity.png)
 

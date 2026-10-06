@@ -452,7 +452,7 @@ test('a child stopped before its first request ends stopped without running its 
   } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-/** Children whose model works until aborted, except that it answers an interruption at once. */
+/** Children whose model works on its task until aborted, and answers any later message at once. */
 async function busyChildren(dir: string, reports: string[]) {
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   const asked: string[][] = [];
@@ -466,7 +466,7 @@ async function busyChildren(dir: string, reports: string[]) {
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `Now doing: ${typed.at(-1)}` }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
       void (async () => {
         stream.push({ type: 'start', partial: message });
-        if (!typed.at(-1)?.startsWith('Interrupted by the user:')) await new Promise<void>(resolve => {
+        if (!typed.length) await new Promise<void>(resolve => {
           options?.signal?.addEventListener('abort', () => resolve(), { once: true }); if (options?.signal?.aborted) resolve();
         });
         if (options?.signal?.aborted) { message.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: message }); }
@@ -481,7 +481,7 @@ async function busyChildren(dir: string, reports: string[]) {
   return { children, asked };
 }
 
-test('interrupting a child aborts its step and continues with the queued messages; with none queued it stops', async () => {
+test('interrupting a child aborts its step and continues with the queued messages; with none queued it waits for the next one', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-interrupt-'));
   const reports: string[] = [];
   const { children, asked } = await busyChildren(dir, reports);
@@ -497,9 +497,15 @@ test('interrupting a child aborts its step and continues with the queued message
     const run = children.history.records.get(guided)!;
     assert.equal(run.state, 'completed');
     assert.deepEqual(run.guidance.map(g => g.state), ['delivered', 'delivered']);
-    assert.equal(await children.interrupt(idle), 'stopped');
+    assert.equal(await children.interrupt(idle), 'paused');
+    await until(() => children.history.records.get(idle)?.state === 'paused');
+    await until(() => reports.some(r => r.startsWith(`[${idle}]`)));
+    assert.deepEqual(reports.filter(r => r.startsWith(`[${idle}]`)), [`[${idle}] Interrupted by the user; it waits for their next message, so no report until then.`]);
+    assert.ok(children.live(idle), 'still alive, not stopped');
+    await children.tell(idle, 'Carry on.', 'user');
     await until(() => !children.active);
-    assert.equal(children.history.records.get(idle)?.state, 'stopped');
+    assert.equal(children.history.records.get(idle)?.state, 'completed');
+    assert.equal(reports.at(-1), `[${idle}] Now doing: Carry on.`, 'the next message resumes it');
   } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
