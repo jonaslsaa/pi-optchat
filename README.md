@@ -119,7 +119,7 @@ Guidance shows as queued until delivered, or undelivered if the child stops firs
 Pick the destination profile, then run `/optchat import`.
 
 1. **Source**: Claude Code (`~/.claude/projects`), Claude Code memories, Codex (`~/.codex/sessions`, `~/.codex/archived_sessions`), or a ChatGPT export (ZIP, folder, or `conversations.json`; ZIP needs `unzip`). Scanning is local and makes no model calls.
-2. **Select**: for Claude Code, its memories, and Codex, pick projects (busiest first), optionally filter by start date, then take all conversations or pick some. **Space** toggles, **Enter** continues, type to filter, **Ctrl+A**/**Ctrl+D** select/clear matches, **Esc** cancels. Nothing is classified as work or personal for you.
+2. **Select**: for Claude Code, its memories, and Codex, pick projects (busiest first), optionally filter by start date, then take all conversations or pick some. **Tab** toggles (and **Space** when the filter is empty), **Enter** continues, type to filter, **Ctrl+A**/**Ctrl+D** select/clear matches, **Esc** cancels. Nothing is classified as work or personal for you.
 3. **Mode** (only if the profile already has history):
    - **Append**: keep existing summaries and add the import. Faster and cheaper.
    - **Rebuild by conversation start date**: regenerate the whole tree, ordered by conversation start.
@@ -189,7 +189,7 @@ To delete a profile, delete its folder. Your original Pi sessions are kept in Pi
 
 ## How it differs from the recipe
 
-The recipe's four prompts are kept verbatim in `src/prompts.ts`, along with its numbers: 512-byte summary nodes (summaries up to 640 bytes are accepted without a retry), a 128,000-byte memory view, binary merges, 8 compression workers, fixed retry delays, 5 shortening attempts, and a 30,000-character tool output cap. Anthropic requests get stable cache breakpoints on the view, and when that view is not cached yet, one compactor call goes first and the others wait until it starts answering, so they read the cache instead of each writing it. See `docs/victor-recipe.md` for notes.
+The recipe's four prompts are kept verbatim in `src/prompts.ts`, along with its numbers: 512-byte summary nodes (summaries up to 640 bytes are accepted without a retry, as long as they are smaller than what they replace), a 128,000-byte memory view, binary merges, 8 compression workers, fixed retry delays, 5 shortening attempts, and a 30,000-character tool output cap. Anthropic requests get stable cache breakpoints on the view, and when that view is not cached yet, one compactor call goes first and the others wait until it starts answering, so they read the cache instead of each writing it. See `docs/victor-recipe.md` for notes.
 
 Each run's context is the memory view, the previous exchange, and your new message. Deliberate additions:
 

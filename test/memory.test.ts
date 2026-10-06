@@ -1,9 +1,9 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Memory, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
+import { Memory, appendJson, cap, CAP, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload } from '../src/cache.ts';
 import { logMessage, buildContext, boundedMessage } from '../src/transcript.ts';
@@ -82,6 +82,100 @@ test('torn final line is reported and the next append remains readable', async (
   finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a second writer on one profile is refused before it writes, and the profile still opens', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
+  const first = new Memory(dir, compress, () => {}), second = new Memory(dir, compress, () => {});
+  try {
+    first.append('user', 'from the first writer');
+    const file = join(dir, 'main', `${localDay()}.jsonl`), before = readFileSync(file, 'utf8');
+    assert.throws(() => second.append('user', 'from the second writer'), /Another process wrote .*nothing was written/);
+    assert.equal(readFileSync(file, 'utf8'), before);
+    assert.equal(second.root.length, 0);
+    assert.throws(() => second.append('user', 'a retry'), /Another process wrote/);
+  } finally { await first.close(); await second.close(); }
+  const reopened = new Memory(dir, compress, () => {});
+  try { assert.deepEqual(reopened.root.map(e => e.text), ['from the first writer']); }
+  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a second writer that has seen today\'s file is refused after the other appends to it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
+  const first = new Memory(dir, compress, () => {}); first.append('user', 'one');
+  const second = new Memory(dir, compress, () => {});
+  try {
+    first.append('user', 'two');
+    assert.throws(() => second.append('user', 'three'), /Another process wrote .*nothing was written/);
+  } finally { await first.close(); await second.close(); }
+  const reopened = new Memory(dir, compress, () => {});
+  try { assert.deepEqual(reopened.root.map(e => e.text), ['one', 'two']); }
+  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a day file that another process created first is caught, and an ordinary midnight rollover is not', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
+  mock.timers.enable({ apis: ['Date'], now: new Date(2026, 0, 1, 23, 59) });
+  const opened: Memory[] = [];
+  try {
+    const lone = new Memory(dir, compress, () => {}); opened.push(lone);
+    lone.append('user', 'before midnight');
+    mock.timers.setTime(new Date(2026, 0, 2, 0, 1).getTime());
+    lone.append('user', 'after midnight');
+    const a = new Memory(dir, compress, () => {}), b = new Memory(dir, compress, () => {}); opened.push(a, b);
+    mock.timers.setTime(new Date(2026, 0, 3, 0, 1).getTime());
+    b.append('user', 'b on the third');
+    assert.throws(() => a.append('user', 'a on the third'), /Another process wrote .*2026-01-03\.jsonl/);
+    b.append('user', 'b again');
+  } finally { mock.timers.reset(); await Promise.all(opened.map(m => m.close())); }
+  const reopened = new Memory(dir, compress, () => {});
+  try { assert.deepEqual(reopened.root.map(e => e.text), ['before midnight', 'after midnight', 'b on the third', 'b again']); }
+  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a second writer whose first write starts a new day file is refused when the other wrote an older day file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
+  mock.timers.enable({ apis: ['Date'], now: new Date(2026, 0, 1, 12) });
+  const opened: Memory[] = [];
+  try {
+    const a = new Memory(dir, compress, () => {}), b = new Memory(dir, compress, () => {}); opened.push(a, b);
+    a.append('user', 'a on the first');
+    mock.timers.setTime(new Date(2026, 0, 2, 12).getTime());
+    assert.throws(() => b.append('user', 'b on the second'), /Another process wrote .*2026-01-02\.jsonl.*nothing was written/);
+    assert.equal(b.root.length, 0);
+  } finally { mock.timers.reset(); await Promise.all(opened.map(m => m.close())); }
+  const reopened = new Memory(dir, compress, () => {});
+  try { assert.deepEqual(reopened.root.map(e => e.text), ['a on the first']); }
+  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('appendJson appends without a size, and with one it refuses a file of any other size', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), file = join(dir, 'log.jsonl');
+  try {
+    const one = appendJson(file, { n: 1 });
+    assert.equal(one, readFileSync(file).length);
+    const two = appendJson(file, { n: 2 }, one);
+    assert.equal(two, readFileSync(file).length);
+    assert.throws(() => appendJson(file, { n: 3 }, one), /nothing was written/);
+    assert.equal(readFileSync(file, 'utf8'), '{"n":1}\n{"n":2}\n');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('two writers that each summarize the same log leave a tree that still loads', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')), compress = async () => 'summary';
+  const log = new Memory(dir, compress, () => {});
+  for (let i = 0; i < 3; i++) log.append('user', `message ${i}`);
+  await log.close();
+  const a = new Memory(dir, compress, () => {}), b = new Memory(dir, compress, () => {});
+  await Promise.all([a.settle(AbortSignal.timeout(5000), true), b.settle(AbortSignal.timeout(5000), true)]);
+  await Promise.all([a.close(), b.close()]);
+  const tree = readFileSync(join(dir, 'tree', `${localDay()}.jsonl`), 'utf8').trim().split('\n');
+  assert.ok(tree.length > a.tree.size, 'both writers saved the same nodes');
+  const reopened = new Memory(dir, compress, () => {});
+  try {
+    await reopened.settle(AbortSignal.timeout(5000), true);
+    assert.equal(reopened.root.length, 3); assert.equal(reopened.tree.size, a.tree.size);
+  } finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('a live profile cannot be opened by a second writer; other profiles can run', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
   const unlock = await lockProfile(dir, 'test owner');
@@ -93,14 +187,17 @@ test('a live profile cannot be opened by a second writer; other profiles can run
 });
 
 test('stable cache cuts preserve every character and cap marks at four', () => {
-  const view = '<chat>\n' + '0+1|summary of a decision\n'.repeat(5500) + '</chat>';
-  assert.equal(splitView(view).join(''), view);
-  const payload = { system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
-    messages: [{ role: 'user', content: [{ type: 'text', text: view }, { type: 'text', text: 'new question', cache_control: { type: 'ephemeral' } }] }],
-  };
-  const output = JSON.stringify(cachePayload(payload));
-  assert.equal((output.match(/cache_control/g) ?? []).length, 4);
-  assert.equal(payload.messages[0].content.map(b => b.text).join(''), view + 'new question');
+  const line = '0+1|summary of a decision\n';
+  for (const quoted of [false, true]) {
+    const view = '<chat>\n' + line.repeat(2000) + (quoted ? '0+1|the summary quotes </chat> in passing\n' : '') + line.repeat(3500) + '</chat>';
+    assert.equal(splitView(view).join(''), view);
+    const payload = { system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: view }, { type: 'text', text: 'new question', cache_control: { type: 'ephemeral' } }] }],
+    };
+    const output = JSON.stringify(cachePayload(payload));
+    assert.equal((output.match(/cache_control/g) ?? []).length, 4, quoted ? 'a quoted closing tag keeps all marks' : 'plain view');
+    assert.equal(payload.messages[0].content.map(b => b.text).join(''), view + 'new question');
+  }
 });
 
 test('next turn excludes old conversation; current tool loop and reasoning remain verbatim', async () => {
@@ -126,7 +223,7 @@ test('tool images survive active-context truncation while text is bounded', () =
   assert.equal(bounded.role, 'toolResult');
   if (bounded.role !== 'toolResult') throw new Error('unexpected role');
   assert.ok(bounded.content.includes(image));
-  assert.ok(bounded.content.filter(c => c.type === 'text').reduce((n, c) => n + c.text.length, 0) <= 30_000);
+  assert.ok(bounded.content.filter(c => c.type === 'text').reduce((n, c) => n + c.text.length, 0) <= CAP);
 });
 
 test('crash recovery saves unconsumed inputs once, including append-before-ack crash', async () => {
@@ -249,5 +346,119 @@ test('rebuilding a leaf that a saved parent already hides does not inflate the v
     assert.equal(memory.pending, 0);
     assert.equal(memory.size, measured(memory));
     assert.ok(memory.size <= 80);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a log whose day files sort against the order of the entries still opens, and a broken one does not', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-order-')), compress = async () => 'summary';
+  const home = process.env.TZ;
+  mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-05T17:00:00Z') });
+  const opened: Memory[] = [];
+  try {
+    process.env.TZ = 'Asia/Tokyo';
+    let memory = new Memory(dir, compress, () => {}); opened.push(memory);
+    memory.append('user', 'a'); memory.append('user', 'b'); await memory.close();
+    process.env.TZ = 'America/Sao_Paulo';
+    memory = new Memory(dir, compress, () => {}); opened.push(memory);
+    memory.append('user', 'c'); await memory.close();
+    assert.deepEqual(readdirSync(join(dir, 'main')).sort(), ['2026-10-05.jsonl', '2026-10-06.jsonl']);
+    memory = new Memory(dir, compress, () => {}); opened.push(memory);
+    assert.deepEqual(memory.root.map(e => e.text), ['a', 'b', 'c']);
+    await memory.close();
+  } finally {
+    mock.timers.reset();
+    if (home === undefined) delete process.env.TZ; else process.env.TZ = home;
+    await Promise.all(opened.map(m => m.close()));
+  }
+  const entry = (i: number) => JSON.stringify({ i, kind: 'user', text: `m${i}`, date: new Date().toISOString() }) + '\n';
+  try {
+    writeFileSync(join(dir, 'main', '2026-10-05.jsonl'), entry(2) + entry(2));
+    assert.throws(() => new Memory(dir, compress, () => {}), /noncontiguous/);
+    writeFileSync(join(dir, 'main', '2026-10-05.jsonl'), entry(2));
+    writeFileSync(join(dir, 'main', '2026-10-06.jsonl'), entry(0) + entry(3));
+    assert.throws(() => new Memory(dir, compress, () => {}), /noncontiguous/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an append ends an unterminated last line, in every file, and counts the byte it wrote', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-torn-')), file = join(dir, 'log.jsonl');
+  try {
+    appendJson(file, { n: 1 }); appendFileSync(file, '{"n":');
+    const size = appendJson(file, { n: 2 });
+    assert.equal(readFileSync(file, 'utf8'), '{"n":1}\n{"n":\n{"n":2}\n');
+    assert.equal(size, readFileSync(file).length);
+    assert.equal(appendJson(file, { n: 3 }, size), readFileSync(file).length);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a torn tail that Memory loaded is repaired by its next append without tripping the write guard', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-torn-')), compress = async () => 'summary', warnings: string[] = [];
+  let memory = new Memory(dir, compress, () => {});
+  memory.append('user', 'first'); await memory.close();
+  const file = join(dir, 'main', `${localDay()}.jsonl`);
+  appendFileSync(file, '{"i":1,"kind":"user","te');
+  const torn = readFileSync(file, 'utf8');
+  memory = new Memory(dir, compress, text => warnings.push(text));
+  try {
+    assert.equal(readFileSync(file, 'utf8'), torn, 'opening a profile writes nothing');
+    memory.append('user', 'second'); memory.append('user', 'third');
+    assert.equal(warnings.length, 1);
+  } finally { await memory.close(); }
+  memory = new Memory(dir, compress, () => {});
+  try { assert.deepEqual(memory.root.map(e => e.text), ['first', 'second', 'third']); }
+  finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a torn tail that another process wrote is refused, not repaired', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-torn-')), memory = new Memory(dir, async () => 'summary', () => {});
+  try {
+    memory.append('user', 'first');
+    const file = join(dir, 'main', `${localDay()}.jsonl`);
+    appendFileSync(file, '{"i":1,"kind":"user","te');
+    const before = readFileSync(file, 'utf8');
+    assert.throws(() => memory.append('user', 'second'), /Another process wrote .*nothing was written/);
+    assert.equal(readFileSync(file, 'utf8'), before);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+const wellFormed = (text: string) => Buffer.from(text).toString() === text;
+const pieces = (out: string) => {
+  const notice = out.match(/\n\[(\d+) characters omitted; head and tail retained\]\n/)!;
+  return { claimed: Number(notice[1]), head: out.slice(0, notice.index), tail: out.slice(notice.index! + notice[0].length) };
+};
+
+test('cap states exactly how many characters it omitted and stays within the limit', () => {
+  assert.equal(cap('x'.repeat(CAP)), 'x'.repeat(CAP));
+  for (const text of ['x'.repeat(CAP + 1), 'x'.repeat(CAP + 49), 'x'.repeat(250_000)]) {
+    const out = cap(text), { claimed, head, tail } = pieces(out);
+    assert.ok(out.length <= CAP, `${out.length} units`);
+    assert.ok(text.startsWith(head) && text.endsWith(tail));
+    assert.equal(claimed, text.length - head.length - tail.length);
+  }
+});
+
+test('cap never cuts a surrogate pair in half', () => {
+  const emoji = '\u{1F600}'.repeat(CAP);
+  for (const text of ['a' + emoji, emoji, 'ab' + emoji, emoji + 'a']) {
+    const out = cap(text), { claimed, head, tail } = pieces(out);
+    assert.ok(wellFormed(out), `lone surrogate in the cap of a ${text.length} unit text`);
+    assert.ok(out.length <= CAP && text.startsWith(head) && text.endsWith(tail));
+    assert.equal(claimed, text.length - head.length - tail.length);
+  }
+});
+
+test('view size counts the flattened text that render emits, for new and reloaded summaries', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-flat-'));
+  const measured = (memory: Memory) => memory.render().split('\n').slice(1, -1)
+    .reduce((n, line) => n + bytes(line.slice(line.indexOf('|') + 1)), 0);
+  let memory = new Memory(dir, async () => 'x');
+  try {
+    memory.append('user', 'a\r\n\r\n\r\nb\n\n\nc');
+    assert.equal(memory.size, measured(memory), 'built from the entry');
+    await memory.settle(AbortSignal.timeout(2000), true);
+    assert.equal(memory.size, measured(memory));
+    await memory.close();
+    memory = new Memory(dir, async () => 'x');
+    assert.equal(memory.size, measured(memory), 'loaded from the tree');
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
