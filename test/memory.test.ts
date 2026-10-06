@@ -269,6 +269,26 @@ test('incremental view size and pending count match the rendered view across fai
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a retry that falls due while the compactor is scheduling still runs', async () => {
+  // Each clock reading advances, so a retry can fall due between deciding to skip it and arming its timer.
+  const now = Date.now;
+  for (const step of [1, 2, 3]) {
+    const dir = mkdtempSync(join(tmpdir(), 'oc-due-'));
+    let failures = 1, clock = now();
+    const memory = new Memory(dir, async ({ source }) => { if (failures-- > 0) throw new Error('transient'); return source.slice(0, 100); }, () => {}, 4000, 8, 10);
+    try {
+      Date.now = () => (clock += step);
+      memory.append('user', 'x'.repeat(600));
+      // A ref'd timer keeps the process alive, so a hang fails here instead of draining the event loop.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const result = await Promise.race([memory.settle(undefined, true).then(() => 'settled'),
+        new Promise(resolve => { timer = setTimeout(resolve, 1000, 'hung'); })]);
+      clearTimeout(timer);
+      assert.equal(result, 'settled', `clock step ${step}`);
+    } finally { Date.now = now; await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
 // Work counters, not timings: the old code re-measured the whole view on every fit and rescanned every level from 0 on every pump.
 function longProfile(count: number) {
   // Written directly: one fsync per append would make the fixture slow. Short entries are their own summaries.
