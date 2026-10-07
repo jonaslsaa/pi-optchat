@@ -16,6 +16,8 @@ concurrency: publish
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Gated: a run waits for the owner's approval, and npm only trusts this environment.
+    environment: npm
     env:
       TAG: ${{ inputs.tag || github.event.release.tag_name }}
     steps:
