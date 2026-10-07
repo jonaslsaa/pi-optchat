@@ -23,7 +23,7 @@ import { memoryDirectory, pendingImport, prepareImport, runImport, discardImport
 import { chooseImport, showProgress } from './import/ui.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
 import { UsageLedger } from './usage.ts';
-import { showInspector, type InspectorPage } from './inspector.ts';
+import { oneLine, showInspector, type InspectorPage } from './inspector.ts';
 import { showAgentView } from './agent-view.ts';
 import { inspectorShortcut, mountNavigation } from './navigation.ts';
 import { serveWindows } from './window-bridge.ts';
@@ -297,8 +297,16 @@ export default function optchat(pi: ExtensionAPI) {
       if (importing || pendingImport(a.dir)) throw new Error('Profile is unavailable while importing.');
       if (fault) throw new Error(fault);
       if (view === undefined) {
-        ctx.ui.setWorkingMessage('Waiting for OptChat summaries…');
-        try { await a.memory.settle(ctx.signal); } finally { ctx.ui.setWorkingMessage(); }
+        // A misconfigured summarizer retries forever, so say why instead of spinning silently.
+        let shown: string | undefined;
+        const show = () => {
+          const error = a.memory.lastError;
+          const text = `Waiting for OptChat summaries…${error ? ` failing: ${oneLine(error)}${error.includes('/optchat') ? '' : ' (see /optchat model)'}` : ''}`;
+          if (text !== shown) ctx.ui.setWorkingMessage(shown = text);
+        };
+        show();
+        const unsubscribe = a.memory.onChange(show);
+        try { await a.memory.settle(ctx.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
         view = a.memory.render(); // Capture old history before logging the new input.
         flush();
       }

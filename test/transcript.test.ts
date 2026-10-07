@@ -323,12 +323,13 @@ test('a /skill: command is logged once, as its expansion, and never recovered as
   }
 });
 
-test('an aborted wait for summaries clears the working message', async () => {
+/** Runs a second turn that waits on a summary which never lands: the compactor stalls, or fails with `failure`. Returns the working messages shown. */
+async function waitForSummaries(failure: string | undefined, shown: (working: (string | undefined)[]) => boolean) {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-wait-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
   const working: (string | undefined)[] = [];
-  let stall = true, session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
     createProfile('fixture');
     const config = loadConfig(profilePath('fixture'));
@@ -343,7 +344,12 @@ test('an aborted wait for summaries clears the working message', async () => {
         const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
         const reply = answer(compression ? 'Summary.' : 'Done.'); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
         const stream = createAssistantMessageEventStream();
-        if (compression && stall) {
+        if (compression && failure) {
+          reply.stopReason = 'error'; reply.errorMessage = failure;
+          // Fail only once the turn is waiting, so the message has to change while it is shown.
+          const fail = () => working.at(-1) === 'Waiting for OptChat summaries…' ? (stream.push({ type: 'error', reason: 'error', error: reply }), stream.end()) : options?.signal?.aborted || setTimeout(fail, 10);
+          fail();
+        } else if (compression) {
           reply.stopReason = 'aborted'; reply.errorMessage = 'closed';
           options?.signal?.addEventListener('abort', () => { stream.push({ type: 'error', reason: 'aborted', error: reply }); stream.end(); }, { once: true });
         } else queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
@@ -362,21 +368,33 @@ test('an aborted wait for summaries clears the working message', async () => {
     await session.prompt('First question. ' + 'padding '.repeat(400));
     working.length = 0;
     const second = session.prompt('Second question.');
-    for (let i = 0; i < 200 && !working.includes('Waiting for OptChat summaries…'); i++) await new Promise(resolve => setTimeout(resolve, 10));
-    assert.deepEqual(working, ['Waiting for OptChat summaries…'], 'the second turn waits for summaries');
+    for (let i = 0; i < 200 && !shown(working); i++) await new Promise(resolve => setTimeout(resolve, 10));
+    const seen = [...working];
     await session.abort(); await second;
-    assert.equal(working.at(-1), undefined, 'the message is cleared although the wait threw');
-    assert.equal(working.length, 2);
+    return { seen, working };
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+test('an aborted wait for summaries clears the working message', async () => {
+  const { seen, working } = await waitForSummaries(undefined, w => w.includes('Waiting for OptChat summaries…'));
+  assert.deepEqual(seen, ['Waiting for OptChat summaries…'], 'the second turn waits for summaries');
+  assert.equal(working.at(-1), undefined, 'the message is cleared although the wait threw');
+  assert.equal(working.length, 2);
 });
 
+test('a failing summarizer says why the turn is waiting', async () => {
+  const { seen, working } = await waitForSummaries('No API key for anthropic', w => w.some(m => m?.includes('failing')));
+  assert.deepEqual(seen, ['Waiting for OptChat summaries…', 'Waiting for OptChat summaries… failing: No API key for anthropic (see /optchat model)']);
+  assert.equal(working.at(-1), undefined, 'the message is cleared after the wait is aborted');
+});
 
 // A 1x1 PNG.
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
 test('typed text drops image placeholders and the image notes Pi appends', () => {
   const content = [{ type: 'text', text: 'see\n\n[Image: original 4000x3000, displayed at 2000x1500. Multiply coordinates by 2.00 to map to original image.]\n[Image converted from image/gif to image/png.]' },
     { type: 'image', data: 'x', mimeType: 'image/png' }];

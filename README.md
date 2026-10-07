@@ -137,7 +137,7 @@ Guidance shows as queued until delivered, or undelivered if the child stops firs
 
 ![Usage page](docs/screenshots/usage.png)
 
-**Activity** is a memory gauge: how many messages the profile holds and how much of the 128 KB view they fill, then either **Settled** or **Catching up · 12 of 40 summaries** with a progress bar counted from when the backlog last grew from empty. If summarizing keeps failing, the last error and the retry countdown show under it. It also counts running agents, and interrupted ones waiting for you; their list is on Agents. While summaries or agents are at work, the bar's Activity item gets a **●**.
+**Activity** is a memory gauge: how many messages the profile holds and how much of the 128 KB view they fill, then either **Settled** or **Catching up · 12 of 40 summaries** with a progress bar counted from when the backlog last grew from empty. If summarizing keeps failing, the last error and the retry countdown show under it. A turn stuck waiting for summaries shows the same error next to its spinner, usually a summarizer model you aren't logged in to (`/optchat model`). It also counts running agents, and interrupted ones waiting for you; their list is on Agents. While summaries or agents are at work, the bar's Activity item gets a **●**.
 
 ![Activity page](docs/screenshots/activity.png)
 
