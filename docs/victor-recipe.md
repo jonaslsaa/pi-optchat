@@ -11,7 +11,7 @@ The source remains upstream rather than duplicating the full article here. Its f
 ## Implementation mapping
 
 - `src/memory.ts`: append-only log, binary summary tree, compression scheduling, bounded view, zoom/date, and the opt-in text search over original messages (`src/tools.ts` has the tool; not in the recipe, off by default).
-- `src/compactor.ts`: contextual compression and size retries.
+- `src/compactor.ts`: contextual compression and size retries. The size ruler, the "Too long" retry wording and the compactor prompt's copy-exactly/credit-the-author sentence follow the revised recipe (2026-10-08).
 - `src/cache.ts`: stable Anthropic cache boundaries. OpenAI requests get no marks: GPT-5.6 rejects the recipe's `prompt_cache_breakpoint` with a 400 (found by @aaaxn), so they rely on implicit prefix caching. OptChat doesn't set `reasoning.context` either: GPT-5.6 already defaults to the recipe's `"all_turns"`, and OpenAI documents it only for GPT-5.6 and GPT-6.1 Sol.
 - `src/transcript.ts`: fresh context per parent run, current-run tool loop retained. The previous completed exchange is also retained in full text (left out if over 16,000 bytes by default), an intentional addition to the summary-only recipe for conversational continuity.
 - `src/agents.ts`: asynchronous Pi SDK children and automatic completion reports.

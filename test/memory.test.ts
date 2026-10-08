@@ -18,7 +18,7 @@ test('tree covers all history, fits incrementally, and exact originals survive r
   let memory = new Memory(dir, compress, () => {}, 1500);
   try {
     for (let i = 0; i < 48; i++) memory.append('user', `Original ${i}: ${'valuable detail '.repeat(30)}`);
-    await memory.settle(AbortSignal.timeout(5000), true);
+    await memory.settle(AbortSignal.timeout(5000), 'tree');
     assert.equal(start(memory.view[0]), 0);
     assert.equal(end(memory.view.at(-1)!), 48);
     for (let i = 1; i < memory.view.length; i++) assert.equal(end(memory.view[i - 1]), start(memory.view[i]));
@@ -29,27 +29,47 @@ test('tree covers all history, fits incrementally, and exact originals survive r
     const originals = memory.root.map(e => e.text);
     const parts = [...memory.view];
     memory.append('talk', 'One short new reply.');
-    await memory.settle(AbortSignal.timeout(5000), true);
+    await memory.settle(AbortSignal.timeout(5000), 'tree');
     for (const before of parts) assert.ok(memory.view.some(after => start(after) <= start(before) && end(after) >= end(before)));
     await memory.close();
     memory = new Memory(dir, compress, () => {}, 1500);
-    await memory.settle(AbortSignal.timeout(5000), true);
+    await memory.settle(AbortSignal.timeout(5000), 'tree');
     assert.deepEqual(memory.root.slice(0, 48).map(e => e.text), originals);
     assert.match(memory.zoom(17, 1), /valuable detail/);
     assert.throws(() => memory.zoom(3, 4), /No line/);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('pending compaction blocks a turn, cancellation works, failure retries', async () => {
+test('a turn waits for pending summaries, goes on once they have all failed, and failures keep retrying', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')); let attempts = 0;
+  let release = () => {};
+  const retrying = new Promise<void>(resolve => { release = resolve; });
   const memory = new Memory(dir, async () => {
-    attempts++; if (attempts === 1) throw new Error('temporary outage'); return 'user: retained decision';
+    if (++attempts === 1) throw new Error('model unavailable');
+    await retrying; return 'user: retained decision';
   }, () => {}, 128000, 8, 100);
   try {
     memory.append('user', 'large message '.repeat(100));
-    await assert.rejects(memory.settle(AbortSignal.timeout(20)), /cancelled/);
     await memory.settle(AbortSignal.timeout(2000));
-    assert.equal(attempts, 2); assert.ok(memory.ready); assert.equal(memory.root.length, 1);
+    assert.ok(!memory.ready, 'the turn goes on with a placeholder');
+    assert.match(memory.render(), /not summarized yet/);
+    assert.equal(memory.lastError, 'model unavailable');
+    for (const deadline = Date.now() + 2000; attempts < 2 && Date.now() < deadline;) await new Promise(r => setTimeout(r, 10));
+    assert.equal(attempts, 2, 'retried after the delay');
+    await assert.rejects(memory.settle(AbortSignal.timeout(20)), /cancelled/, 'a retry in flight is waited for');
+    release();
+    await memory.settle(AbortSignal.timeout(2000));
+    assert.ok(memory.ready); assert.equal(memory.lastError, undefined);
+  } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a view wait (imports) keeps waiting through failures', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
+  const memory = new Memory(dir, async () => { throw new Error('down'); }, () => {}, 128000, 8, 60_000);
+  try {
+    memory.append('user', 'large message '.repeat(100));
+    await assert.rejects(memory.settle(AbortSignal.timeout(100), 'view'), /cancelled/);
+    await memory.settle(AbortSignal.timeout(100));
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -65,7 +85,7 @@ test('a turn waits for the view to be built, not for merges that bring it under 
     assert.ok(memory.ready);
     assert.ok(memory.size > memory.budget, 'the view is still over budget while the merge is pending');
     release();
-    await memory.settle(AbortSignal.timeout(2000), true);
+    await memory.settle(AbortSignal.timeout(2000), 'tree');
     assert.ok(memory.size <= memory.budget);
   } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
@@ -83,7 +103,7 @@ test('progress counts summaries against the largest backlog since it was last em
     memory.append('user', 'c'.repeat(600)); memory.append('user', 'd'.repeat(600));
     assert.equal(memory.progress().total, 7, 'grows with the backlog');
     release();
-    await memory.settle(AbortSignal.timeout(2000), true);
+    await memory.settle(AbortSignal.timeout(2000), 'tree');
     assert.deepEqual(memory.progress(), { done: 0, total: 0, retryIn: undefined }, 'resets when the backlog drains');
     memory.append('user', 'e'.repeat(600));
     assert.deepEqual(memory.progress(), { done: 0, total: 1, retryIn: undefined }, 'a new backlog starts from zero');
@@ -185,13 +205,13 @@ test('two writers that each summarize the same log leave a tree that still loads
   for (let i = 0; i < 3; i++) log.append('user', `message ${i}`);
   await log.close();
   const a = new Memory(dir, compress, () => {}), b = new Memory(dir, compress, () => {});
-  await Promise.all([a.settle(AbortSignal.timeout(5000), true), b.settle(AbortSignal.timeout(5000), true)]);
+  await Promise.all([a.settle(AbortSignal.timeout(5000), 'tree'), b.settle(AbortSignal.timeout(5000), 'tree')]);
   await Promise.all([a.close(), b.close()]);
   const tree = readFileSync(join(dir, 'tree', `${localDay()}.jsonl`), 'utf8').trim().split('\n');
   assert.ok(tree.length > a.tree.size, 'both writers saved the same nodes');
   const reopened = new Memory(dir, compress, () => {});
   try {
-    await reopened.settle(AbortSignal.timeout(5000), true);
+    await reopened.settle(AbortSignal.timeout(5000), 'tree');
     assert.equal(reopened.root.length, 3); assert.equal(reopened.tree.size, a.tree.size);
   } finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
 });
@@ -279,7 +299,7 @@ test('incremental view size and pending count match the rendered view across fai
       memory.append(i % 3 ? 'echo' : 'user', `${i} ${'detail '.repeat(i % 7 ? 90 : 2)}`);
       assert.equal(memory.size, measured(memory), `size after append ${i}`);
     }
-    await memory.settle(AbortSignal.timeout(5000), true);
+    await memory.settle(AbortSignal.timeout(5000), 'tree');
     assert.equal(memory.pending, 0);
     assert.equal(memory.size, measured(memory));
     await memory.close();
@@ -301,7 +321,7 @@ test('a retry that falls due while the compactor is scheduling still runs', asyn
       memory.append('user', 'x'.repeat(600));
       // A ref'd timer keeps the process alive, so a hang fails here instead of draining the event loop.
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const result = await Promise.race([memory.settle(undefined, true).then(() => 'settled'),
+      const result = await Promise.race([memory.settle(undefined, 'tree').then(() => 'settled'),
         new Promise(resolve => { timer = setTimeout(resolve, 1000, 'hung'); })]);
       clearTimeout(timer);
       assert.equal(result, 'settled', `clock step ${step}`);
@@ -343,12 +363,12 @@ test('a new message is summarized without rescanning every built node', async ()
   const memory = new Memory(dir, async () => 'unused', () => {}, 1000);
   try {
     assert.ok(memory.view.length < 100);
-    await memory.settle(AbortSignal.timeout(10000), true); // the first pump after load finds each level's frontier
+    await memory.settle(AbortSignal.timeout(10000), 'tree'); // the first pump after load finds each level's frontier
     const get = memory.tree.get;
     let lookups = 0;
     memory.tree.get = function (this: typeof memory.tree, key) { lookups++; return get.call(this, key); };
     memory.append('user', 'one more');
-    await memory.settle(AbortSignal.timeout(10000), true);
+    await memory.settle(AbortSignal.timeout(10000), 'tree');
     assert.equal(memory.pending, 0);
     assert.ok(lookups < count / 2, `${lookups} tree lookups for one new message over ${count}`);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
@@ -383,7 +403,7 @@ test('rebuilding a leaf that a saved parent already hides does not inflate the v
   try {
     assert.ok(memory.view.every(p => p.l > 0), 'the unbuilt leaf 0 is hidden by its saved parent');
     assert.equal(memory.pending, 1);
-    await memory.settle(AbortSignal.timeout(3000), true);
+    await memory.settle(AbortSignal.timeout(3000), 'tree');
     assert.equal(memory.pending, 0);
     assert.equal(memory.size, measured(memory));
     assert.ok(memory.size <= 80);
@@ -496,7 +516,7 @@ test('view size counts the flattened text that render emits, for new and reloade
   try {
     memory.append('user', 'a\r\n\r\n\r\nb\n\n\nc');
     assert.equal(memory.size, measured(memory), 'built from the entry');
-    await memory.settle(AbortSignal.timeout(2000), true);
+    await memory.settle(AbortSignal.timeout(2000), 'tree');
     assert.equal(memory.size, measured(memory));
     await memory.close();
     memory = new Memory(dir, async () => 'x');

@@ -16,7 +16,7 @@ test('search finds original messages newest first, pages backwards, and never re
     memory.append('tool', 'zoom {"id":3,"n":1}');
     memory.append('echo', 'zoom: 3+0|user: note 3 about the banner');
     memory.append('tool', 'search {"text":"banner"}');
-    await memory.settle(undefined, true);
+    await memory.settle(undefined, 'tree');
     assert.ok([...memory.tree.values()].some(s => s.text.includes('Lisbon')));
     assert.equal(searchPage(memory, 'lisbon'), 'No messages contain "lisbon".', 'summaries are not searched');
 
@@ -41,7 +41,7 @@ test('a search hit names the view line that holds it, so the agent can zoom from
   const memory = new Memory(dir, async () => 's'.repeat(300), () => {}, 1500);
   try {
     for (let i = 0; i < 8; i++) memory.append('user', `${i} banner ${'.'.repeat(600)}`);
-    await memory.settle(undefined, true);
+    await memory.settle(undefined, 'tree');
     assert.match(memory.render(), /^0\+4\|/m);
     const ids = searchPage(memory, 'banner').split('\n').slice(1).map(line => line.split(' · ')[0]);
     assert.deepEqual(ids, ['7', '6', '5', '4', '3 (in 0+4)', '2 (in 0+4)', '1 (in 0+4)', '0 (in 0+4)']);

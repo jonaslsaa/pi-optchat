@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
-import { createCompressor, SCALE } from '../src/compactor.ts';
+import { createCompressor, RULER } from '../src/compactor.ts';
 import { createHandoffSummarizer } from '../src/handoff.ts';
 import type { RunInfo } from '../src/runs.ts';
 import { bytes, NODE } from '../src/memory.ts';
@@ -13,6 +13,7 @@ import { emptyUsage } from '../src/usage.ts';
 
 let sentReasoning: string | undefined;
 let sentStep = '';
+let sentRetry = '';
 /** A fake model whose first reply is `first` bytes long and whose retries fit. */
 async function attempts(first: number, { source = 'user: ' + 'a long message '.repeat(70), merge = false, accepted }: { source?: string; merge?: boolean; accepted?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-size-'));
@@ -26,6 +27,8 @@ async function attempts(first: number, { source = 'user: ' + 'a long message '.r
       sentReasoning = options?.reasoning;
       const request = context.messages.find(m => m.role === 'user')?.content;
       sentStep = Array.isArray(request) ? request.map(c => c.type === 'text' ? c.text : '').at(-1) ?? '' : request ?? '';
+      const last = context.messages.at(-1);
+      sentRetry = last?.role === 'user' && typeof last.content === 'string' ? last.content : '';
       const stream = createAssistantMessageEventStream();
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(calls++ ? 400 : first) }], api: model.api,
         provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
@@ -62,18 +65,17 @@ test('a merge that is not smaller than the two lines it replaces is retried', as
   assert.deepEqual(await attempts(590, { source: 'c'.repeat(1000), merge: true }), { calls: 1, bytes: 590 });
 });
 
-test('the size example the compactor is shown is a real line of exactly NODE bytes, not padding', () => {
-  assert.equal(bytes(SCALE), NODE);
-  assert.doesNotMatch(SCALE, /([^\w\s])\1\1/);
-  // A copied example must not add plausible fake facts to memory: no PR numbers, commit-like ids or dates.
-  assert.doesNotMatch(SCALE, /#\d|\b[0-9a-f]{7,}\b|\b20\d\d\b/);
-});
-
-test('the size example is fenced off from the input, so it is never summarized as chat', async () => {
+test('the size is shown as a ruler of NODE dashes, with no sample content that could be copied', async () => {
   const source = 'user: ' + 'a long message '.repeat(70);
   await attempts(400, { source });
-  assert.ok(sentStep.includes(`<example>${SCALE}</example>`));
-  assert.ok(sentStep.endsWith(`<input>\n${source}\n</input>`));
+  assert.equal(RULER, '-'.repeat(NODE));
+  assert.ok(sentStep.endsWith(`the length of this ruler:\n${RULER}\n<input>\n${source}\n</input>`));
+});
+
+test('a line over the limit is sent back cut at 512 bytes, to be rewritten whole for the same input', async () => {
+  await attempts(700);
+  assert.ok(sentRetry.startsWith('Too long: your line is 700 bytes, over the 512-byte limit. Write the whole line again for the same <input>'));
+  assert.ok(sentRetry.endsWith(`\n${'x'.repeat(NODE)}| ← LIMIT`));
 });
 
 test('handoffs clamp the compactor\'s thinking level too', async () => {

@@ -599,7 +599,8 @@ async function quickChildren(dir: string, memory = new Memory(join(dir, 'profile
 
 test('close() does not wait for a spawn that is still waiting for memory to be summarized', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-close-settling-'));
-  const memory = new Memory(join(dir, 'profile'), async () => { throw new Error('compactor outage'); }, () => {});
+  // A summary that never lands: a failed one would no longer hold the spawn.
+  const memory = new Memory(join(dir, 'profile'), (_, signal) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('closed')))), () => {});
   const children = await quickChildren(dir, memory);
   try {
     memory.append('user', 'large message '.repeat(100));

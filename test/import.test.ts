@@ -382,7 +382,7 @@ test('append activates only after complete indexing, retains original summaries,
   let activated: Memory | undefined;
   try {
     old.append('user', 'original exact message', '2026-06-01T00:00:00.000Z');
-    await old.settle(undefined, true); await old.close();
+    await old.settle(undefined, 'tree'); await old.close();
     const original = old.node({ l: 0, i: 0 });
     const job = prepareImport(dir, old, [entry('one'), entry('one')], 'append'); assert.ok(job);
     assert.equal(job.added, 1); assert.equal(job.skipped, 1); assert.equal(memoryDirectory(dir), dir);
@@ -403,7 +403,7 @@ test('paused imports retain completed summaries, resume from disk, and preserve 
   const dir = temp(); const old = new Memory(dir, short);
   let current: Memory | undefined;
   try {
-    old.append('user', 'native later', '2026-06-01T00:00:00.000Z'); await old.settle(undefined, true); await old.close();
+    old.append('user', 'native later', '2026-06-01T00:00:00.000Z'); await old.settle(undefined, 'tree'); await old.close();
     prepareImport(dir, old, [entry('a'), entry('b', date, 'large '.repeat(200))], 'rebuild');
     await assert.rejects(runImport(dir, async (_input, signal) => {
       await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
@@ -423,7 +423,7 @@ test('paused imports retain completed summaries, resume from disk, and preserve 
 test('discard leaves original memory active and a completed pointer swap can finish recovery idempotently', async () => {
   const dir = temp(), old = new Memory(dir, short);
   try {
-    old.append('user', 'original'); await old.settle(undefined, true); await old.close();
+    old.append('user', 'original'); await old.settle(undefined, 'tree'); await old.close();
     const discarded = prepareImport(dir, old, [entry('discard')], 'append'); assert.ok(discarded);
     discardImport(dir); assert.equal(memoryDirectory(dir), dir); assert.equal(pendingImport(dir), undefined);
     const job = prepareImport(dir, old, [entry('keep')], 'append'); assert.ok(job);
@@ -454,7 +454,7 @@ test('an import gives the compactor the same inputs as a live chat that sent the
     await runImport(dir, record(fromImport), AbortSignal.timeout(20000));
     chat = new Memory(live, record(fromChat), () => {});
     for (const e of imported) { chat.append(e.kind, e.text, e.date, e.receipt, e.origin); await chat.settle(AbortSignal.timeout(20000)); }
-    await chat.settle(AbortSignal.timeout(20000), true);
+    await chat.settle(AbortSignal.timeout(20000), 'tree');
     assert.ok(fromChat.some(call => call.startsWith('[true')), 'the view overflowed and merged');
     assert.deepEqual(fromImport.sort(), fromChat.sort());
   } finally { await chat?.close(); rmSync(dir, { recursive: true, force: true }); rmSync(live, { recursive: true, force: true }); }
@@ -463,7 +463,7 @@ test('an import gives the compactor the same inputs as a live chat that sent the
 test('a staged plan with an invalid entry, or missing lines, is refused before anything is written', async () => {
   const dir = temp(), old = new Memory(dir, short);
   try {
-    old.append('user', 'original'); await old.settle(undefined, true); await old.close();
+    old.append('user', 'original'); await old.settle(undefined, 'tree'); await old.close();
     const job = prepareImport(dir, old, [entry('a'), entry('b'), entry('c')], 'append'); assert.ok(job);
     const staged = join(dir, job.target, 'staged.jsonl'), plan = readFileSync(staged, 'utf8'), lines = plan.split('\n').filter(Boolean);
     const damaged = {

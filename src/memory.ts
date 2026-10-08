@@ -200,14 +200,18 @@ export class Memory {
           if (!this.reported.has(id)) { this.reported.add(id); this.warn(`Compactor ${start(part)}+${2 ** l}: ${this.lastError}`); }
           this.retryAt.set(id, Date.now() + this.retryMs);
           if (!this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.schedule(); }, this.retryMs);
-        }).finally(() => { this.busy.delete(id); this.events.emit('change'); this.schedule(); });
+        // Schedule before telling waiters, so a turn never mistakes the gap before the next pump for a stall.
+        }).finally(() => { this.busy.delete(id); this.schedule(); this.events.emit('change'); });
         this.busy.set(id, promise);
       }
     }
     // A later failure can have a later deadline than the timer installed by the first.
     const deadlines = [...this.retryAt.values()].filter(t => t > now);
     if (deadlines.length && !this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.schedule(); }, Math.max(1, Math.min(...deadlines) - now));
+    if (this.stalled) this.events.emit('change');
   }
+  /** Nothing is being built, nothing more can start, and something failed: only a retry can make progress. */
+  private get stalled() { return this.busy.size === 0 && !this.scheduled && this.retryAt.size > 0; }
   private async build(part: Part) {
     const source = part.l === 0 ? `${this.root[part.i].kind}: ${this.root[part.i].text}`
       : [0, 1].map(offset => this.text({ l: part.l - 1, i: 2 * part.i + offset })).join('\n');
@@ -226,9 +230,12 @@ export class Memory {
     if (!this.retryAt.size) this.lastError = undefined;
     this.fit();
   }
-  /** Waits until every part of the view is built. As in the recipe, the view may run over budget until pending merges land. */
-  async settle(signal?: AbortSignal, all = false): Promise<void> {
-    const done = () => this.ready && (!all || (this.busy.size === 0 && this.tree.size === this.expectedNodes()));
+  /** Waits until every part of the view is built ('view'), or every node ('tree'). As in the recipe, the view may run over budget until
+   * pending merges land. A 'turn' also stops waiting once everything pending has failed: it goes on with placeholders for the
+   * missing lines, `lastError` says why, and the failed nodes are still retried in the background. */
+  async settle(signal?: AbortSignal, until: 'turn' | 'view' | 'tree' = 'turn'): Promise<void> {
+    const done = () => until === 'tree' ? this.ready && this.busy.size === 0 && this.tree.size === this.expectedNodes()
+      : this.ready || (until === 'turn' && this.stalled);
     if (done()) return;
     if (this.stopped || signal?.aborted) throw new Error('Memory wait cancelled.');
     await new Promise<void>((resolve, reject) => {
