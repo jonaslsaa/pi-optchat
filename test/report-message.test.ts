@@ -181,3 +181,112 @@ test('reports a crash held back with unfinished siblings are delivered at the ne
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a report steered into a running turn reaches the main agent once, even when Esc clears Pi\'s queue or an abort leaves it queued', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-lost-'));
+  const oldHome = process.env.OPTCHAT_HOME, oldAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.OPTCHAT_HOME = dir;
+  process.env.PI_CODING_AGENT_DIR = join(dir, 'agent'); // Children load installed extensions from here.
+  const until = async (predicate: () => boolean, what: string) => {
+    for (const deadline = Date.now() + 10000; !predicate();) {
+      if (Date.now() > deadline) throw new Error(`Timed out: ${what}`);
+      await new Promise(r => setTimeout(r, 10));
+    }
+  };
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    const profile = profilePath('fixture'), fixture = { provider: 'fixture', model: 'fixture', thinking: 'off' as const };
+    saveConfig(profile, { ...loadConfig(profile), compactor: fixture, subagent: fixture });
+    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+    const main: string[] = [];
+    let release = () => {}, hold = true, settling = false;
+    runtime.registerProvider('fixture', {
+      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+      streamSimple(model, context, options) {
+        const last = context.messages.at(-1), text = textContent(last && 'content' in last ? last.content : '');
+        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT), child = text.includes('\n\nYour task:\n');
+        if (!compression && !child) main.push(text);
+        const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'Summary.' : child ? 'Child done.' : 'ok' }],
+          timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
+        if (!compression && !child && text.endsWith('Spawn one.')) {
+          reply.content = [{ type: 'toolCall', id: 'spawn-1', name: 'spawn', arguments: { tasks: [{ task: hold ? 'Say done.' : 'Say done slowly.' }] } }]; reply.stopReason = 'toolUse';
+        }
+        const stream = createAssistantMessageEventStream();
+        void (async () => {
+          // After the spawn, main keeps writing until released or aborted, so the child's report waits in Pi's steering queue.
+          if (child && text.endsWith('slowly.')) await new Promise(r => setTimeout(r, 300));
+          if (last?.role === 'toolResult' && hold) {
+            stream.push({ type: 'start', partial: reply });
+            await new Promise<void>(resolve => { release = resolve; options?.signal?.addEventListener('abort', () => resolve(), { once: true }); });
+          }
+          if (options?.signal?.aborted) { reply.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: reply }); }
+          else stream.push({ type: 'done', reason: reply.stopReason === 'toolUse' ? 'toolUse' : 'stop', message: reply });
+          stream.end();
+        })();
+        return stream;
+      },
+    });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [(pi: ExtensionAPI) => {
+        // Another extension's slow settle handler, during which the child reports: Pi is idle, so it holds that report for its own run.
+        pi.on('agent_settled', async () => {
+          if (!settling) return;
+          settling = false;
+          await until(() => readFileSync(join(profile, 'pending-reports.json'), 'utf8').includes('Child done.'), 'the child reports while settling');
+        });
+      }, optchat] });
+    await loader.reload();
+    const manager = SessionManager.create(dir, join(dir, 'sessions'));
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
+      resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date', 'spawn'] })).session;
+    const errors: string[] = [];
+    await session.bindExtensions({ onError: error => errors.push(error.error) });
+    const s = session;
+    const work = () => readdirSync(join(profile, 'main')).flatMap(file => readFileSync(join(profile, 'main', file), 'utf8').trim().split('\n'))
+      .map(line => JSON.parse(line) as { kind: string; text: string }).filter(e => e.kind === 'work' && e.text.includes('Child done.'));
+    const reportTurn = async (stop: 'esc' | 'abort' | 'none') => {
+      const before = work().length, running = s.prompt('Spawn one.');
+      await until(() => s.agent.hasQueuedMessages(), 'the report is queued as a steer');
+      // What Esc does in Pi's editor: take the queue back, then abort the run. A bare abort leaves the steer queued in Pi.
+      if (stop === 'esc') s.clearQueue();
+      if (stop === 'none') release(); else await s.abort();
+      await running;
+      await until(() => work().length > before && s.isIdle, 'the report is logged');
+      await new Promise(r => setTimeout(r, 100)); // room for a wrong second delivery
+    };
+
+    await reportTurn('esc');
+    assert.equal(work().length, 1, 'the cleared report is sent again after the turn, once');
+    assert.equal(main.filter(t => t.endsWith('Child done.')).length, 1, 'the model sees it in one turn');
+    assert.deepEqual(JSON.parse(readFileSync(join(profile, 'pending-reports.json'), 'utf8')), []);
+
+    main.length = 0;
+    await reportTurn('abort');
+    assert.equal(work().length, 2, 'sent again, and also still in Pi\'s queue: the extra copy is dropped');
+    assert.equal(main.filter(t => t.endsWith('Child done.')).length, 1);
+
+    main.length = 0;
+    await reportTurn('none');
+    assert.equal(work().length, 3, 'a report that arrived in its turn is not sent again');
+    assert.equal(main.filter(t => t.endsWith('Child done.')).length, 1);
+
+    const dropped = () => s.messages.filter(m => m.role === 'custom' && textContent(m.content).startsWith('(duplicate')).length, droppedBefore = dropped();
+    main.length = 0; hold = false; settling = true;
+    await s.prompt('Spawn one.');
+    await until(() => work().length > 3 && s.isIdle, 'the report sent while settling is logged');
+    await new Promise(r => setTimeout(r, 100));
+    assert.equal(work().length, 4);
+    assert.equal(main.filter(t => t.endsWith('Child done.')).length, 1);
+    assert.equal(dropped(), droppedBefore, 'a report sent while Pi settles already has its own run: not sent again');
+    assert.deepEqual(errors, []);
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    if (oldAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldAgent;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
