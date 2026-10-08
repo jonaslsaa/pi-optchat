@@ -531,3 +531,65 @@ test('inputs with images are claimed too, including /skill: commands and Pi\'s i
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('an input queued during a run and handed back by Esc is logged once, as sent, and never recovered later', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-esc-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    const config = loadConfig(profilePath('fixture'));
+    saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
+      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+    let calls = 0, streaming = () => {};
+    runtime.registerProvider('fixture', {
+      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+      streamSimple(model, _context, options) {
+        const stream = createAssistantMessageEventStream();
+        const end = (reason: 'stop' | 'aborted') => {
+          const reply = answer(reason === 'stop' ? 'Done.' : '', reason); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
+          stream.push(reason === 'stop' ? { type: 'done', reason, message: reply } : { type: 'error', reason, error: reply }); stream.end();
+        };
+        // Every other turn runs until it is aborted, like a long command.
+        if (calls++ % 2 === 0) { options?.signal?.addEventListener('abort', () => end('aborted')); streaming(); }
+        else queueMicrotask(() => end('stop'));
+        return stream;
+      },
+    });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager, noExtensions: true, noContextFiles: true,
+      noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.inMemory(dir);
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
+      resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date'] })).session;
+    await session.bindExtensions({});
+    const s = session;
+    const handBack = async (queued: string, sent: string) => {
+      const started = new Promise<void>(resolve => { streaming = resolve; });
+      const long = s.prompt('Run a long command.');
+      await started;
+      await s.prompt(queued, { streamingBehavior: 'steer' });
+      // What Esc does in Pi's editor: take the queued text back, then abort the run.
+      s.clearQueue(); await s.abort(); await long;
+      await s.prompt(sent);
+    };
+    await handBack('Reply with pineapple.', 'Reply with pineapple.');
+    await handBack('Reply with mango.', 'Reply with mango, please.');
+    await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); // recovers the journal, as /reload does
+    session.dispose(); session = undefined;
+    const main = join(dir, 'profiles', 'fixture', 'main');
+    const log = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n')).map(line => JSON.parse(line));
+    assert.deepEqual(log.filter(entry => entry.kind === 'user').map(entry => entry.text),
+      ['Run a long command.', 'Reply with pineapple.', 'Run a long command.', 'Reply with mango, please.']);
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

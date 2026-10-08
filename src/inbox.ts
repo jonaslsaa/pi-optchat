@@ -11,6 +11,8 @@ export class Inbox {
   private readonly file: string;
   private items: Arrival[];
   private readonly claimed = new Set<string>();
+  /** Typed while a run was going: Pi holds these until a turn boundary, and Esc or dequeue hands them back to the editor without telling extensions. */
+  private readonly queued = new Set<string>();
   constructor(directory: string) {
     this.file = join(directory, 'pending-inputs.json');
     const saved: unknown = existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf8')) : [];
@@ -19,9 +21,22 @@ export class Inbox {
     this.items = saved;
   }
   private save() { atomicWrite(this.file, JSON.stringify(this.items)); }
-  record(text: string) {
-    const item = { id: randomUUID(), text, date: new Date().toISOString() };
-    this.items.push(item); this.save(); return item.id;
+  record(text: string, queued = false) {
+    // Sending a handed-back input again is still one input: a second copy would never be claimed and be recovered as a duplicate.
+    let id = this.items.find(i => !this.claimed.has(i.id) && i.text === text)?.id;
+    if (!id) {
+      const item = { id: randomUUID(), text, date: new Date().toISOString() };
+      this.items.push(item); this.save(); id = item.id;
+    }
+    if (queued) this.queued.add(id); else this.queued.delete(id);
+    return id;
+  }
+  /** Call once a run settles: Pi has delivered everything it still held, so a queued input nobody claimed went back to the editor. */
+  dropReturned() {
+    const returned = new Set([...this.queued].filter(id => !this.claimed.has(id)));
+    this.queued.clear();
+    if (!returned.size) return;
+    this.items = this.items.filter(i => !returned.has(i.id)); this.save();
   }
   claim(text: string) { return this.claimWhere(i => i.text === text); }
   /** Pi expands `/skill:name args` after the input is journaled; match the expansion back to that input. */
@@ -43,6 +58,6 @@ export class Inbox {
     for (const item of this.items) {
       if (!receipts.has(item.id)) { memory.append('user', item.text, item.date, item.id); count++; }
     }
-    this.items = []; this.claimed.clear(); this.save(); return count;
+    this.items = []; this.claimed.clear(); this.queued.clear(); this.save(); return count;
   }
 }

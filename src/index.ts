@@ -248,7 +248,7 @@ export default function optchat(pi: ExtensionAPI) {
     }
     if (importing || pendingImport(active.dir)) { ctx.ui.notify('This profile has an import in progress. Use /optchat import to resume or discard it, or switch profiles.', 'info'); return { action: 'handled' }; }
     if (event.source !== 'extension') {
-      try { active.inbox.record(event.text); }
+      try { active.inbox.record(event.text, event.streamingBehavior !== undefined); }
       catch (error) { ctx.ui.notify(`Could not save input: ${errorText(error)}`, 'error'); return { action: 'handled' }; }
     }
     return { action: 'continue' };
@@ -341,7 +341,7 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('turn_end', (_event, ctx) => collectUsage(ctx));
   pi.on('agent_settled', async (_event, ctx) => {
     collectUsage(ctx);
-    try { flush(); } catch (error) { fault = errorText(error); ctx.ui.notify(fault, 'error'); }
+    try { flush(); active?.inbox.dropReturned(); } catch (error) { fault = errorText(error); ctx.ui.notify(fault, 'error'); }
     if (runStarted) pi.appendEntry(RUN_BOUNDARY, { state: 'end' });
     runStarted = false; status(ctx);
     working = false; showTitle(ctx);
