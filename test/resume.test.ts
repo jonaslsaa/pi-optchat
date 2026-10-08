@@ -311,3 +311,58 @@ test('a tell that loses the race with the child finishing is refused, not report
     assert.equal(children.history.records.get(id)?.guidance[0].state, 'undelivered');
   } finally { await cleanup(children); }
 });
+
+test('subagents cut off by Pi closing or crashing are resumed at the next start, and the main agent is told once', async () => {
+  const { dir, releases, reports, warnings, make, cleanup } = await setup('optchat-resume-restart-');
+  const first = make('first-session');
+  const later: Children[] = [];
+  try {
+    const [held] = await first.spawn([{ task: 'hold on' }], dir);
+    const [crashed] = await first.spawn([{ task: 'crashed' }], dir);
+    await until(() => releases.has('hold on') && first.history.records.get(crashed)?.state === 'completed' && !first.live(crashed));
+    // As if Pi had died while this one was still working.
+    first.history.save({ ...first.history.records.get(crashed)!, state: 'running', ended: undefined });
+    reports.length = 0;
+    await first.close();
+    assert.equal(reports.length, 0, 'a run Pi cut off does not report its abort');
+    assert.equal(first.history.records.get(held)?.state, 'interrupted');
+
+    later.push(make('second-session'));
+    await later[0].resumeCutOff();
+    assert.equal(reports[0], `Pi restarted while subagents were working. Resumed ${held}, ${crashed} from where they left off; reports arrive as usual.`);
+    await until(() => !later[0].active);
+    for (const id of [held, crashed]) {
+      assert.match(users(later[0], id).at(-1) ?? '', /^Pi restarted while you were working; nothing you did is lost\. Continue your task\.$/);
+      assert.equal(later[0].history.records.get(id)?.state, 'completed');
+      assert.ok(reports.some(r => r.startsWith(`[${id}] `)), 'the resumed run reports as usual');
+    }
+    const told = reports.length;
+    later.push(make('third-session'));
+    await later[1].resumeCutOff();
+    assert.equal(reports.length, told, 'nothing left to resume, nothing to say');
+    assert.deepEqual(warnings, []);
+  } finally { await cleanup(first, ...later); }
+});
+
+test('runs stopped or paused by the user, finished runs and older interrupted ones are not resumed at the next start', async () => {
+  const { dir, releases, reports, make, cleanup } = await setup('optchat-resume-restart-skip-');
+  const first = make('first-session');
+  let later: Children | undefined;
+  try {
+    const [stopped, paused, done, old] = await first.spawn([{ task: 'hold stop' }, { task: 'hold pause' }, { task: 'done' }, { task: 'old' }], dir);
+    await until(() => releases.has('hold stop') && releases.has('hold pause') && !first.live(done) && !first.live(old));
+    await first.stop(stopped);
+    assert.equal(await first.interrupt(paused), 'paused');
+    await until(() => first.history.records.get(stopped)?.state === 'stopped' && first.history.records.get(paused)?.state === 'paused');
+    // Interrupted before Pi resumed cut-off runs.
+    first.history.save({ ...first.history.records.get(old)!, state: 'interrupted' });
+    await first.close();
+    const before = reports.length;
+
+    later = make('second-session');
+    await later.resumeCutOff();
+    assert.equal(reports.length, before);
+    assert.deepEqual(later.ids, []);
+    assert.deepEqual([stopped, paused, done, old].map(id => later!.history.records.get(id)?.state), ['stopped', 'stopped', 'completed', 'interrupted']);
+  } finally { await cleanup(first, ...(later ? [later] : [])); }
+});

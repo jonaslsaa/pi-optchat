@@ -11,7 +11,7 @@ import { allowSearch, memoryTools, SEARCH_DOC, searchTool } from './tools.ts';
 import { type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cachePayload } from './cache.ts';
-import { RunHistory, transition, sessionMessages, type RunInfo, type RunState, type FinishReason } from './runs.ts';
+import { CUT_OFF, RunHistory, transition, sessionMessages, type RunInfo, type RunState, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { textContent } from './transcript.ts';
 import { Type } from 'typebox';
@@ -362,6 +362,11 @@ export class Children {
       // A failed dispose must neither keep the slot taken nor drop the report below.
       this.dispose(session); this.running.delete(info.id);
     }
+    if (info.cutOff) {
+      // Aborted by Pi closing, not by anyone's choice: no report now, the next start resumes it.
+      if (info.state === 'stopped' && transition(info, 'interrupted')) { info.report = CUT_OFF; this.save(info); return; }
+      delete info.cutOff; // It finished on its own while Pi was closing.
+    }
     if (info.connected) {
       info.handoff ??= { reason: 'failed' };
       transition(info, info.handoff.reason === 'complete' ? 'completed' : 'interrupted');
@@ -492,7 +497,7 @@ export class Children {
         await this.shutdown(session); this.dispose(session); throw new Error('Parent or profile is stopping.');
       }
       // The finished record stays untouched (and resumable) unless the new one is saved.
-      const { ended: _ended, ...rest } = run;
+      const { ended: _ended, cutOff: _cutOff, ...rest } = run;
       const info: RunInfo = { ...rest, state: 'running', started: Date.now(), parentSession: this.options.parentSession ?? run.parentSession,
         guidance: [...run.guidance, { text, date: Date.now(), state: 'queued', from: 'manager' }] };
       try { this.save(info); } catch (error) { this.history.records.set(id, run); await this.shutdown(session); this.dispose(session); throw error; }
@@ -507,6 +512,23 @@ export class Children {
     } finally { if (reserved) this.launching--; this.resuming.delete(id); }
     this.changed();
     return `${id} had finished, so I resumed it with its earlier conversation. Its new report will come back on its own.`;
+  }
+  /**
+   * Resumes the main agent's subagents that the last Pi close or crash cut off, then tells the main agent once.
+   * Their own cut-off children are left to them: the nudge names them, and their `tell` resumes them.
+   */
+  async resumeCutOff() {
+    const cut = [...this.history.records.values()].filter(run => run.cutOff).sort((a, b) => a.started - b.started);
+    const resumed: string[] = [], failed: string[] = [];
+    for (const run of cut.filter(r => !r.parentId)) {
+      const children = cut.filter(r => r.parentId === run.id).map(r => r.id);
+      const nudge = `Pi restarted while you were working; nothing you did is lost. Continue your task.${children.length ? ` Your subagents ${children.join(', ')} were cut off too: tell resumes one if you still need its result.` : ''}`;
+      try { await this.track(this.resume(run.id, nudge, undefined)); resumed.push(run.id); }
+      catch (error) { failed.push(`Could not resume ${run.id}: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    for (const run of cut) if (run.cutOff) { delete run.cutOff; this.save(run); } // Resumed records were replaced without the flag.
+    if (!resumed.length && !failed.length) return;
+    await this.report([`Pi restarted while subagents were working.${resumed.length ? ` Resumed ${resumed.join(', ')} from where ${resumed.length > 1 ? 'they' : 'it'} left off; reports arrive as usual.` : ''}`, ...failed].join('\n'));
   }
   async finish(id: string, reason: FinishReason) {
     const live = this.running.get(id);
@@ -595,6 +617,8 @@ export class Children {
   }
   async close() {
     this.closing = true;
+    // Only work in progress is picked up at the next start: not paused runs waiting for the user, runs being stopped, or connected windows (they hand off).
+    for (const { info } of this.running.values()) if (!info.connected && (info.state === 'running' || info.state === 'waiting')) info.cutOff = true;
     await Promise.allSettled([...this.running.keys()].map(id => this.stop(id)));
     await Promise.allSettled(this.launches);
     await Promise.allSettled(this.completions);

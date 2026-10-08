@@ -17,6 +17,8 @@ export interface RunInfo {
   state: RunState; report?: string;
   connected?: boolean;
   handoff?: { reason: FinishReason; text?: string; delivered?: boolean };
+  /** Working when Pi closed or crashed: the next start resumes it (see `Children.resumeCutOff`). */
+  cutOff?: boolean;
   /** `from` is missing on runs saved before senders were recorded. */
   guidance: { text: string; date: number; state: 'queued' | 'delivered' | 'undelivered'; from?: 'user' | 'manager' }[];
 }
@@ -44,6 +46,7 @@ function isRun(value: unknown): value is RunInfo {
     && (value.sessionFile === undefined || typeof value.sessionFile === 'string')
     && (value.report === undefined || typeof value.report === 'string')
     && (value.connected === undefined || typeof value.connected === 'boolean')
+    && (value.cutOff === undefined || typeof value.cutOff === 'boolean')
     && (value.handoff === undefined || record(value.handoff) && ['complete', 'disconnected', 'owner-stopped', 'failed'].includes(String(value.handoff.reason))
       && (value.handoff.text === undefined || typeof value.handoff.text === 'string')
       && (value.handoff.delivered === undefined || typeof value.handoff.delivered === 'boolean'))
@@ -51,6 +54,7 @@ function isRun(value: unknown): value is RunInfo {
     && (value.parentId === undefined || typeof value.parentId === 'string')
     && Array.isArray(value.guidance) && value.guidance.every(g => record(g) && typeof g.text === 'string' && typeof g.date === 'number' && ['queued', 'delivered', 'undelivered'].includes(String(g.state)) && (g.from === undefined || g.from === 'user' || g.from === 'manager'));
 }
+export const CUT_OFF = 'Pi closed before this agent finished. Its partial transcript is retained.';
 export function sessionMessages(file: string): AgentMessage[] {
   return SessionManager.open(file).getEntries().flatMap(e => e.type === 'message' ? [e.message] : []);
 }
@@ -73,8 +77,10 @@ export class RunHistory {
         this.records.set(run.id, run);
         if (isActiveRun(run)) {
           if (run.connected) run.handoff ??= { reason: 'owner-stopped' };
+          // Paused runs wait for the user and stopping ones were stopped on purpose: neither is picked up again by itself.
+          else if (run.state === 'running' || run.state === 'waiting') run.cutOff = true;
           transition(run, 'interrupted'); run.ended = Date.now();
-          run.report = 'Pi closed before this agent finished. Its partial transcript is retained.';
+          run.report = CUT_OFF;
           for (const g of run.guidance) if (g.state === 'queued') g.state = 'undelivered';
           this.save(run);
         }

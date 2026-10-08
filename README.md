@@ -104,7 +104,7 @@ Ask in plain words, for example: "Spawn an agent to investigate this repository 
 - By default only the main agent starts subagents. Set **Subagent levels** in `/optchat settings` to let them delegate further (3 means child, grandchild, great-grandchild).
 - **Max active agents** (8 by default) caps how many agents can be active per profile, including parents waiting on descendants. Going over a limit returns an error; there is no queue.
 - Stopping an agent stops its whole subtree. A failed parent stops its descendants.
-- Agents run inside the Pi process. Closing Pi stops them; there is no detached mode.
+- Agents run inside the Pi process. Closing Pi stops them; there is no detached mode. Subagents that were working when Pi closed, crashed or `/reload`ed are resumed from their saved transcripts when the profile next opens in interactive Pi, and the main agent is told which. Ones you stopped or paused aren't.
 
 ## Agents, usage and activity inspector
 
