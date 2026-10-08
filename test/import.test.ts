@@ -460,6 +460,19 @@ test('an import gives the compactor the same inputs as a live chat that sent the
   } finally { await chat?.close(); rmSync(dir, { recursive: true, force: true }); rmSync(live, { recursive: true, force: true }); }
 });
 
+test('append keeps the saved view with the tree, so the old view stays cached; rebuild starts without one', async () => {
+  const dir = temp(), old = new Memory(dir, short);
+  try {
+    old.append('user', 'original'); await old.settle(undefined, true); await old.close();
+    writeFileSync(join(dir, 'view.json'), '[[0,0]]');
+    const appended = prepareImport(dir, old, [entry('a')], 'append'); assert.ok(appended);
+    assert.equal(readFileSync(join(dir, appended.target, 'view.json'), 'utf8'), '[[0,0]]');
+    discardImport(dir);
+    const rebuilt = prepareImport(dir, old, [entry('b')], 'rebuild'); assert.ok(rebuilt);
+    assert.equal(existsSync(join(dir, rebuilt.target, 'view.json')), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('a staged plan with an invalid entry, or missing lines, is refused before anything is written', async () => {
   const dir = temp(), old = new Memory(dir, short);
   try {

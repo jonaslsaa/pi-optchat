@@ -64,6 +64,19 @@ test('parallel calls on a cold view wait until one call has started answering, a
   await warm;
 });
 
+test('a call whose view runs past a cold prefix that is being primed waits for that primer', { timeout: 5000 }, async () => {
+  const { calls, run, settle, view } = await setup();
+  const longer = view.replace('</chat>', '0+1|user: a newer line\n'.repeat(4) + '</chat>');
+  const replies = [run('a'), run('b', longer)];
+  await settle();
+  assert.deepEqual(calls.map(c => c.source), ['a'], 'the longer view waits for the shorter one being primed');
+  calls[0].answer();
+  await settle();
+  assert.deepEqual(calls.map(c => c.source), ['a', 'b']);
+  calls.forEach(c => { c.answer(); c.finish(); });
+  await Promise.all(replies);
+});
+
 test('a failing primer releases the waiting calls instead of hanging them', { timeout: 5000 }, async () => {
   const { calls, run, settle } = await setup();
   const replies = ['a', 'b', 'c'].map(source => run(source).catch((error: Error) => error.message));

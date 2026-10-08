@@ -6,7 +6,7 @@ Source: https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449
 
 The implementation was compared with the recipe fetched on 2026-10-04. The reference content SHA-256 was `8f6997e8944d85e4df53b5704bf7c4e393e4da361071181e9cc2f7d9d1b6e430`.
 
-The source remains upstream rather than duplicating the full article here. Its four prompt strings are preserved in `src/prompts.ts`, with attribution in `THIRD_PARTY_NOTICES.md`.
+The source remains upstream rather than duplicating the full article here. Its prompt strings, from the original and the 2026-10-08 revision, are in `src/prompts.ts` with the small adaptations the README lists, and attribution in `THIRD_PARTY_NOTICES.md`.
 
 ## Implementation mapping
 
@@ -15,7 +15,7 @@ The source remains upstream rather than duplicating the full article here. Its f
 - `src/cache.ts`: Anthropic cache marks: the view in blocks of 4 lines, one mark on the last whole block and one at the request's end, as in recipe §3.3, plus two marks 20 and 40 blocks before the last. Anthropic looks back only 20 blocks from a mark, so with the recipe's one view mark a turn that added more than 80 lines, such as 40 tool calls and their results, made the next turn rewrite the whole view. OpenAI requests get no marks: GPT-5.6 and GPT-6 Luna reject the recipe's `prompt_cache_breakpoint` with a 400 (found by @aaaxn), so they rely on implicit prefix caching. OptChat doesn't set `reasoning.context` either: GPT-5.6 already defaults to the recipe's `"all_turns"`, and OpenAI documents it only for GPT-5.6 and GPT-6.1 Sol.
 - `src/transcript.ts`: fresh context per parent run, current-run tool loop retained. The previous completed exchange is also retained in full text (left out if over 16,000 bytes by default), an intentional addition to the summary-only recipe for conversational continuity.
 - `src/agents.ts`: asynchronous Pi SDK children and automatic completion reports.
-- `src/settings.ts`: per-profile settings for the departures from the recipe. Defaults are the recipe's (one subagent level, no memory search), except the previous exchange (on) and the summary size tolerance (640 bytes, against the recipe's strict 512).
+- `src/settings.ts`: per-profile settings for the departures from the recipe. Defaults are the recipe's (no memory search), except the previous exchange (on), the summary size tolerance (640 bytes, against the recipe's strict 512) and grouped subagent reports (on, where the revised recipe reports each subagent on its own).
 - `src/import/`: profile-scoped historical imports retain user messages and final assistant replies, following the lighter history described in recipe section 10. An import hands `Memory` one message at a time, each once the one before it is summarized, so the compactor sees the view a live chat would have shown it. Source adapters, final-reply detection, replay filtering, and ChatGPT branch labels are integration choices. Live-chat tool logging remains unchanged.
 
 Profiles, native Pi UI, conversation import, and local Git checkpoints are integration choices described in the README.

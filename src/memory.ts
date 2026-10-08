@@ -5,7 +5,8 @@ import { EventEmitter } from 'node:events';
 export const NODE = 512;
 export const VIEW = 128_000;
 export const CAP = 30_000;
-export type Kind = 'user' | 'talk' | 'tool' | 'echo' | 'note';
+export const KINDS = ['user', 'talk', 'tool', 'echo', 'note', 'work'] as const;
+export type Kind = typeof KINDS[number];
 export interface Origin { source: 'claude' | 'claude-memory' | 'codex' | 'chatgpt'; conversation: string; message: string; title: string; project?: string }
 export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin }
 export interface Part { l: number; i: number }
@@ -124,7 +125,7 @@ function object(value: unknown): value is Record<string, unknown> {
 }
 export function isEntry(value: unknown): value is Entry {
   return object(value) && Number.isSafeInteger(value.i) && typeof value.kind === 'string'
-    && ['user', 'talk', 'tool', 'echo', 'note'].includes(value.kind)
+    && KINDS.some(kind => kind === value.kind)
     && typeof value.text === 'string' && typeof value.date === 'string';
 }
 function isSummary(value: unknown): value is Summary {
