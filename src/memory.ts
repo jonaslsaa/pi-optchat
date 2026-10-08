@@ -5,8 +5,6 @@ import { EventEmitter } from 'node:events';
 export const NODE = 512;
 export const VIEW = 128_000;
 export const CAP = 30_000;
-/** A message over this many bytes is a big paste or tool output: its leaf line says so, so it doesn't pass for a one-liner. */
-export const BIG = 8_000;
 /** The most characters one zoom into a message returns, so a page stays under the tool output CAP instead of losing its middle. */
 export const PAGE = 25_000;
 export type Kind = 'user' | 'talk' | 'tool' | 'echo' | 'note';
@@ -33,12 +31,6 @@ export function cap(text: string, limit = CAP) {
   const head = text.slice(0, /[\ud800-\udbff]/.test(text[half - 1]) ? half - 1 : half);
   const tail = text.slice(/[\udc00-\udfff]/.test(text[text.length - half]) ? text.length - half + 1 : text.length - half);
   return head + notice(text.length - head.length - tail.length) + tail;
-}
-/** `echo: …` becomes `echo (31 KB): …`; a summary that doesn't open with a kind gets the size in front. */
-export function sized(entry: Entry, text: string) {
-  if (entry.size <= BIG) return text;
-  const tag = `(${Math.round(entry.size / 1000)} KB)`;
-  return /^\w+: /.test(text) ? text.replace(/^\w+/, `$& ${tag}`) : `${tag} ${text}`;
 }
 export function localDay(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -118,7 +110,7 @@ export class Memory {
       if (!isSummary(value) || value.l < 0 || value.i < 0 || end(value) > this.root.length)
         throw new Error('Invalid OptChat summary record.');
       if (value.l === 0 && !this.tree.has(key(value))) this.leaves++;
-      this.tree.set(key(value), this.shown(value, value.text));
+      this.tree.set(key(value), { ...value, size: lineBytes(value.text) });
     }
     // Fold history in order; do not retile the entire log on each turn.
     for (let i = 0; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
@@ -138,11 +130,6 @@ export class Memory {
     return entry;
   }
   node(part: Part) { return this.tree.get(key(part)); }
-  /** The tree files keep the summary as written; the size tag is added on load, so older trees get it too. */
-  private shown(part: Part, summary: string): Summary {
-    const text = part.l ? summary : sized(this.root[part.i], summary);
-    return { l: part.l, i: part.i, text, size: lineBytes(text) };
-  }
   private text(part: Part) { return this.node(part)?.text ?? UNBUILT; }
   private partBytes(part: Part) { return this.node(part)?.size ?? UNBUILT_BYTES; }
   private push(i: number) { const part = { l: 0, i }; this.view.push(part); this.viewBytes += this.partBytes(part); }
@@ -233,8 +220,8 @@ export class Memory {
       historical: this.root.slice(start(part), end(part)).some(entry => !!entry.origin) }, this.controller.signal)).trim();
     if (this.stopped) return;
     if (!text) throw new Error('Compactor returned an empty summary.');
-    appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), { ...part, text, size: lineBytes(text) });
-    const node = this.shown(part, text);
+    const node = { ...part, text, size: lineBytes(text) };
+    appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), node);
     this.tree.set(key(part), node); this.retryAt.delete(key(part));
     // A leaf is usually still in the view when built, but after a damaged tree file a saved parent can already hide it.
     if (part.l === 0) { this.leaves++; if (this.visible(part)) this.viewBytes += node.size - UNBUILT_BYTES; }
