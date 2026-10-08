@@ -70,6 +70,7 @@ export const builtinExtensions = (names: Iterable<string>): InlineExtension[] =>
   const create = Object.hasOwn(BUILTINS, name) ? (sdk as unknown as Record<string, unknown>)[BUILTINS[name]] : undefined;
   return typeof create === 'function' ? [{ name, factory: create(), replaceable: true, builtin: true }] : [];
 });
+const RESTARTED = 'Pi restarted while you were working. Your last tool call may have been cut off; check its effect before redoing it. Continue your task.';
 export class Children {
   private readonly running = new Map<string, LiveRun>();
   readonly history: RunHistory;
@@ -522,17 +523,25 @@ export class Children {
    * Cut-off children of a cut-off parent wait for it: resuming it names them, and its `tell` resumes them.
    */
   async resumeCutOff() {
-    const cut = [...this.history.records.values()].filter(run => run.cutOff).sort((a, b) => a.depth - b.depth || a.started - b.started);
+    const cut = [...this.history.records.values()].filter(run => run.cutOff).sort((a, b) => a.depth - b.depth || a.started - b.started).map(run => run.id);
     const resumed: string[] = [], lines: string[] = [], orphans: string[] = [];
+    // Always the current record: a `tell` during startup may have resumed the run and replaced it meanwhile.
+    const current = (id: string) => { const run = this.history.records.get(id); return run?.cutOff ? run : undefined; };
     const drop = (run: RunInfo) => { delete run.cutOff; this.save(run); };
-    for (const run of cut) {
+    for (const id of cut) {
+      const run = current(id);
+      if (!run) continue;
       if (run.parentId) {
         // Its parent was not cut off (it was paused, say) or could not be resumed: nobody else will mention it.
         if (!this.history.records.get(run.parentId)?.cutOff && !this.running.has(run.parentId)) { orphans.push(`${run.id} (under ${run.parentId})`); drop(run); }
         continue;
       }
-      try { await this.track(this.resume(run.id, 'Pi restarted while you were working; nothing you did is lost. Continue your task.', undefined)); resumed.push(run.id); }
-      catch (error) { lines.push(`Could not resume ${run.id}: ${error instanceof Error ? error.message : String(error)}`); drop(run); }
+      try { await this.track(this.resume(id, RESTARTED, undefined)); resumed.push(id); }
+      catch (error) {
+        const still = current(id);
+        if (!still) continue; // Resumed by someone else meanwhile.
+        lines.push(`Could not resume ${id}: ${error instanceof Error ? error.message : String(error)}`); drop(still);
+      }
     }
     if (orphans.length) lines.push(`Also cut off, but not resumed because their parent agent is not running: ${orphans.join(', ')}.`);
     if (!resumed.length && !lines.length) return;
