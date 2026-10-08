@@ -1,5 +1,5 @@
 # A real Windows machine for a maintainer's hands-on test: dispatch it, then SSH in with the command in the run's
-# "SSH:" annotation. upterm, since tmate's public servers are gone (mxschmitt/action-tmate#255).
+# ssh-command artifact (gh run download <run> -n ssh-command). upterm, since tmate's public servers are gone (mxschmitt/action-tmate#255).
 # Only the dispatching user's GitHub SSH keys can connect. `exit` in the session, or the 60-minute cap, ends the job.
 name: Windows live
 on: workflow_dispatch
@@ -25,6 +25,11 @@ jobs:
           limit-access-to-actor: true
           detached: true
           wait-timeout-minutes: 15
-      # The API serves a job's log only after it ends, so the command goes out as an annotation, readable while it runs.
-      - run: echo "::notice title=SSH::${{ steps.upterm.outputs.ssh-command }}"
+      # The API serves a job's log only after it ends, so the command goes out as an artifact, downloadable while it runs.
+      - run: echo "${{ steps.upterm.outputs.ssh-command }}" > ssh-command.txt
         shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssh-command
+          path: ssh-command.txt
+          retention-days: 1
