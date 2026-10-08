@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { getCurrentSystemMessage, type SystemMessage, type UserMessage } from '@earendil-works/pi-ai';
@@ -6,8 +7,11 @@ import { record } from './cache.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
 
 export const RUN_BOUNDARY = 'optchat.run';
-/** Subagent traffic to the main agent: a custom message on screen, a plain user message to the model and memory. */
+/** Subagent traffic to the main agent: a custom message on screen, a plain user message to the model, `work` in memory. */
 export const REPORT_TYPE = 'optchat-report';
+export const REPORT_RECEIPT = 'report:';
+/** A report's receipt in memory: it marks the entry as `work` and keeps a restart from delivering the report twice. */
+export const reportReceipt = (text: string) => REPORT_RECEIPT + createHash('sha256').update(text).digest('hex');
 
 export function textContent(content: unknown, images = true): string {
   if (typeof content === 'string') return content;
@@ -25,14 +29,14 @@ export function typedText(content: unknown) {
   const text = textContent(content, false);
   return { text, bare: text.replace(/\n\n\[Image[ :][^\n]*\](?:\n\[Image[ :][^\n]*\])*$/, '') };
 }
-/** Reports reach the model, memory and the previous-exchange replay exactly as the user messages they used to be. */
+/** Reports reach the model and the previous-exchange replay as the user messages they used to be; memory logs them as `work`. */
 export function asUser(message: AgentMessage): AgentMessage {
   if (message.role !== 'custom' || message.customType !== REPORT_TYPE) return message;
   return { role: 'user', content: textContent(message.content), timestamp: message.timestamp };
 }
 export function logMessage(memory: Memory, message: AgentMessage, receipt?: string) {
   const date = new Date(message.timestamp).toISOString();
-  if (message.role === 'user') memory.append('user', textContent(message.content), date, receipt);
+  if (message.role === 'user') memory.append(receipt?.startsWith(REPORT_RECEIPT) ? 'work' : 'user', textContent(message.content), date, receipt);
   else if (message.role === 'assistant') {
     for (const block of message.content) {
       if (block.type === 'text' && block.text.trim()) memory.append('talk', block.text, date);

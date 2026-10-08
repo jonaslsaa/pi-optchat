@@ -2,7 +2,6 @@ import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
-import { createHash } from 'node:crypto';
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
@@ -12,7 +11,7 @@ import { createCompressor } from './compactor.ts';
 import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { MASTER, VIEW_DOC } from './prompts.ts';
 import { cachePayload, record } from './cache.ts';
-import { asUser, boundedMessage, buildContext, logMessage, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
+import { asUser, boundedMessage, buildContext, logMessage, previousExchange, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer, type ReportDetails } from './report-message.ts';
 import { memoryTools, result, SEARCH_DOC, searchTool } from './tools.ts';
 import { Children, CWD_DOC, loadedBuiltins } from './agents.ts';
@@ -73,7 +72,6 @@ export default function optchat(pi: ExtensionAPI) {
   /** Journals written before batches held plain strings. */
   const isPendingReport = (s: unknown): s is string | { text: string; count?: number } =>
     typeof s === 'string' || record(s) && typeof s.text === 'string' && (s.count === undefined || typeof s.count === 'number');
-  const reportReceipt = (text: string) => 'report:' + createHash('sha256').update(text).digest('hex');
   const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
   pi.registerFlag('optchat-profile', { description: 'OptChat profile (required for noninteractive sessions without a saved binding)', type: 'string' });
   const required = () => { if (!active) throw new Error('Choose an OptChat profile first: /optchat profile'); return active; };
@@ -93,7 +91,7 @@ export default function optchat(pi: ExtensionAPI) {
       const message = run[logged];
       const receipt = receipts.get(message);
       logMessage(active.memory, message, receipt); logged++;
-      if (receipt && !receipt.startsWith('report:')) active.inbox.acknowledge(receipt);
+      if (receipt && !receipt.startsWith(REPORT_RECEIPT)) active.inbox.acknowledge(receipt);
       receipts.delete(message);
       if (message.role === 'user') {
         const text = textContent(message.content), index = reports.findIndex(r => !r.batch && r.text === text);
@@ -274,7 +272,8 @@ export default function optchat(pi: ExtensionAPI) {
     if (message.role === 'user') {
       try {
         const text = textContent(message.content);
-        if (reports.some(r => !r.batch && r.text === text)) receipts.set(message, reportReceipt(text));
+        // A report is shown as our custom message, or sent as plain text before the first run has a prompt to reuse.
+        if (bounded.role === 'custom' || reports.some(r => !r.batch && r.text === text)) receipts.set(message, reportReceipt(text));
         else {
           // The inbox journaled the typed input: match without image placeholders or Pi's image notes.
           const typed = typedText(message.content), skill = parseSkillBlock(typed.bare);

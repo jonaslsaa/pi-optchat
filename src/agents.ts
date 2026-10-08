@@ -384,10 +384,10 @@ export class Children {
       if (parent && parent.info.state !== 'stopping') { parent.pendingReports.push(text); this.changed(); }
       return;
     }
-    if (this.closing) this.memory.append('user', text);
+    if (this.closing) this.memory.append('work', text);
     else try { await this.report(text, { count }); }
     catch (error) {
-      this.memory.append('user', text);
+      this.memory.append('work', text);
       this.warn(`Subagent report saved but could not wake the parent: ${String(error)}`);
     }
     if (batch && batch.ids.length > 1) this.options.hold?.(batch.ids[0], []);
