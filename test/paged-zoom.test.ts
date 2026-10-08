@@ -29,3 +29,13 @@ test('zoom pages a long message without splitting characters, and leaves short o
     assert.throws(() => memory.zoom(0, 2, 0), /n = 1/);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('paging a message that fits in one zoom still works, but says so', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-large-'));
+  const memory = new Memory(dir, async () => 'summary', () => {});
+  try {
+    memory.append('user', 'x'.repeat(3_120));
+    assert.equal(memory.zoom(0, 1, 100, 10), `0+0|user: ${'x'.repeat(10)}\n[showing characters 100-110 of 3120; next page: offset 110]\n`
+      + '[note: this message is only 3,120 characters and fits in one zoom; offset/limit are for messages over 25,000]');
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});

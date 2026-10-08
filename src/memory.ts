@@ -344,12 +344,13 @@ export class Memory {
     for (let n = this.root.length; n > 0; n = Math.floor(n / 2)) count += n;
     return count;
   }
-  /** n = 1 gives the message whole, or, when it is longer than `limit` or `offset` is given, the page of up to `limit` characters from `offset`. */
-  zoom(id: number, n: number, offset?: number, limit = PAGE) {
+  /** n = 1 gives the message whole, or, when it is longer than `limit` or `offset` is given, the page of up to `limit` characters from `offset`.
+   * Paging a message that fits in one page is allowed, but the page says so. */
+  zoom(id: number, n: number, offset?: number, limit?: number) {
     if (!Number.isSafeInteger(id) || id < 0 || !Number.isSafeInteger(n) || n < 1 || !Number.isInteger(Math.log2(n)) || id % n || id + n > this.root.length)
       throw new Error(`No line ${id}+${n}.`);
     if (n === 1) {
-      const { kind, text } = this.root[id], page = Math.min(limit, PAGE);
+      const { kind, text } = this.root[id], page = Math.min(limit ?? PAGE, PAGE);
       if (!Number.isSafeInteger(page) || page < 1) throw new Error('limit must be a positive integer.');
       if (offset === undefined && text.length <= page) return `${id}+0|${kind}: ${text}`;
       if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0 || offset >= Math.max(1, text.length)))
@@ -359,7 +360,8 @@ export class Memory {
       let to = Math.min(text.length, from + page);
       // A one-unit page on a pair takes the whole pair, so the next offset always moves forward.
       if (to < text.length && /[\ud800-\udbff]/.test(text[to - 1])) to += to - 1 === from ? 1 : -1;
-      return `${id}+0|${kind}: ${text.slice(from, to)}\n[showing characters ${from}-${to} of ${text.length}${to < text.length ? `; next page: offset ${to}` : ''}]`;
+      const hint = text.length <= PAGE ? `\n[note: this message is only ${text.length.toLocaleString('en-US')} characters and fits in one zoom; offset/limit are for messages over ${PAGE.toLocaleString('en-US')}]` : '';
+      return `${id}+0|${kind}: ${text.slice(from, to)}\n[showing characters ${from}-${to} of ${text.length}${to < text.length ? `; next page: offset ${to}` : ''}]${hint}`;
     }
     if (offset !== undefined) throw new Error('offset and limit page one message: use them with n = 1.');
     const l = Math.log2(n) - 1, i = 2 * id / n;

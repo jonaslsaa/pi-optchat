@@ -29,7 +29,7 @@ export function searchPage(memory: Memory, text: string, before?: number) {
 
 export function memoryTools(memory: () => Memory) {
   return [
-    { name: 'zoom', label: 'Zoom memory', description: `Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. A message over ${PAGE.toLocaleString('en-US')} characters comes in pages; offset and limit (characters) read any part of it. A message's images come back with it.`,
+    { name: 'zoom', label: 'Zoom memory', description: `Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. A message over ${PAGE.toLocaleString('en-US')} characters comes in pages; offset and limit (characters) read any part of it, and are not needed for a shorter one. A message's images come back with it.`,
       parameters: Type.Object({ id: Type.Integer({ minimum: 0 }), n: Type.Integer({ minimum: 1 }),
         offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: PAGE })) }),
       async execute(_id: string, args: { id: number; n: number; offset?: number; limit?: number }) {
