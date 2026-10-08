@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ModelRegistry, ModelRuntime, type ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -14,6 +14,11 @@ import { mountNavigation } from '../src/navigation.ts';
 
 // Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
+
+async function until(condition: () => boolean) {
+  const deadline = Date.now() + 10000;
+  while (!condition()) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 10)); }
+}
 
 test('inspector reaches old runs, opens the selected agent, shows usage, resizes, and shuts down', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-inspector-'));
@@ -52,6 +57,45 @@ test('inspector reaches old runs, opens the selected agent, shows usage, resizes
     assert.ok(narrow.every(line => visibleWidth(line) <= 40));
     controller.abort(); usagePage.handleInput('\x1b'); assert.equal(actions.length, 2);
   } finally { inspector.dispose(); usagePage.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('d twice deletes the selected agent and the agents it started; any other key cancels the first press', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-inspector-delete-'));
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, refreshOnCreate: false });
+  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'test', model: 'test', thinking: 'high' }), () => '', async () => {}, () => {}, dir);
+  const run = (id: string, started: number, parentId?: string) => children.history.save({ id, task: `Task ${id}`, cwd: dir, model: 'test', thinking: 'high',
+    parentSession: 'parent', depth: parentId ? 2 : 1, parentId, started, ended: started + 1, state: 'completed', guidance: [] });
+  run('old', 1); run('parent', 3); run('child', 4, 'parent'); run('newest', 5);
+  const inspector = new Inspector({ profile: 'personal', session: 'parent', children, usage: new UsageLedger(dir), memory, page: 'agents', rows: () => 24, redraw: () => {}, done: () => {}, color: (_tone, text) => text, context: () => undefined });
+  const selected = () => inspector.render(100).find(l => l.startsWith(' →')) ?? '';
+  const footer = () => inspector.render(100).at(-2) ?? '';
+  try {
+    inspector.handleInput('\x1b[B');
+    assert.match(selected(), /Task parent/);
+    inspector.handleInput('d');
+    assert.match(footer(), /Press d again to delete this agent and the agents it started/);
+    inspector.handleInput('x');
+    assert.match(footer(), /d delete/, 'another key cancels');
+    inspector.handleInput('d');
+    await new Promise(r => setTimeout(r, 20));
+    assert.ok(children.history.records.has('parent'), 'one press deletes nothing');
+    inspector.handleInput('d');
+    await until(() => !children.history.records.has('parent'));
+    assert.deepEqual([...children.history.records.keys()].sort(), ['newest', 'old'], 'its child went with it');
+    assert.ok(!existsSync(join(dir, 'runs', 'child.optchat.json')));
+    assert.match(selected(), /Task old/, 'the cursor moves to the next row');
+    // Moved onto a row that goes with the one being deleted, the cursor still lands on a row that remains.
+    inspector.handleInput('\x1b[A');
+    assert.match(selected(), /Task newest/);
+    run('kept', 2); run('gone', 6); run('gone-child', 7, 'gone');
+    inspector.handleInput('\x1b[H');
+    assert.match(selected(), /Task gone$|Task gone /);
+    inspector.handleInput('d'); inspector.handleInput('d'); inspector.handleInput('\x1b[B');
+    assert.match(selected(), /Task gone-child/);
+    await until(() => !children.history.records.has('gone'));
+    assert.match(selected(), /Task newest/);
+  } finally { inspector.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('Tab cycles Agents, Usage and Activity; Activity is a memory gauge with an agent count', async () => {

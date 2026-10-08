@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -99,6 +99,13 @@ export class RunHistory {
   save(run: RunInfo) {
     atomicWrite(join(this.directory, `${run.id}.optchat.json`), JSON.stringify(run));
     this.records.set(run.id, run);
+  }
+  /** The transcript goes first: left behind, it would come back at the next start as a historical child. */
+  remove(id: string) {
+    const file = this.records.get(id)?.sessionFile;
+    if (file) rmSync(file, { force: true });
+    rmSync(join(this.directory, `${id}.optchat.json`), { force: true });
+    this.records.delete(id);
   }
   descendants(id: string) {
     const result: RunInfo[] = [], visited = new Set([id]);

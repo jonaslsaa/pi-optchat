@@ -77,6 +77,7 @@ export class Children {
   private closing = false;
   private launching = 0;
   private readonly resuming = new Set<string>();
+  private readonly deleting = new Set<string>();
   private settling = 0;
   private readonly launches = new Set<Promise<unknown>>();
   private readonly completions = new Set<Promise<void>>();
@@ -368,6 +369,8 @@ export class Children {
       await this.deliverHandoff(info);
       return;
     }
+    // Said plainly, so the parent does not take the user's choice for a failure and delegate the task again.
+    if (this.deleting.has(info.id)) info.report = 'Deleted by the user while it was working. The user dropped this task on purpose: do not redo it or delegate it again unless they ask.';
     // A metadata failure must not suppress delivery of the actual result.
     try { this.save(info); } catch (error) { this.warn(`Could not save run metadata: ${String(error)}`); }
     let text = `[${info.id}] ${info.report}`;
@@ -394,6 +397,7 @@ export class Children {
   }
   /** `caller` is the agent sending a manager message: undefined for the main agent, else the parent subagent's ID. */
   async tell(id: string, message: string, source: 'manager' | 'user' = 'manager', caller?: string) {
+    if (this.deleting.has(id)) throw new Error(`${id} is being deleted by the user.`);
     const live = this.running.get(id);
     if (!live && source === 'manager' && this.history.records.has(id)) return this.track(this.resume(id, message, caller));
     if (live && !['running', 'waiting', 'paused'].includes(live.info.state)) throw new Error(`${id} is finishing. Its report will arrive on its own${live.info.connected || source === 'user' ? '' : '; tell it again after that to resume it'}.`);
@@ -564,6 +568,30 @@ export class Children {
       try { this.save(run.info); } catch (error) { this.warn(`Could not save stop status: ${String(error)}`); }
     }
     await Promise.allSettled(stopping.map(run => run.session.abort()));
+  }
+  /** The user's delete: stops the run and its descendants if they still work, lets their reports reach their parents, then deletes their files. */
+  async remove(id: string) {
+    if (!this.history.records.has(id)) throw new Error(`No subagent ${id}.`);
+    if (this.deleting.has(id)) throw new Error(`${id} is already being deleted.`);
+    const runs = () => [id, ...this.history.descendants(id).map(run => run.id)], marked = new Set<string>();
+    // An overlapping delete of a descendant keeps its own marks, so neither delete clears the other's.
+    const mark = () => { for (const run of runs()) if (!this.deleting.has(run)) { marked.add(run); this.deleting.add(run); } };
+    mark(); this.changed();
+    try {
+      // Launches and resumes register their runs before they settle, and a stopped parent can still have children launching.
+      for (;;) {
+        await Promise.allSettled(this.launches);
+        const live = runs().flatMap(run => this.running.get(run) ?? []);
+        if (!live.length) break;
+        mark();
+        await Promise.allSettled(live.map(run => this.stop(run.info.id)));
+        await Promise.allSettled(live.map(run => run.completion));
+      }
+      mark();
+      const records = runs().flatMap(run => this.history.records.get(run) ?? []);
+      if (records.some(run => run.connected && !run.handoff?.delivered)) throw new Error(`${id} has a connected conversation whose handoff has not reached the main agent yet, so it was kept.`);
+      for (const run of records.reverse()) this.history.remove(run.id); // Children first, so a failure never leaves one without its parent.
+    } finally { for (const run of marked) this.deleting.delete(run); this.changed(); }
   }
   async close() {
     this.closing = true;

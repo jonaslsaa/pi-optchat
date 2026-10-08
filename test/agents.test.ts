@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
@@ -451,7 +451,7 @@ test('a child stopped before its first request ends stopped without running its 
 });
 
 /** Children whose model works on its task until aborted, and answers any later message at once. */
-async function busyChildren(dir: string, reports: string[]) {
+async function busyChildren(dir: string, reports: string[], options: { settings?: () => Partial<Settings>; onReport?: (text: string) => void } = {}) {
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   const asked: string[][] = [];
   runtime.registerProvider('optchat-test', {
@@ -475,7 +475,7 @@ async function busyChildren(dir: string, reports: string[]) {
     },
   });
   const children = new Children(new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, () => {}, join(dir, 'profile'), { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(text); options.onReport?.(text); }, () => {}, join(dir, 'profile'), { settings: options.settings ?? nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   return { children, asked };
 }
 
@@ -576,6 +576,99 @@ test('an interrupt right after taking a message back delivers each remaining mes
     await until(() => reports.length === 1);
     assert.match(reports[0], /Now doing: Interrupted by the user:\n\nA\.\n\nB\.$/);
     assert.deepEqual(asked.at(-1)?.filter(text => text.includes('B.')).length, 1, 'B arrives once, not also as steering');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('deleting a running agent stops it and the agents it started, delivers its report, then removes their files for good', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-delete-'));
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports);
+  try {
+    const [boss, done] = await children.spawn([{ task: 'boss' }, { task: 'done' }], dir);
+    const [worker] = await children.spawn([{ task: 'worker' }], dir, undefined, boss);
+    await until(() => asked.length === 3);
+    const files = (id: string) => [join(dir, 'profile', 'runs', `${id}.optchat.json`), children.history.records.get(id)!.sessionFile!];
+    const doomed = [...files(boss), ...files(worker)];
+    assert.ok(doomed.every(file => existsSync(file)));
+    await children.remove(boss);
+    assert.ok(!children.live(boss) && !children.live(worker), 'both stopped');
+    assert.deepEqual(reports, [`[${boss}] Deleted by the user while it was working. The user dropped this task on purpose: do not redo it or delegate it again unless they ask.`],
+      'the report still reached the main agent, and says the task was dropped on purpose');
+    assert.ok(!children.history.records.has(boss) && !children.history.records.has(worker));
+    assert.ok(doomed.every(file => !existsSync(file)), 'metadata and transcripts are gone');
+    await assert.rejects(children.tell(boss, 'Come back.'), /No running subagent/);
+
+    await children.stop(done);
+    await until(() => !children.active);
+    const finished = files(done);
+    await children.remove(done);
+    assert.ok(finished.every(file => !existsSync(file)));
+    assert.equal(reports.length, 2, 'a finished run is deleted without another report');
+    assert.equal(new RunHistory(join(dir, 'profile')).records.size, 0, 'nothing comes back at the next start');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('deleting a parent while its child is still being deleted finishes both deletes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-delete-overlap-'));
+  const { children, asked } = await busyChildren(dir, []);
+  try {
+    const [boss] = await children.spawn([{ task: 'boss' }], dir);
+    const [worker] = await children.spawn([{ task: 'worker' }], dir, undefined, boss);
+    await until(() => asked.length === 2);
+    // The child's own delete stalls before its stop, so the parent's delete finishes first and deletes the child's files.
+    const stop = children.stop.bind(children);
+    let release = () => {}, stalled = false;
+    children.stop = async id => { if (id === worker && !stalled) { stalled = true; await new Promise<void>(resolve => { release = resolve; }); } return stop(id); };
+    const first = children.remove(worker);
+    await until(() => stalled);
+    await children.remove(boss);
+    await assert.rejects(children.tell(worker, 'Come back.'), /being deleted/, 'the child stays marked while its own delete runs');
+    release();
+    await first;
+    assert.equal(children.history.records.size, 0);
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a tell that arrives while an agent is being deleted does not resume it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-delete-tell-'));
+  let told: Promise<string> | undefined;
+  const { children, asked } = await busyChildren(dir, [], { onReport: text => { told ??= children.tell(text.slice(1, 9), 'One more thing.'); } });
+  try {
+    const [id] = await children.spawn([{ task: 'busy' }], dir);
+    await until(() => asked.length === 1);
+    await children.remove(id);
+    assert.ok(told, 'the main agent answered the stop report while the deletion waited for it');
+    await assert.rejects(told, /being deleted/);
+    assert.ok(!children.active && !children.history.records.has(id));
+    assert.equal(asked.length, 1, 'the run never started another turn');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('with grouped reports, deleting one child of a spawn still lets its siblings report together', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-delete-group-'));
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports, { settings: () => ({ ...nested(), groupReports: true }) });
+  try {
+    const [a, b] = /^Started: (.+?)\./.exec(await children.start([{ task: 'a' }, { task: 'b' }], dir))![1].split(', ');
+    await until(() => asked.length === 2);
+    await children.remove(a);
+    assert.deepEqual(reports, [], 'held until the sibling finishes');
+    await children.tell(b, 'Wrap up.', 'user');
+    assert.equal(await children.interrupt(b), 'continued');
+    await until(() => !children.active);
+    assert.equal(reports.length, 1);
+    assert.match(reports[0], new RegExp(`^\\[${a}\\] .*\\n\\n\\[${b}\\] `, 's'), 'the deleted child\'s stop report is in the batch');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a connected run whose handoff has not been delivered is kept', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-delete-handoff-'));
+  const { children } = await busyChildren(dir, []);
+  try {
+    children.history.save({ id: 'window', task: 'talk', cwd: dir, model: 'test', thinking: 'high', parentSession: '', depth: 1, started: 1, ended: 2,
+      state: 'interrupted', connected: true, handoff: { reason: 'disconnected' }, guidance: [] });
+    await assert.rejects(children.remove('window'), /handoff has not reached the main agent/);
+    assert.ok(existsSync(join(dir, 'profile', 'runs', 'window.optchat.json')));
   } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
