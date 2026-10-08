@@ -3,7 +3,7 @@ import { createConnection, createServer, type Socket } from 'node:net';
 import type { Children } from './agents.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './cache.ts';
-import { checkSocketPath, profileSocket, removeStaleSocket } from './profiles.ts';
+import { checkSocketPath, isWindows, profileSocket, removeStaleSocket } from './profiles.ts';
 import { textContent } from './transcript.ts';
 import { isActiveRun } from './runs.ts';
 
@@ -62,7 +62,7 @@ const clipOutput = (output: unknown) => record(output) ? { ...output, content: c
  */
 const fits = (value: unknown) => { try { return JSON.stringify(value).length < 1_000_000; } catch { return false; } };
 
-/** Local JSONL protocol, bounded before parsing; the socket is accessible only by its OS user. */
+/** Local JSONL protocol, bounded before parsing. On POSIX the socket file is mode 0600, so only its OS user can connect; a Windows named pipe has no file permissions, so its hashed profile name is the only separation. */
 function wire(socket: Socket, receive: (frame: Frame) => void) {
   let buffer = '';
   socket.setEncoding('utf8');
@@ -170,20 +170,25 @@ export async function serveWindows(directory: string, children: Children, availa
         send({ kind: 'event', name: 'finished', text: info.handoff.text ?? 'Conversation ended.' });
       }
     }, 150);
-    socket.on('close', () => {
+    const { promise: ended, resolve } = Promise.withResolvers<void>();
+    const connection = ended.then(async () => {
       clearInterval(timer); controller.abort(); connections.delete(socket);
-      const cleanup = queue.then(async () => { if (child) await children.finish(child, closing ? 'owner-stopped' : 'disconnected'); });
-      track(cleanup);
+      await queue;
+      if (child) await children.finish(child, closing ? 'owner-stopped' : 'disconnected');
     });
+    track(connection);
+    socket.once('close', resolve);
   });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(path, () => { server.off('error', reject); resolve(); }); });
-  chmodSync(path, 0o600);
+  if (!isWindows) chmodSync(path, 0o600);
   return async () => {
     closing = true;
-    const closed = new Promise<void>(resolve => server.close(() => resolve()));
+    const { promise: closed, resolve } = Promise.withResolvers<void>();
+    server.close(() => resolve());
     for (const socket of connections) socket.destroy();
     await closed;
-    await Promise.allSettled([...work]);
+    // A socket's close handler adds its cleanup after this point, so drain the tracked work instead of snapshotting it.
+    while (work.size) await Promise.allSettled([...work]);
   };
 }
 

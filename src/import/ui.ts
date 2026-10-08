@@ -5,6 +5,7 @@ import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, type Conv
 import { deduplicate, type ImportMode, type ImportJob, type ImportProgress } from './job.ts';
 import { selectMany } from './multi-select.ts';
 import { homedir } from 'node:os';
+import { sep } from 'node:path';
 
 type ImportUI = { ui: Pick<ExtensionUIContext, 'select' | 'input' | 'confirm' | 'notify' | 'setWidget' | 'custom'> };
 const clean = (s: string) => s.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
@@ -30,7 +31,7 @@ export async function chooseImport(ctx: ImportUI, profile: string, memory: Memor
     const counts = new Map<string, number>();
     for (const c of candidates) counts.set(c.project, (counts.get(c.project) ?? 0) + 1);
     const projects = [...counts].sort(([a, x], [b, y]) => y - x || a.localeCompare(b)).map(([p]) => p);
-    const selected = await selectMany(ctx.ui, scan.note ? `Projects · ${scan.note}` : 'Projects', projects, p => `${p.startsWith(homedir() + '/') ? '~' + p.slice(homedir().length) : p} (${counts.get(p)} ${unit})`, signal);
+    const selected = await selectMany(ctx.ui, scan.note ? `Projects · ${scan.note}` : 'Projects', projects, p => `${p.startsWith(homedir() + sep) ? '~' + p.slice(homedir().length) : p} (${counts.get(p)} ${unit})`, signal);
     if (!selected) return;
     candidates = candidates.filter(c => selected.includes(c.project));
   }

@@ -42,10 +42,11 @@ export function localDay(date = new Date()) {
 export function atomicWrite(file: string, text: string | Uint8Array) {
   mkdirSync(resolve(file, '..'), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.tmp`;
-  writeFileSync(temporary, text, { mode: 0o600 });
-  const fd = openSync(temporary, 'r');
-  try { fsyncSync(fd); } finally { closeSync(fd); }
+  // One read-write handle: Windows refuses fsync on a read-only one, and it cannot open a directory at all, so there the file flush is the whole guarantee.
+  const fd = openSync(temporary, 'w+', 0o600);
+  try { writeFileSync(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(temporary, file);
+  if (process.platform === 'win32') return;
   const parent = openSync(resolve(file, '..'), 'r');
   try { fsyncSync(parent); } finally { closeSync(parent); }
 }
