@@ -367,7 +367,7 @@ test('compactions get their own view, a quarter of the budget at most, that ends
 test('a message\'s node starts once fewer than 8 lines before it are unbuilt, so 8 run at once on one shared view', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-ahead-'));
   const calls: { input: Compression; release: () => void }[] = [];
-  const memory = new Memory(dir, input => new Promise(resolve => calls.push({ input, release: () => resolve('s'.repeat(300)) })), () => {}, 128000, 20);
+  const memory = new Memory(dir, input => new Promise(resolve => calls.push({ input, release: () => resolve('s'.repeat(300)) })), () => {}, 128000, 8);
   try {
     memory.append('user', `old ${'.'.repeat(600)}`); await new Promise(resolve => setTimeout(resolve, 20)); calls[0].release(); await memory.settle(AbortSignal.timeout(5000), 'tree');
     for (let i = 1; i <= 12; i++) memory.append('user', `${i} ${'.'.repeat(600)}`);

@@ -19,7 +19,6 @@ export type Compressor = (input: Compression, signal: AbortSignal) => Promise<st
 const key = ({ l, i }: Part) => l * 2 ** 40 + i;
 const UNBUILT = '(not summarized yet: zoom it)';
 /** A message's node starts once fewer than this many lines before it are unbuilt (recipe §4). */
-const AHEAD = 8;
 export const start = ({ l, i }: Part) => i * 2 ** l;
 export const end = (part: Part) => start(part) + 2 ** part.l;
 export const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
@@ -161,6 +160,7 @@ export class Memory {
   private readonly compaction: Sawtooth;
   lastError?: string;
 
+  /** `jobs`: summaries built at once, and how many unbuilt lines a new message's node waits behind. Chat keeps 8; imports pass the Import jobs setting. */
   constructor(readonly directory: string, private readonly compress: Compressor,
     private readonly warn: (s: string) => void = console.error,
     readonly budget = VIEW, private readonly jobs = 8, private readonly retryMs = 10_000) {
@@ -278,10 +278,10 @@ export class Memory {
       }).finally(() => { this.busy.delete(id); this.schedule(); this.events.emit('change'); });
       this.busy.set(id, promise);
     };
-    // A message's node starts once fewer than AHEAD lines before it are unbuilt; a merge, once both halves are built.
+    // A message's node starts once fewer than `jobs` lines before it are unbuilt; a merge, once both halves are built.
     let ahead = 0;
     for (const i of this.unbuilt) {
-      if (ahead++ === AHEAD) break;
+      if (ahead++ === this.jobs) break;
       if (this.busy.size >= this.jobs) return;
       run({ l: 0, i });
     }
@@ -329,7 +329,7 @@ export class Memory {
    * stream of them would otherwise take every worker and the views could never merge. */
   async settle(signal?: AbortSignal, until: 'turn' | 'tree' | 'ahead' = 'turn'): Promise<void> {
     const done = () => until === 'tree' ? this.ready && this.busy.size === 0 && this.tree.size === this.expectedNodes()
-      : until === 'ahead' ? this.unbuilt.size + this.merges.size < AHEAD
+      : until === 'ahead' ? this.unbuilt.size + this.merges.size < this.jobs
       : this.ready || this.stalled;
     if (done()) return;
     if (this.stopped || signal?.aborted) throw new Error('Memory wait cancelled.');

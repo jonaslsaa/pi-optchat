@@ -45,7 +45,7 @@ If that profile is open in another Pi, `pi -p` joins it like a connected window:
 | --- | --- |
 | `/optchat` | Status and actions menu. |
 | `/optchat profile` | Select or create a profile. Switching starts a fresh Pi session. |
-| `/optchat settings` | This profile's settings: models, subagent levels and limits, previous exchange, summary size tolerance. |
+| `/optchat settings` | This profile's settings: models, subagent levels and limits, previous exchange, summary size tolerance, import jobs. |
 | `/optchat model` | Compactor model and effort for this profile. Type to filter the models you are logged in to; the current one is marked. |
 | `/optchat agents` | Live agent tree and saved run history. |
 | `/optchat agents model` | Subagent model and effort for this profile, picked the same way. |
@@ -84,8 +84,9 @@ Compression and subagents make extra model requests with your provider credentia
 | Previous exchange limit | 16 KB | A larger last exchange is left out. |
 | Memory search | off | Gives the agent, and subagents started or resumed after the change, a `search` tool over your original messages (see below). Off is the recipe: zoom and date only. Applies from the next turn. |
 | Summary size tolerance | 640 bytes | The compactor is always asked for 512-byte lines; a longer line up to this size is kept instead of retried. 512 is the recipe's strict rule. |
+| Import jobs | 8 | Summaries an import builds at once, 1 to 64. Higher is faster but hits your provider's rate limits harder (the compactor retries what is refused). Chat always runs 8. Applies to the next import. |
 
-Numbers must be whole numbers of at least 1 (512 for the summary size tolerance). Missing keys in an older `config.json` take their defaults.
+Numbers must be whole numbers of at least 1 (512 for the summary size tolerance, at most 64 import jobs). Missing keys in an older `config.json` take their defaults.
 
 **Upgrading from 0.6.x:** subagent levels used to be fixed at 3 and now default to 1, so subagents no longer start their own subagents until you set Subagent levels to 2 or 3.
 

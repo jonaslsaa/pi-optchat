@@ -61,7 +61,7 @@ test('a config.json from before settings existed loads with the defaults, and se
     const changed = { ...loadConfig(dir), subagentLevels: 3, maxAgents: 12, previousExchange: false, previousExchangeKB: 4, memorySearch: true, summaryAcceptBytes: 512 };
     saveConfig(dir, changed);
     assert.deepEqual(loadConfig(dir), changed);
-    for (const [key, value] of [['subagentLevels', 0], ['maxAgents', -1], ['previousExchangeKB', 1.5], ['subagentLevels', '3'], ['previousExchange', 'yes'], ['summaryAcceptBytes', 511], ['maxAgents', null]] as const) {
+    for (const [key, value] of [['subagentLevels', 0], ['maxAgents', -1], ['previousExchangeKB', 1.5], ['subagentLevels', '3'], ['previousExchange', 'yes'], ['summaryAcceptBytes', 511], ['maxAgents', null], ['importJobs', 0], ['importJobs', 65]] as const) {
       writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...changed, [key]: value }));
       assert.throws(() => loadConfig(dir), /Invalid profile config/, `${key}: ${value}`);
     }

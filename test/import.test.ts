@@ -585,7 +585,7 @@ test('discard leaves original memory active and a completed pointer swap can fin
   } finally { await old.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('an import summarizes up to 8 messages at once, and its merges keep the compactions\' view in budget', async () => {
+for (const jobs of [undefined, 3, 16]) test(`an import summarizes ${jobs ?? 'by default 8'} messages at once, and its merges keep the compactions' view in budget`, async () => {
   // 120 summaries of 500 bytes overflow the compactions' 32 KB view, so it must merge while messages are still being logged.
   const dir = temp(), old = new Memory(dir, short);
   const imported = Array.from({ length: 120 }, (_, i) => entry(`m${i}`, date, `${i} ${'imported detail '.repeat(40)}`));
@@ -600,8 +600,8 @@ test('an import summarizes up to 8 messages at once, and its merges keep the com
   try {
     await old.close();
     assert.ok(prepareImport(dir, old, imported, 'append'));
-    await runImport(dir, compress, AbortSignal.timeout(20000));
-    assert.equal(peak, 8);
+    await runImport(dir, compress, AbortSignal.timeout(20000), jobs);
+    assert.equal(peak, jobs ?? 8);
     assert.ok(widest < 40_000, `compaction view reached ${widest} bytes`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
