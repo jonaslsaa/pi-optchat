@@ -1,5 +1,6 @@
-# A real Windows machine for a maintainer's hands-on test: dispatch it, then SSH in with the command from the tmate step's log.
-# Only the dispatching user's GitHub SSH keys can connect. `touch continue` in the session (or the timeout) ends the job.
+# A real Windows machine for a maintainer's hands-on test: dispatch it, then SSH in with the command in the run's
+# "SSH:" annotation (detached mode posts it as soon as the session starts; the API has no live logs).
+# Only the dispatching user's GitHub SSH keys can connect. Exiting the session, `touch /continue`, or the timeout ends the job.
 name: Windows live
 on: workflow_dispatch
 permissions:
@@ -19,5 +20,6 @@ jobs:
       - uses: mxschmitt/action-tmate@v3
         with:
           limit-access-to-actor: true
+          detached: true
         env:
           ANTHROPIC_OAUTH_TOKEN: ${{ secrets.OPTCHAT_TEST_ANTHROPIC_OAUTH_TOKEN }}
