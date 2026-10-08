@@ -56,7 +56,10 @@ test('a turn waits for pending summaries, goes on once they have all failed, and
     assert.equal(memory.lastError, 'model unavailable');
     for (const deadline = Date.now() + 2000; attempts < 2 && Date.now() < deadline;) await new Promise(r => setTimeout(r, 10));
     assert.equal(attempts, 2, 'retried after the delay');
-    await assert.rejects(memory.settle(AbortSignal.timeout(20)), /cancelled/, 'a retry in flight is waited for');
+    // AbortSignal.timeout doesn't keep the event loop alive, and nothing else would while the retry hangs.
+    const stop = new AbortController(); const timer = setTimeout(() => stop.abort(), 20);
+    await assert.rejects(memory.settle(stop.signal), /cancelled/, 'a retry in flight is waited for');
+    clearTimeout(timer);
     release();
     await memory.settle(AbortSignal.timeout(2000));
     assert.ok(memory.ready); assert.equal(memory.lastError, undefined);
