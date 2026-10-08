@@ -94,7 +94,7 @@ test('a requested profile that cannot open fails visibly and does not run withou
   try {
     // `auto` would join the busy owner; this one has no windows socket, so the join fails too, with a failing exit code.
     for (const [why, options] of [['typo', { flag: 'wrok' }], ['busy', { bound: 'work', connect: 'off' }], ['busy, nothing to join', { bound: 'work' }],
-      ['deleted', { bound: 'gone' }], ['join without a session', { flag: 'personal', connect: 'join' }]] as const) {
+      ['deleted', { bound: 'gone' }], ['join without a session', { flag: 'personal', connect: 'join' }], ['join with an invalid name', { flag: 'Work', connect: 'join' }]] as const) {
       process.exitCode = undefined;
       const pi = await headless('print', options);
       try {

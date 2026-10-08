@@ -64,6 +64,7 @@ async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
         message.content = [{ type: 'toolCall', id: 'spawn-quick', name: 'spawn', arguments: { tasks: [{ task: 'slow descendant' }] } }];
         message.stopReason = 'toolUse';
       }
+      if (!summary && text.split('Your task:\n').at(-1) === 'long reply') message.content = [{ type: 'text', text: `${'x'.repeat(300_000)}END` }];
       if (text === 'ask main') {
         message.content = [{ type: 'toolCall', id: 'tell-main', name: 'tell_parent', arguments: { message: 'Need a decision from the main agent.' } }];
         message.stopReason = 'toolUse';
@@ -176,6 +177,8 @@ test("a headless run joins a busy profile: it gets the final reply after the age
     assert.equal(f.children.history.records.get(id)?.state, 'completed');
     assert.match(f.reports.at(-1) ?? '', /completed by user/);
     await assert.rejects(joined.ask('again', f.dir), /one request/);
+    // Window events cut long text for display; the printed reply is never cut.
+    assert.equal(await (await joinHeadless(f.dir)).ask('long reply', f.dir), `${'x'.repeat(300_000)}END`);
   } finally { await close(); await f.close(); }
 });
 

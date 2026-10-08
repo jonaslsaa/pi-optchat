@@ -93,7 +93,10 @@ export default function optchat(pi: ExtensionAPI) {
     return known;
   };
   /** Pi exits 0 after an extension error; a pipeline must see a failed join. */
-  const joinProfile = (name: string) => joinHeadless(profilePath(name)).catch((error: unknown) => { process.exitCode = 1; throw error; });
+  const joinProfile = async (name: string) => {
+    try { return await joinHeadless(profilePath(name)); }
+    catch (error) { process.exitCode = 1; throw error; }
+  };
   const required = () => { if (!active) throw new Error('Choose an OptChat profile first: /optchat profile'); return active; };
   const status = (ctx: ExtensionContext) => {
     const a = active;
