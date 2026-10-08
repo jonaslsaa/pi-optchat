@@ -1,5 +1,5 @@
 import { Type } from 'typebox';
-import { flat, start, type Memory } from './memory.ts';
+import { flat, PAGE, start, type Memory } from './memory.ts';
 export const result = (text: string) => ({ content: [{ type: 'text' as const, text }], details: {} });
 export const SEARCH_PAGE = 20;
 const SNIPPET = 200;
@@ -28,9 +28,10 @@ export function searchPage(memory: Memory, text: string, before?: number) {
 
 export function memoryTools(memory: () => Memory) {
   return [
-    { name: 'zoom', label: 'Zoom memory', description: 'Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.',
-      parameters: Type.Object({ id: Type.Integer({ minimum: 0 }), n: Type.Integer({ minimum: 1 }) }),
-      async execute(_id: string, args: { id: number; n: number }) { return result(memory().zoom(args.id, args.n)); } },
+    { name: 'zoom', label: 'Zoom memory', description: `Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. A message over ${PAGE.toLocaleString('en-US')} characters comes in pages; offset and limit (characters) read any part of it.`,
+      parameters: Type.Object({ id: Type.Integer({ minimum: 0 }), n: Type.Integer({ minimum: 1 }),
+        offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: PAGE })) }),
+      async execute(_id: string, args: { id: number; n: number; offset?: number; limit?: number }) { return result(memory().zoom(args.id, args.n, args.offset, args.limit)); } },
     { name: 'date', label: 'Memory date', description: 'The date and time of message id.',
       parameters: Type.Object({ id: Type.Integer({ minimum: 0 }) }),
       async execute(_id: string, args: { id: number }) { return result(memory().date(args.id)); } },
