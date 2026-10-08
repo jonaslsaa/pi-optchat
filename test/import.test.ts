@@ -537,23 +537,25 @@ test('discard leaves original memory active and a completed pointer swap can fin
   } finally { await old.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('an import gives the compactor the same inputs as a live chat that sent the messages one at a time (recipe §10)', async () => {
-  // 300 lines of 500 bytes overflow the view, so merges run while later messages still wait to be summarized.
-  const dir = temp(), live = temp(), old = new Memory(dir, short);
-  const imported = Array.from({ length: 300 }, (_, i) => entry(`m${i}`, date, `${i} ${'imported detail '.repeat(40)}`));
-  const record = (calls: string[]) => async (input: Parameters<Compressor>[0]) => { calls.push(JSON.stringify([input.part.l > 0, input.historical, input.source, input.context])); return input.source.slice(0, 500); };
-  const fromImport: string[] = [], fromChat: string[] = [];
-  let chat: Memory | undefined;
+test('an import summarizes up to 8 messages at once, and its merges keep the compactions\' view in budget', async () => {
+  // 120 summaries of 500 bytes overflow the compactions' 32 KB view, so it must merge while messages are still being logged.
+  const dir = temp(), old = new Memory(dir, short);
+  const imported = Array.from({ length: 120 }, (_, i) => entry(`m${i}`, date, `${i} ${'imported detail '.repeat(40)}`));
+  let leaves = 0, peak = 0, widest = 0;
+  const compress: Compressor = async input => {
+    widest = Math.max(widest, input.context.length);
+    if (input.part.l) return input.source.slice(0, 500);
+    peak = Math.max(peak, ++leaves);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    leaves--; return input.source.slice(0, 500);
+  };
   try {
     await old.close();
     assert.ok(prepareImport(dir, old, imported, 'append'));
-    await runImport(dir, record(fromImport), AbortSignal.timeout(20000));
-    chat = new Memory(live, record(fromChat), () => {});
-    for (const e of imported) { chat.append(e.kind, e.text, e.date, e.receipt, e.origin); await chat.settle(AbortSignal.timeout(20000)); }
-    await chat.settle(AbortSignal.timeout(20000), 'tree');
-    assert.ok(fromChat.some(call => call.startsWith('[true')), 'the view overflowed and merged');
-    assert.deepEqual(fromImport.sort(), fromChat.sort());
-  } finally { await chat?.close(); rmSync(dir, { recursive: true, force: true }); rmSync(live, { recursive: true, force: true }); }
+    await runImport(dir, compress, AbortSignal.timeout(20000));
+    assert.equal(peak, 8);
+    assert.ok(widest < 40_000, `compaction view reached ${widest} characters`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('append keeps the saved view with the tree, so the old view stays cached; rebuild starts without one', async () => {

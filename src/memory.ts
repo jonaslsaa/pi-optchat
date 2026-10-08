@@ -321,12 +321,15 @@ export class Memory {
     const parent = { l: l + 1, i: Math.floor(i / 2) };
     if (!this.node(parent) && this.node({ l, i: i % 2 ? i - 1 : i + 1 })) this.merges.set(key(parent), parent);
   }
-  /** Waits until every part of the view is built ('view'), or every node ('tree'). As in the recipe, the view may run over budget until
+  /** Waits until every part of the view is built ('turn'), or every node ('tree'). As in the recipe, the view may run over budget until
    * pending merges land. A 'turn' also stops waiting once everything pending has failed: it goes on with placeholders for the
-   * missing lines, `lastError` says why, and the failed nodes are still retried in the background. */
-  async settle(signal?: AbortSignal, until: 'turn' | 'view' | 'tree' = 'turn'): Promise<void> {
+   * missing lines, `lastError` says why, and the failed nodes are still retried in the background.
+   * 'ahead' (imports) waits until a new message's node would start at once. Due merges count too: messages go first, so a steady
+   * stream of them would otherwise take every worker and the views could never merge. */
+  async settle(signal?: AbortSignal, until: 'turn' | 'tree' | 'ahead' = 'turn'): Promise<void> {
     const done = () => until === 'tree' ? this.ready && this.busy.size === 0 && this.tree.size === this.expectedNodes()
-      : this.ready || (until === 'turn' && this.stalled);
+      : until === 'ahead' ? this.unbuilt.size + this.merges.size < AHEAD
+      : this.ready || this.stalled;
     if (done()) return;
     if (this.stopped || signal?.aborted) throw new Error('Memory wait cancelled.');
     await new Promise<void>((resolve, reject) => {

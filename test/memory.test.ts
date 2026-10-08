@@ -66,12 +66,12 @@ test('a turn waits for pending summaries, goes on once they have all failed, and
   } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('a view wait (imports) keeps waiting through failures', async () => {
+test('a tree wait (imports) keeps waiting through failures', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
   const memory = new Memory(dir, async () => { throw new Error('down'); }, () => {}, 128000, 8, 60_000);
   try {
     memory.append('user', 'large message '.repeat(100));
-    await assert.rejects(memory.settle(AbortSignal.timeout(100), 'view'), /cancelled/);
+    await assert.rejects(memory.settle(AbortSignal.timeout(100), 'tree'), /cancelled/);
     await memory.settle(AbortSignal.timeout(100));
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });

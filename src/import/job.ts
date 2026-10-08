@@ -111,9 +111,9 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
   try {
     if (memory.root.length > plan.length || memory.root.some((e, i) => e.text !== plan[i].text)) throw new Error('Import staging data does not match its log; original memory remains intact.');
     report();
-    // Recipe §10: imported messages are compressed like any other, so each arrives once the one before it is summarized, as in a live chat.
-    // Unlike a turn, an import keeps waiting through failures (its progress shows the error), so no message is summarized without context.
-    for (const e of plan.slice(memory.root.length)) { await memory.settle(signal, 'view'); memory.append(e.kind, e.text, e.date, e.receipt, e.origin); }
+    // Recipe §10: imported messages are compressed like any other. Each is logged once its node can start, as a burst of live
+    // messages is, so up to 8 summaries run at once. Unlike a turn, an import waits through failures (its progress shows the error).
+    for (const e of plan.slice(memory.root.length)) { await memory.settle(signal, 'ahead'); memory.append(e.kind, e.text, e.date, e.receipt, e.origin); }
     await memory.settle(signal, 'tree'); signal.throwIfAborted();
     // Close all writers before the single atomic pointer swap. The previous generation stays intact.
     await memory.close();
