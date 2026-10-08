@@ -51,3 +51,21 @@ test('an existing profile is preserved when creation is refused', () => {
     assert.equal(fs.readFileSync(join(dir, 'notes.txt'), 'utf8'), 'keep my data');
   } finally { cleanup(); }
 });
+
+test('a competing creator that claims the directory first keeps its files', () => {
+  const cleanup = sandbox();
+  try {
+    const dir = profilePath('race'), original = fs.mkdirSync;
+    mock.method(fs, 'mkdirSync', (path: fs.PathLike, options?: fs.MakeDirectoryOptions) => {
+      if (path === dir) {
+        original(dir);
+        fs.writeFileSync(join(dir, 'notes.txt'), 'other creator');
+      }
+      return original(path, options);
+    });
+    syncBuiltinESMExports();
+    assert.throws(() => createProfile('race'), (error: unknown) => error instanceof Error && 'code' in error && error.code === 'EEXIST');
+    assert.deepEqual(fs.readdirSync(dir), ['notes.txt']);
+    assert.equal(fs.readFileSync(join(dir, 'notes.txt'), 'utf8'), 'other creator');
+  } finally { cleanup(); }
+});
