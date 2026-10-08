@@ -151,7 +151,12 @@ export async function serveWindows(directory: string, children: Children, availa
     const timer = setInterval(() => {
       if (!child || socket.destroyed || ending) return;
       const live = children.live(child), info = children.history.records.get(child);
-      if (!info) return;
+      if (!info) {
+        // Deleted from the Agents page: end the window (and a headless join) instead of leaving it waiting forever.
+        ending = true;
+        send({ kind: 'event', name: 'finished', text: 'This conversation was deleted from the Agents page.' });
+        return;
+      }
       if (live) drainMessages(live.session.messages, info.task);
       const preview = live?.streaming && 'content' in live.streaming ? textContent(live.streaming.content).slice(-2000) : '';
       const text = `${info.state === 'waiting' ? 'Awaiting user or child reports' : info.state} · ${info.model}\n${live ? [...live.tools.values()].map(t => t.name).join(', ') : ''}\n${preview}`;

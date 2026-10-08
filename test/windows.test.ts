@@ -142,6 +142,22 @@ test('connected window keeps one real SDK conversation, communicates both ways, 
   } finally { client.close(); await close(); await f.close(); }
 });
 
+test('deleting a connected conversation from the Agents page ends its window', async () => {
+  const f = await fixture();
+  const events: WindowEvent[] = [];
+  const close = await serveWindows(f.dir, f.children, () => true, async text => { f.reports.push(text); });
+  const client = await connectWindow(f.dir, event => events.push(event), () => {});
+  try {
+    await client.request('start', 'Investigate this repository.', f.dir);
+    const id = events.find(e => e.name === 'started')?.text; assert.ok(id);
+    await until(() => f.children.history.records.get(id)?.state === 'waiting');
+    await f.children.remove(id);
+    await until(() => events.some(e => e.name === 'finished'));
+    assert.match(events.find(e => e.name === 'finished')?.text ?? '', /deleted from the Agents page/);
+    await assert.rejects(client.request('say', 'Still there?'), /closing/);
+  } finally { client.close(); await close(); await f.close(); }
+});
+
 test('connected window receives the real tool calls, results and live state, so it can draw them like Pi', async () => {
   const f = await fixture();
   const events: WindowEvent[] = [];
