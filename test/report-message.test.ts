@@ -41,7 +41,7 @@ test('subagent messages render as a dark labelled box, never in the user-message
   for (const bg of userBg) assert.ok(!reportBg.has(bg), 'the report must not use the user-message background');
 });
 
-test('a report reaches an idle or busy main agent as a user message to the model and memory, with the same system prompt', async () => {
+test('a report reaches an idle or busy main agent as a user message to the model, as work in memory, with the same system prompt', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-report-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
@@ -123,8 +123,9 @@ test('a report reaches an idle or busy main agent as a user message to the model
     assert.ok(!manager.getBranch().some(e => e.type === 'message' && e.message.role === 'user' && textContent(e.message.content).startsWith('[8964a512]')));
     const main = join(dir, 'profiles', 'fixture', 'main');
     const log = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n')).map(line => JSON.parse(line) as { kind: string; text: string });
-    assert.ok(log.some(e => e.kind === 'user' && e.text === '[8964a512] Message from subagent (still running): step 1 done'));
-    assert.ok(log.some(e => e.kind === 'user' && e.text === '[8964a512] Final report.'));
+    assert.ok(log.some(e => e.kind === 'work' && e.text === '[8964a512] Message from subagent (still running): step 1 done'));
+    assert.ok(log.some(e => e.kind === 'work' && e.text === '[8964a512] Final report.'));
+    assert.ok(log.some(e => e.kind === 'user' && e.text === 'Start a subagent.'), 'what the user typed stays user');
     assert.deepEqual(errors, []);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }

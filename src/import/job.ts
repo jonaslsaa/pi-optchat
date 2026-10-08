@@ -2,9 +2,9 @@ import { existsSync, readFileSync, rmSync, cpSync, mkdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Memory, bytes, isEntry, type Entry, type Compressor } from '../memory.ts';
-import { atomicWrite } from '../profiles.ts';
+import { atomicWrite } from '../memory.ts';
 import { record } from '../cache.ts';
-import type { ImportedEntry } from './sources.ts';
+import { copyKey, type ImportedEntry } from './sources.ts';
 
 export type ImportMode = 'append' | 'rebuild';
 export interface ImportJob {
@@ -40,11 +40,13 @@ export function pendingImport(dir: string): ImportJob | undefined {
 }
 export function deduplicate(existing: readonly Entry[], incoming: readonly ImportedEntry[]) {
   const receipts = new Set(existing.map(e => e.receipt).filter(Boolean));
+  const copies = new Set(existing.map(copyKey).filter(Boolean));
   const added: ImportedEntry[] = []; let skipped = 0;
   for (const entry of incoming) {
     if (!entry.receipt?.startsWith('import:')) throw new Error('Imported entry has no stable source identity.');
-    if (receipts.has(entry.receipt)) { skipped++; continue; }
-    receipts.add(entry.receipt); added.push(entry);
+    const copy = copyKey(entry);
+    if (receipts.has(entry.receipt) || copy && copies.has(copy)) { skipped++; continue; }
+    receipts.add(entry.receipt); if (copy) copies.add(copy); added.push(entry);
   }
   return { added, skipped };
 }
@@ -74,7 +76,11 @@ export function prepareImport(dir: string, old: Memory, incoming: readonly Impor
   for (const sub of ['main', 'tree']) mkdirSync(join(path, sub), { recursive: true, mode: 0o700 });
   if (kept) atomicWrite(join(path, 'main', '000-import.jsonl'), entries.slice(0, kept).map(e => JSON.stringify(e)).join('\n') + '\n');
   atomicWrite(join(path, STAGED), entries.map(e => JSON.stringify(e)).join('\n') + '\n');
-  if (mode === 'append') cpSync(join(old.directory, 'tree'), join(path, 'tree'), { recursive: true });
+  if (mode === 'append') {
+    cpSync(join(old.directory, 'tree'), join(path, 'tree'), { recursive: true });
+    // The old messages keep their ids, so their saved view (and its prompt cache) still holds.
+    if (existsSync(join(old.directory, 'view.json'))) cpSync(join(old.directory, 'view.json'), join(path, 'view.json'));
+  }
   const job: ImportJob = { id, mode, previous: relative(dir, old.directory) || '.', target,
     created: new Date().toISOString(), added: added.length, skipped, total: entries.length,
     inputBytes: (mode === 'rebuild' ? entries : added).reduce((n, e) => n + bytes(e.text), 0) };
@@ -106,8 +112,9 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
     if (memory.root.length > plan.length || memory.root.some((e, i) => e.text !== plan[i].text)) throw new Error('Import staging data does not match its log; original memory remains intact.');
     report();
     // Recipe §10: imported messages are compressed like any other, so each arrives once the one before it is summarized, as in a live chat.
-    for (const e of plan.slice(memory.root.length)) { await memory.settle(signal); memory.append(e.kind, e.text, e.date, e.receipt, e.origin); }
-    await memory.settle(signal, true); signal.throwIfAborted();
+    // Unlike a turn, an import keeps waiting through failures (its progress shows the error), so no message is summarized without context.
+    for (const e of plan.slice(memory.root.length)) { await memory.settle(signal, 'view'); memory.append(e.kind, e.text, e.date, e.receipt, e.origin); }
+    await memory.settle(signal, 'tree'); signal.throwIfAborted();
     // Close all writers before the single atomic pointer swap. The previous generation stays intact.
     await memory.close();
     atomicWrite(join(dir, 'imports', `${job.id}.json`), JSON.stringify({ ...job, completed: new Date().toISOString() }, null, 2));

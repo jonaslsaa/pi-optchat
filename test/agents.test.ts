@@ -5,7 +5,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
-import { Children, taskDirectory } from '../src/agents.ts';
+import { Children, STEERABLE, taskDirectory } from '../src/agents.ts';
 import type { Settings } from '../src/settings.ts';
 import { Memory } from '../src/memory.ts';
 import { RunHistory } from '../src/runs.ts';
@@ -14,8 +14,6 @@ import { textContent } from '../src/transcript.ts';
 
 /** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
 const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
-/** The same, with each child reporting as soon as it finishes instead of with the rest of its spawn. */
-const each = () => ({ ...nested(), groupReports: false });
 
 // Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
@@ -25,7 +23,7 @@ async function until(condition: () => boolean) {
   while (!condition()) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 10)); }
 }
 
-test('with Group subagent reports off, real SDK children stream, deliver independently, acknowledge steering, stop, and retain profile-local history/usage', async () => {
+test('by default (Group subagent reports off), real SDK children stream, deliver independently, acknowledge steering, stop, and retain profile-local history/usage', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-agents-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const usage = new UsageLedger(dir), reports: string[] = [], warnings: string[] = [];
@@ -60,7 +58,7 @@ test('with Group subagent reports off, real SDK children stream, deliver indepen
   });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
     async text => { reports.push(text); }, text => warnings.push(text), dir,
-    { settings: each, usage, parentSession: 'parent-session', createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    { settings: nested, usage, parentSession: 'parent-session', createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   try {
     const [slow, fast, stopped] = await children.spawn([{ task: 'slow' }, { task: 'fast' }, { task: 'stop-me' }], dir);
     await until(() => releases.size === 3);
@@ -149,8 +147,8 @@ test('one spawn\'s reports arrive together once its last child finishes, also to
       return stream;
     },
   });
-  // No groupReports given: grouping is the default. The first spawn's sessions turn it off while they open.
-  const settings: Partial<Settings> = nested();
+  // The first spawn's sessions turn grouping off while they open.
+  const settings: Partial<Settings> = { ...nested(), groupReports: true };
   let opening = () => { settings.groupReports = false; };
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
     async (text, options) => { reports.push(text); counts.push(options?.count); }, () => {}, dir, { settings: () => settings, hold: (_batch, texts) => held.push(texts), createSession: options => {
@@ -160,7 +158,7 @@ test('one spawn\'s reports arrive together once its last child finishes, also to
   const state = (id: string) => children.history.records.get(id)?.state;
   try {
     const answer = await children.start([{ task: 'a' }, { task: 'b' }, { task: 'stopped' }], dir);
-    delete settings.groupReports;
+    settings.groupReports = true;
     await until(() => releases.size === 3);
     assert.match(answer, /arrive together/, 'the answer describes the mode the spawn started with');
     const [a, b, stopped] = /^Started: (.+?)\./.exec(answer)![1].split(', ');
@@ -229,6 +227,7 @@ test('children get the main agent\'s extensions, AGENTS.md files and skills, but
     assert.ok(!names.includes('optchat_copy'), 'OptChat must not load inside its own children');
     await until(() => !children.active);
     assert.ok(system.includes('demo-skill'), 'skills are listed like in the main agent');
+    assert.ok(system.includes(STEERABLE), 'children are told not to block steering with long commands');
     const order = ['GLOBAL_RULES', 'REPO_RULES', 'PROFILE_RULES'].map(rule => system.lastIndexOf(rule));
     assert.ok(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), 'global, then repo AGENTS.md, then profile instructions last');
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'settings.json'), { force: true }); rmSync(join(agentDir, 'AGENTS.md'), { force: true }); rmSync(join(agentDir, 'extensions'), { recursive: true, force: true }); rmSync(join(agentDir, 'skills'), { recursive: true, force: true }); }
@@ -337,7 +336,7 @@ test('a child that fails to clean up still reports, is disposed, and frees its s
     },
   });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { settings: each, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(text); }, text => warnings.push(text), dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   const breakDispose = (id: string) => {
     const session = children.live(id)!.session, dispose = session.dispose.bind(session);
     session.dispose = () => { dispose(); throw new Error('dispose failed'); };
@@ -451,6 +450,135 @@ test('a child stopped before its first request ends stopped without running its 
   } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+/** Children whose model works on its task until aborted, and answers any later message at once. */
+async function busyChildren(dir: string, reports: string[]) {
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  const asked: string[][] = [];
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple(model, context, options) {
+      const typed = context.messages.flatMap(m => m.role === 'user' ? [textContent(m.content)] : []).slice(1);
+      asked.push(typed);
+      const stream = createAssistantMessageEventStream();
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `Now doing: ${typed.at(-1)}` }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
+      void (async () => {
+        stream.push({ type: 'start', partial: message });
+        if (!typed.length) await new Promise<void>(resolve => {
+          options?.signal?.addEventListener('abort', () => resolve(), { once: true }); if (options?.signal?.aborted) resolve();
+        });
+        if (options?.signal?.aborted) { message.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: message }); }
+        else stream.push({ type: 'done', reason: 'stop', message });
+        stream.end();
+      })();
+      return stream;
+    },
+  });
+  const children = new Children(new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+    async text => { reports.push(text); }, () => {}, join(dir, 'profile'), { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  return { children, asked };
+}
+
+test('interrupting a child aborts its step and continues with the queued messages; with none queued it waits for the next one', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-interrupt-'));
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports);
+  try {
+    const [guided, idle] = await children.spawn([{ task: 'guided' }, { task: 'idle' }], dir);
+    await until(() => asked.length === 2);
+    await children.tell(guided, 'Use the cache.', 'user');
+    await children.tell(guided, 'Main agent note.');
+    assert.equal(await children.interrupt(guided), 'continued');
+    await until(() => reports.some(r => r.startsWith(`[${guided}]`)));
+    assert.match(reports.find(r => r.startsWith(`[${guided}]`))!, /Now doing: Interrupted by the user:\n\nUse the cache\.\n\nMain agent note\./, 'the run went on with both messages');
+    assert.deepEqual(asked.at(-1)?.filter(text => text.includes('Use the cache.')).length, 1, 'delivered once, not again as steering');
+    const run = children.history.records.get(guided)!;
+    assert.equal(run.state, 'completed');
+    assert.deepEqual(run.guidance.map(g => g.state), ['delivered', 'delivered']);
+    assert.equal(await children.interrupt(idle), 'paused');
+    await until(() => children.history.records.get(idle)?.state === 'paused');
+    await until(() => reports.some(r => r.startsWith(`[${idle}]`)));
+    assert.deepEqual(reports.filter(r => r.startsWith(`[${idle}]`)), [`[${idle}] Interrupted by the user; it waits for their next message, so no report until then.`]);
+    assert.ok(children.live(idle), 'still alive, not stopped');
+    await children.tell(idle, 'Carry on.', 'user');
+    await until(() => !children.active);
+    assert.equal(children.history.records.get(idle)?.state, 'completed');
+    assert.equal(reports.at(-1), `[${idle}] Now doing: Carry on.`, 'the next message resumes it');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a message sent while an interrupt is still settling is not lost; a stop during that time wins', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-interrupt-race-'));
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports);
+  try {
+    const [late, stopped] = await children.spawn([{ task: 'late' }, { task: 'stopped' }], dir);
+    await until(() => asked.length === 2);
+    const interrupting = children.interrupt(late);
+    await children.tell(late, 'Late.', 'user');
+    assert.equal(await interrupting, 'paused');
+    await until(() => children.history.records.get(late)?.state === 'completed');
+    assert.equal(reports.at(-1), `[${late}] Now doing: Late.`, 'the late message resumed it');
+    // Ctrl+X lands while the interrupt is clearing Pi's queue.
+    await children.tell(stopped, 'Use the cache.', 'user');
+    const session = children.live(stopped)!.session, clear = session.clearQueue.bind(session);
+    session.clearQueue = () => { void children.stop(stopped); return clear(); };
+    await children.interrupt(stopped);
+    await until(() => children.history.records.get(stopped)?.state === 'stopped');
+    assert.ok(!asked.flat().some(text => text.startsWith('Interrupted by the user:')), 'no turn starts after the stop');
+    assert.equal(children.history.records.get(stopped)?.guidance[0].state, 'undelivered');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the user can take their newest queued message back; the rest stays queued in order', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-withdraw-'));
+  const { children, asked } = await busyChildren(dir, []);
+  try {
+    const [id] = await children.spawn([{ task: 'busy' }], dir);
+    await until(() => asked.length === 1);
+    await children.tell(id, 'First.', 'user');
+    await children.tell(id, 'Second.', 'user');
+    await children.tell(id, 'Main agent note.');
+    assert.equal(children.withdraw(id), 'Second.', "the user's newest, never the main agent's");
+    assert.deepEqual(children.history.records.get(id)?.guidance.map(g => g.text), ['First.', 'Main agent note.']);
+    const session = children.live(id)!.session;
+    await until(() => session.getSteeringMessages().length === 2);
+    assert.deepEqual(session.getSteeringMessages(), ['First.', 'Main agent note.']);
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('taking back a message whose text is queued twice keeps the queue and its records in the same order', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-withdraw-twice-'));
+  const { children, asked } = await busyChildren(dir, []);
+  try {
+    const [id] = await children.spawn([{ task: 'busy' }], dir);
+    await until(() => asked.length === 1);
+    await children.tell(id, 'Run tests.', 'user');
+    await children.tell(id, 'Update code first.');
+    await children.tell(id, 'Run tests.');
+    assert.equal(children.withdraw(id), 'Run tests.');
+    const session = children.live(id)!.session;
+    await until(() => session.getSteeringMessages().length === 2);
+    assert.deepEqual(children.history.records.get(id)?.guidance.map(g => g.text), [...session.getSteeringMessages()]);
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an interrupt right after taking a message back delivers each remaining message once', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-withdraw-interrupt-'));
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports);
+  try {
+    const [id] = await children.spawn([{ task: 'busy' }], dir);
+    await until(() => asked.length === 1);
+    for (const text of ['A.', 'B.', 'C.']) await children.tell(id, text, 'user');
+    assert.equal(children.withdraw(id), 'C.');
+    assert.equal(await children.interrupt(id), 'continued');
+    await until(() => reports.length === 1);
+    assert.match(reports[0], /Now doing: Interrupted by the user:\n\nA\.\n\nB\.$/);
+    assert.deepEqual(asked.at(-1)?.filter(text => text.includes('B.')).length, 1, 'B arrives once, not also as steering');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 async function quickChildren(dir: string, memory = new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {})) {
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider('optchat-test', {
@@ -469,7 +597,8 @@ async function quickChildren(dir: string, memory = new Memory(join(dir, 'profile
 
 test('close() does not wait for a spawn that is still waiting for memory to be summarized', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-close-settling-'));
-  const memory = new Memory(join(dir, 'profile'), async () => { throw new Error('compactor outage'); }, () => {});
+  // A summary that never lands: a failed one would no longer hold the spawn.
+  const memory = new Memory(join(dir, 'profile'), (_, signal) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('closed')))), () => {});
   const children = await quickChildren(dir, memory);
   try {
     memory.append('user', 'large message '.repeat(100));

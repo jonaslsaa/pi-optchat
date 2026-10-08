@@ -2,19 +2,18 @@ import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
-import { createHash } from 'node:crypto';
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { Memory } from './memory.ts';
+import { atomicWrite, Memory } from './memory.ts';
 import { createCompressor } from './compactor.ts';
-import { atomicWrite, createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, THINKING, type ProfileConfig } from './profiles.ts';
+import { createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { MASTER, VIEW_DOC } from './prompts.ts';
 import { cachePayload, record } from './cache.ts';
-import { asUser, boundedMessage, buildContext, logMessage, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
+import { asUser, boundedMessage, buildContext, logMessage, previousExchange, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer, type ReportDetails } from './report-message.ts';
-import { memoryTools, result, SEARCH_DOC, searchTool } from './tools.ts';
+import { allowSearch, memoryTools, result, SEARCH_DOC, searchTool } from './tools.ts';
 import { Children, CWD_DOC, loadedBuiltins } from './agents.ts';
 import { exportBrowser } from './browser.ts';
 import { Inbox } from './inbox.ts';
@@ -23,21 +22,21 @@ import { memoryDirectory, pendingImport, prepareImport, runImport, discardImport
 import { chooseImport, showProgress } from './import/ui.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
 import { UsageLedger } from './usage.ts';
-import { showInspector, type InspectorPage } from './inspector.ts';
+import { oneLine, showInspector, type InspectorPage } from './inspector.ts';
 import { showAgentView } from './agent-view.ts';
 import { inspectorShortcut, mountNavigation } from './navigation.ts';
 import { serveWindows } from './window-bridge.ts';
 import { openConnectedWindow, registerConnectedRenderer } from './connected-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
-import { showSettings } from './settings-page.ts';
+import { showModelPicker, showSettings } from './settings-page.ts';
 
 const binding = 'optchat.profile';
 const CONTINUITY = '\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text; left out when very long), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.';
 const toggle = (prompt: string, line: string, on: boolean, after: string) => on === prompt.includes(line) ? prompt : on ? prompt.replace(after, after + line) : prompt.replace(line, '');
 /** A report run while idle reuses the last built prompt, so Previous exchange and Memory search changes since then are applied here. */
 const promptFor = (prompt: string, { previousExchange, memorySearch }: ProfileConfig) =>
-  toggle(toggle(prompt, CONTINUITY, previousExchange, VIEW_DOC), SEARCH_DOC, memorySearch, previousExchange ? VIEW_DOC + CONTINUITY : VIEW_DOC);
+  allowSearch(toggle(toggle(prompt, CONTINUITY, previousExchange, VIEW_DOC), SEARCH_DOC, memorySearch, previousExchange ? VIEW_DOC + CONTINUITY : VIEW_DOC), memorySearch);
 interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
 export default function optchat(pi: ExtensionAPI) {
@@ -73,7 +72,6 @@ export default function optchat(pi: ExtensionAPI) {
   /** Journals written before batches held plain strings. */
   const isPendingReport = (s: unknown): s is string | { text: string; count?: number } =>
     typeof s === 'string' || record(s) && typeof s.text === 'string' && (s.count === undefined || typeof s.count === 'number');
-  const reportReceipt = (text: string) => 'report:' + createHash('sha256').update(text).digest('hex');
   const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
   pi.registerFlag('optchat-profile', { description: 'OptChat profile (required for noninteractive sessions without a saved binding)', type: 'string' });
   const required = () => { if (!active) throw new Error('Choose an OptChat profile first: /optchat profile'); return active; };
@@ -93,7 +91,7 @@ export default function optchat(pi: ExtensionAPI) {
       const message = run[logged];
       const receipt = receipts.get(message);
       logMessage(active.memory, message, receipt); logged++;
-      if (receipt && !receipt.startsWith('report:')) active.inbox.acknowledge(receipt);
+      if (receipt && !receipt.startsWith(REPORT_RECEIPT)) active.inbox.acknowledge(receipt);
       receipts.delete(message);
       if (message.role === 'user') {
         const text = textContent(message.content), index = reports.findIndex(r => !r.batch && r.text === text);
@@ -136,7 +134,8 @@ export default function optchat(pi: ExtensionAPI) {
   };
   const CONNECT = 'Start a connected subagent conversation here', BACK = 'Back';
   const chooseProfile = async (ctx: ExtensionContext): Promise<string | undefined> => {
-    if (!ctx.hasUI) return undefined;
+    // Outside the TUI (print, json, RPC hosts) never pick or create a profile: a dialog would hang the host, and a guess could write into the wrong memory.
+    if (ctx.mode !== 'tui') return undefined;
     const names = listProfiles(), last = lastProfile();
     if (last) names.sort((a, b) => Number(b === last) - Number(a === last));
     const selected = await ctx.ui.select('OptChat profile', [...names, '+ Create profile']);
@@ -176,7 +175,7 @@ export default function optchat(pi: ExtensionAPI) {
       atomicWrite(pending, JSON.stringify(reports));
       rememberProfile(name);
       active = { name, dir, config, memory, inbox, children, usage, unlock }; fault = undefined;
-      if (ctx.mode === 'tui') unmountNavigation = mountNavigation(ctx, children, shortcut, page => { void inspect(ctx, page); });
+      if (ctx.mode === 'tui') unmountNavigation = mountNavigation(ctx, children, memory, shortcut, page => { void inspect(ctx, page); });
       closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport);
       untitle = children.subscribe(() => showTitle(ctx)); showTitle(ctx);
       status(ctx);
@@ -222,7 +221,10 @@ export default function optchat(pi: ExtensionAPI) {
       if (name !== boundName) pi.appendEntry(binding, { name });
     } catch (error) {
       if (active) await stop().catch(() => {});
-      fault = errorText(error); ctx.ui.notify(fault, 'error');
+      fault = errorText(error);
+      // Pi reports a throwing handler on stderr (print) or as an extension_error event (RPC); notify there is a no-op or easy to miss.
+      if (ctx.mode !== 'tui') throw error;
+      ctx.ui.notify(fault, 'error');
     }
     // Pi sets its own title once every session_start handler has finished, so put ours back afterwards.
     for (const ms of [0, 250, 1000]) setTimeout(() => title.reapply(), ms).unref();
@@ -239,7 +241,11 @@ export default function optchat(pi: ExtensionAPI) {
       } catch (error) { ctx.ui.notify(errorText(error), 'error'); ctx.ui.setEditorText(event.text); }
       return { action: 'handled' };
     }
-    if (!active) { ctx.ui.notify(fault ?? 'Select a profile with /optchat profile before chatting.', 'error'); return { action: 'handled' }; }
+    if (!active) {
+      // Without a profile or flag, a headless run is plain Pi. A requested profile that failed to open refuses instead of running without memory.
+      if (ctx.mode !== 'tui' && !fault) return { action: 'continue' };
+      ctx.ui.notify(fault ?? 'Select a profile with /optchat profile before chatting.', 'error'); return { action: 'handled' };
+    }
     if (importing || pendingImport(active.dir)) { ctx.ui.notify('This profile has an import in progress. Use /optchat import to resume or discard it, or switch profiles.', 'info'); return { action: 'handled' }; }
     if (event.source !== 'extension') {
       try { active.inbox.record(event.text); }
@@ -259,11 +265,12 @@ export default function optchat(pi: ExtensionAPI) {
     if (active && !runStarted) startRun(ctx);
   });
   pi.on('before_agent_start', (event, ctx) => {
+    if (!active) return; // Plain Pi run: leave Pi's own prompt untouched.
     startRun(ctx);
     const a = required();
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
     syncSearch(a.config);
-    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}${a.config.memorySearch ? SEARCH_DOC : ''}`;
+    event.systemPromptOptions.customPrompt = allowSearch(`${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}${a.config.memorySearch ? SEARCH_DOC : ''}`, a.config.memorySearch);
     event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
     prompt = event.systemPrompt;
   });
@@ -274,7 +281,8 @@ export default function optchat(pi: ExtensionAPI) {
     if (message.role === 'user') {
       try {
         const text = textContent(message.content);
-        if (reports.some(r => !r.batch && r.text === text)) receipts.set(message, reportReceipt(text));
+        // A report is shown as our custom message, or sent as plain text before the first run has a prompt to reuse.
+        if (bounded.role === 'custom' && bounded.customType === REPORT_TYPE || reports.some(r => !r.batch && r.text === text)) receipts.set(message, reportReceipt(text));
         else {
           // The inbox journaled the typed input: match without image placeholders or Pi's image notes.
           const typed = typedText(message.content), skill = parseSkillBlock(typed.bare);
@@ -293,12 +301,21 @@ export default function optchat(pi: ExtensionAPI) {
   });
   pi.on('context_with_system', async (event, ctx) => {
     try {
+      if (!active) return; // Plain Pi run: pass context through unmodified.
       const a = required();
       if (importing || pendingImport(a.dir)) throw new Error('Profile is unavailable while importing.');
       if (fault) throw new Error(fault);
       if (view === undefined) {
-        ctx.ui.setWorkingMessage('Waiting for OptChat summaries…');
-        try { await a.memory.settle(ctx.signal); } finally { ctx.ui.setWorkingMessage(); }
+        // A misconfigured summarizer retries forever, so say why instead of spinning silently.
+        let shown: string | undefined;
+        const show = () => {
+          const error = a.memory.lastError;
+          const text = `Waiting for OptChat summaries…${error ? ` failing: ${oneLine(error)}${error.includes('/optchat') ? '' : ' (see /optchat model)'}` : ''}`;
+          if (text !== shown) ctx.ui.setWorkingMessage(shown = text);
+        };
+        show();
+        const unsubscribe = a.memory.onChange(show);
+        try { await a.memory.settle(ctx.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
         view = a.memory.render(); // Capture old history before logging the new input.
         flush();
       }
@@ -357,20 +374,15 @@ export default function optchat(pi: ExtensionAPI) {
     async execute(_id, args) { return result(await required().children.tell(args.id, args.message)); },
   });
 
+  /** The settings page's options: every model Pi is logged in to, with the thinking levels it takes, sorted so each provider's models sit together. */
+  const settingsOptions = (ctx: ExtensionContext, a: Active) => ({ profile: a.name, config: a.config,
+    models: ctx.modelRegistry.getAvailable().map(m => ({ name: `${m.provider}/${m.id}`, thinking: getSupportedThinkingLevels(m) })).sort((x, y) => x.name.localeCompare(y.name)),
+    save: (config: ProfileConfig) => { saveConfig(a.dir, config); syncSearch(config); } });
   const pickModel = async (ctx: ExtensionContext, role: 'compactor' | 'subagent') => {
-    const a = required(), current = a.config[role];
-    const available = ctx.modelRegistry.getAvailable(), choices = available.map(m => `${m.provider}/${m.id}`);
-    choices.sort((a, b) => Number(b === `${current.provider}/${current.model}`) - Number(a === `${current.provider}/${current.model}`) || a.localeCompare(b));
-    const selected = await ctx.ui.select(`${a.name}: ${role} model`, choices);
-    if (!selected) return;
-    const model = available.find(m => `${m.provider}/${m.id}` === selected);
-    const levels = model ? getSupportedThinkingLevels(model) : THINKING;
-    const picked = await ctx.ui.select('Thinking level', [...levels]);
-    const thinking = levels.find(level => level === picked);
-    if (!thinking) return;
-    const separator = selected.indexOf('/');
-    a.config[role] = { provider: selected.slice(0, separator), model: selected.slice(separator + 1), thinking };
-    saveConfig(a.dir, a.config); ctx.ui.notify(`${role}: ${selected} (${thinking}); applies to new calls.`, 'info');
+    const a = required();
+    if (ctx.mode !== 'tui') throw new Error('Choosing a model requires interactive Pi. Edit config.json in the profile directory instead.');
+    const choice = await showModelPicker(ctx, role, settingsOptions(ctx, a));
+    if (choice) ctx.ui.notify(`${role}: ${choice.provider}/${choice.model} (${choice.thinking}); applies to new calls.`, 'info');
   };
   const inspect = async (ctx: ExtensionContext, page: InspectorPage) => {
     if (inspectorController) return;
@@ -381,7 +393,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (importing) throw new Error('Close the import dialog before opening the inspector.');
       inspectorController = controller;
       const signal = inspectorController.signal;
-      const action = await showInspector(ctx, { profile: a.name, session: ctx.sessionManager.getSessionId(), children: a.children, usage: a.usage, page, signal,
+      const action = await showInspector(ctx, { profile: a.name, session: ctx.sessionManager.getSessionId(), children: a.children, usage: a.usage, memory: a.memory, page, signal,
         refreshUsage: () => { collectUsage(ctx); try { a.children.collectUsage(); } catch (error) { ctx.ui.notify(`Could not save child usage: ${errorText(error)}`, 'error'); } },
       });
       if (signal.aborted) return;
@@ -390,7 +402,7 @@ export default function optchat(pi: ExtensionAPI) {
     } catch (error) { ctx.ui.notify(errorText(error), 'error'); }
     finally { if (inspectorController === controller) inspectorController = undefined; }
   };
-  pi.registerShortcut(shortcut, { description: 'Inspect OptChat agents and usage', handler: ctx => inspect(ctx, 'agents') });
+  pi.registerShortcut(shortcut, { description: 'Inspect OptChat agents, usage and background activity', handler: ctx => inspect(ctx, 'agents') });
   const command = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
     if (remote) { ctx.ui.notify('Manage this profile in its original window. Here use /tell-main or /complete.', 'info'); return; }
     if (importing) throw new Error('Close the import dialog before changing profile settings.');
@@ -398,7 +410,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (!action) {
       const a = active;
       const info = a ? `${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending\nCompactor: ${a.config.compactor.model} (${a.config.compactor.thinking})\nAgents: ${a.config.subagent.model} (${a.config.subagent.thinking})\n${a.memory.lastError ?? ''}` : 'No active profile';
-      action = await ctx.ui.select(`OptChat\n${info}`, ['profile', 'settings', 'model', 'agents', 'usage', 'instructions', 'browse', 'import']) ?? '';
+      action = await ctx.ui.select(`OptChat\n${info}`, ['profile', 'settings', 'model', 'agents', 'usage', 'activity', 'instructions', 'browse', 'import']) ?? '';
     }
     if (action === 'import') {
       const a = required();
@@ -443,6 +455,7 @@ export default function optchat(pi: ExtensionAPI) {
     }
     if (action === 'profile') {
       if (!ctx.isIdle() || active?.children.active) throw new Error('Finish or stop active work before switching profiles.');
+      if (ctx.mode !== 'tui') throw new Error('/optchat profile requires interactive Pi. Start headless runs with --optchat-profile <name>.');
       const selected = await chooseProfile(ctx);
       if (!selected || selected === active?.name) return;
       await ctx.newSession({ setup: async manager => { manager.appendCustomEntry(binding, { name: selected }); } });
@@ -451,12 +464,11 @@ export default function optchat(pi: ExtensionAPI) {
     if (action === 'settings') {
       const a = required();
       if (ctx.mode !== 'tui') throw new Error('/optchat settings requires interactive Pi. Edit config.json in the profile directory instead.');
-      return showSettings(ctx, { profile: a.name, config: a.config, models: ctx.modelRegistry.getAvailable().map(m => ({ name: `${m.provider}/${m.id}`, thinking: getSupportedThinkingLevels(m) })).sort((a, b) => a.name.localeCompare(b.name)),
-        save: config => { saveConfig(a.dir, config); syncSearch(config); } });
+      return showSettings(ctx, settingsOptions(ctx, a));
     }
     if (action === 'model') return pickModel(ctx, 'compactor');
     if (action === 'agents model') return pickModel(ctx, 'subagent');
-    if (action === 'agents' || action === 'usage') return inspect(ctx, action);
+    if (action === 'agents' || action === 'usage' || action === 'activity') return inspect(ctx, action);
     if (action === 'instructions') {
       const a = required();
       const edited = await ctx.ui.editor(`${a.name} · AGENTS.md`, instructions(a.dir));
@@ -468,7 +480,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (ctx.hasUI) execFile(process.platform === 'darwin' ? 'open' : 'xdg-open', [file], error => { if (error) ctx.ui.notify(`Open ${file}`, 'info'); });
       ctx.ui.notify(file, 'info'); return;
     }
-    if (action) throw new Error('Use /optchat [profile|settings|model|agents|usage|instructions|browse|import].');
+    if (action) throw new Error('Use /optchat [profile|settings|model|agents|usage|activity|instructions|browse|import].');
   };
   pi.registerCommand('complete', { description: 'End this connected conversation and hand off to the main agent', handler: async (_args, ctx) => {
     if (!remote) { ctx.ui.notify('/complete is for connected subagent windows.', 'info'); return; }
@@ -479,7 +491,7 @@ export default function optchat(pi: ExtensionAPI) {
     try { await remote.tell(args); } catch (error) { ctx.ui.notify(errorText(error), 'error'); }
   } });
   pi.registerCommand('optchat', { description: 'OptChat profiles, settings, models, agents, instructions, memory browser, and imports',
-    getArgumentCompletions: prefix => ['profile', 'settings', 'model', 'agents', 'agents model', 'usage', 'instructions', 'browse', 'import'].filter(s => s.startsWith(prefix)).map(value => ({ value, label: value })),
+    getArgumentCompletions: prefix => ['profile', 'settings', 'model', 'agents', 'agents model', 'usage', 'activity', 'instructions', 'browse', 'import'].filter(s => s.startsWith(prefix)).map(value => ({ value, label: value })),
     handler: async (args, ctx) => { try { await command(args, ctx); } catch (error) { ctx.ui.notify(errorText(error), 'error'); } },
   });
 }

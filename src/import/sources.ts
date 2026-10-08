@@ -78,6 +78,16 @@ async function ompRoots(): Promise<string[]> {
   return [join(homedir(), '.omp/agent/sessions'), ...named];
 }
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
+/**
+ * A resumed Claude Code session copies the earlier messages into its own file, each with its uuid and text, so a copy
+ * matches on those across files. The header line names the file (and its format has changed), and a command stored raw
+ * by an older import is read as typed, so entries already in a profile match too. Messages without a uuid never match.
+ */
+export function copyKey(e: Pick<ImportedEntry, 'kind' | 'text' | 'origin'>): string | undefined {
+  if (e.origin?.source !== 'claude' || e.origin.message.startsWith('line:')) return undefined;
+  const body = e.text.slice(e.text.indexOf('\n') + 1);
+  return JSON.stringify([e.origin.message, e.kind, claudeCommand(body) || body]);
+}
 function imported(c: Conversation, id: string, kind: Kind, content: string, date: string, identity = content): ImportedEntry | undefined {
   if (!content.trim()) return undefined;
   // Text provenance survives compression. Stable per-message receipts survive moved files and repeated exports.

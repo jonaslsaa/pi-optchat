@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { ModelChoice } from './compactor.ts';
 import { record } from './cache.ts';
+import { atomicWrite } from './memory.ts';
 import { DEFAULT_SETTINGS, readSettings, type Settings } from './settings.ts';
 
 export const dataHome = () => resolve(process.env.OPTCHAT_HOME ?? join(homedir(), '.optchat'));
@@ -21,16 +22,6 @@ export function profilePath(name: string) {
 export function listProfiles() {
   const root = join(dataHome(), 'profiles');
   return existsSync(root) ? readdirSync(root, { withFileTypes: true }).filter(f => f.isDirectory() && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(f.name)).map(f => f.name).sort() : [];
-}
-export function atomicWrite(file: string, text: string) {
-  mkdirSync(resolve(file, '..'), { recursive: true, mode: 0o700 });
-  const temporary = `${file}.${process.pid}.tmp`;
-  writeFileSync(temporary, text, { mode: 0o600 });
-  const fd = openSync(temporary, 'r');
-  try { fsyncSync(fd); } finally { closeSync(fd); }
-  renameSync(temporary, file);
-  const parent = openSync(resolve(file, '..'), 'r');
-  try { fsyncSync(parent); } finally { closeSync(parent); }
 }
 export function createProfile(name: string) {
   const dir = profilePath(name);

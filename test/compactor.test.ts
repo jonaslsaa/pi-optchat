@@ -42,7 +42,7 @@ async function setup() {
   // Long enough for a cache mark, so the first 50k characters are a shared, cacheable prefix.
   const view = `<chat>\n${'0+1|user: an old remembered line\n'.repeat(2000)}</chat>`;
   // The compactor only sees sources over NODE bytes; the fake model reads just the last line.
-  const run = (source: string, context = view, signal = new AbortController().signal) => compress({ context, source: `${'x'.repeat(600)}\n${source}`, merge: false }, signal);
+  const run = (source: string, context = view, signal = new AbortController().signal) => compress({ context, source: `${'x'.repeat(600)}\n${source}`, part: { l: 0, i: 0 } }, signal);
   const settle = () => new Promise(resolve => setTimeout(resolve, 20));
   return { calls, run, settle, view };
 }
@@ -62,6 +62,19 @@ test('parallel calls on a cold view wait until one call has started answering, a
   assert.equal(calls.length, 4, 'a newer view with the same cached prefix starts right away');
   calls[3].answer(); calls[3].finish();
   await warm;
+});
+
+test('a call whose view runs past a cold prefix that is being primed waits for that primer', { timeout: 5000 }, async () => {
+  const { calls, run, settle, view } = await setup();
+  const longer = view.replace('</chat>', '0+1|user: a newer line\n'.repeat(4) + '</chat>');
+  const replies = [run('a'), run('b', longer)];
+  await settle();
+  assert.deepEqual(calls.map(c => c.source), ['a'], 'the longer view waits for the shorter one being primed');
+  calls[0].answer();
+  await settle();
+  assert.deepEqual(calls.map(c => c.source), ['a', 'b']);
+  calls.forEach(c => { c.answer(); c.finish(); });
+  await Promise.all(replies);
 });
 
 test('a failing primer releases the waiting calls instead of hanging them', { timeout: 5000 }, async () => {

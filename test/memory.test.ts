@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Memory, appendJson, cap, CAP, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
+import { Memory, appendJson, cap, CAP, start, end, bytes, localDay, mostDue, type Compression, type Part } from '../src/memory.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload } from '../src/cache.ts';
 import { logMessage, buildContext, boundedMessage } from '../src/transcript.ts';
@@ -18,7 +18,7 @@ test('tree covers all history, fits incrementally, and exact originals survive r
   let memory = new Memory(dir, compress, () => {}, 1500);
   try {
     for (let i = 0; i < 48; i++) memory.append('user', `Original ${i}: ${'valuable detail '.repeat(30)}`);
-    await memory.settle(AbortSignal.timeout(5000), true);
+    await memory.settle(AbortSignal.timeout(5000), 'tree');
     assert.equal(start(memory.view[0]), 0);
     assert.equal(end(memory.view.at(-1)!), 48);
     for (let i = 1; i < memory.view.length; i++) assert.equal(end(memory.view[i - 1]), start(memory.view[i]));
@@ -29,27 +29,50 @@ test('tree covers all history, fits incrementally, and exact originals survive r
     const originals = memory.root.map(e => e.text);
     const parts = [...memory.view];
     memory.append('talk', 'One short new reply.');
-    await memory.settle(AbortSignal.timeout(5000), true);
+    await memory.settle(AbortSignal.timeout(5000), 'tree');
     for (const before of parts) assert.ok(memory.view.some(after => start(after) <= start(before) && end(after) >= end(before)));
     await memory.close();
     memory = new Memory(dir, compress, () => {}, 1500);
-    await memory.settle(AbortSignal.timeout(5000), true);
+    await memory.settle(AbortSignal.timeout(5000), 'tree');
     assert.deepEqual(memory.root.slice(0, 48).map(e => e.text), originals);
     assert.match(memory.zoom(17, 1), /valuable detail/);
     assert.throws(() => memory.zoom(3, 4), /No line/);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('pending compaction blocks a turn, cancellation works, failure retries', async () => {
+test('a turn waits for pending summaries, goes on once they have all failed, and failures keep retrying', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')); let attempts = 0;
+  let release = () => {};
+  const retrying = new Promise<void>(resolve => { release = resolve; });
   const memory = new Memory(dir, async () => {
-    attempts++; if (attempts === 1) throw new Error('temporary outage'); return 'user: retained decision';
+    if (++attempts === 1) throw new Error('model unavailable');
+    await retrying; return 'user: retained decision';
   }, () => {}, 128000, 8, 100);
   try {
     memory.append('user', 'large message '.repeat(100));
-    await assert.rejects(memory.settle(AbortSignal.timeout(20)), /cancelled/);
     await memory.settle(AbortSignal.timeout(2000));
-    assert.equal(attempts, 2); assert.ok(memory.ready); assert.equal(memory.root.length, 1);
+    assert.ok(!memory.ready, 'the turn goes on with a placeholder');
+    assert.match(memory.render(), /not summarized yet/);
+    assert.equal(memory.lastError, 'model unavailable');
+    for (const deadline = Date.now() + 2000; attempts < 2 && Date.now() < deadline;) await new Promise(r => setTimeout(r, 10));
+    assert.equal(attempts, 2, 'retried after the delay');
+    // AbortSignal.timeout doesn't keep the event loop alive, and nothing else would while the retry hangs.
+    const stop = new AbortController(); const timer = setTimeout(() => stop.abort(), 20);
+    await assert.rejects(memory.settle(stop.signal), /cancelled/, 'a retry in flight is waited for');
+    clearTimeout(timer);
+    release();
+    await memory.settle(AbortSignal.timeout(2000));
+    assert.ok(memory.ready); assert.equal(memory.lastError, undefined);
+  } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a view wait (imports) keeps waiting through failures', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
+  const memory = new Memory(dir, async () => { throw new Error('down'); }, () => {}, 128000, 8, 60_000);
+  try {
+    memory.append('user', 'large message '.repeat(100));
+    await assert.rejects(memory.settle(AbortSignal.timeout(100), 'view'), /cancelled/);
+    await memory.settle(AbortSignal.timeout(100));
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -58,15 +81,35 @@ test('a turn waits for the view to be built, not for merges that bring it under 
   let release = () => {};
   const merging = new Promise<void>(resolve => { release = resolve; });
   // Each 300-byte message is its own summary; merging two goes past 512 bytes, so it needs the compactor, which holds it.
-  const memory = new Memory(dir, async input => { if (input.merge) await merging; return 'merged'; }, () => {}, 500);
+  const memory = new Memory(dir, async input => { if (input.part.l) await merging; return 'merged'; }, () => {}, 500);
   try {
     memory.append('user', 'a'.repeat(300)); memory.append('user', 'b'.repeat(300));
     await memory.settle(AbortSignal.timeout(2000));
     assert.ok(memory.ready);
     assert.ok(memory.size > memory.budget, 'the view is still over budget while the merge is pending');
     release();
-    await memory.settle(AbortSignal.timeout(2000), true);
+    await memory.settle(AbortSignal.timeout(2000), 'tree');
     assert.ok(memory.size <= memory.budget);
+  } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('progress counts summaries against the largest backlog since it was last empty', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
+  let release = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  // Every 600-byte message needs the compactor, which holds all of them until released.
+  const memory = new Memory(dir, async () => { await gate; return 'summary'; }, () => {});
+  try {
+    assert.deepEqual(memory.progress(), { done: 0, total: 0, retryIn: undefined });
+    memory.append('user', 'a'.repeat(600)); memory.append('user', 'b'.repeat(600));
+    assert.deepEqual(memory.progress(), { done: 0, total: 3, retryIn: undefined }, 'two leaves and their parent');
+    memory.append('user', 'c'.repeat(600)); memory.append('user', 'd'.repeat(600));
+    assert.equal(memory.progress().total, 7, 'grows with the backlog');
+    release();
+    await memory.settle(AbortSignal.timeout(2000), 'tree');
+    assert.deepEqual(memory.progress(), { done: 0, total: 0, retryIn: undefined }, 'resets when the backlog drains');
+    memory.append('user', 'e'.repeat(600));
+    assert.deepEqual(memory.progress(), { done: 0, total: 1, retryIn: undefined }, 'a new backlog starts from zero');
   } finally { release(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -165,13 +208,13 @@ test('two writers that each summarize the same log leave a tree that still loads
   for (let i = 0; i < 3; i++) log.append('user', `message ${i}`);
   await log.close();
   const a = new Memory(dir, compress, () => {}), b = new Memory(dir, compress, () => {});
-  await Promise.all([a.settle(AbortSignal.timeout(5000), true), b.settle(AbortSignal.timeout(5000), true)]);
+  await Promise.all([a.settle(AbortSignal.timeout(5000), 'tree'), b.settle(AbortSignal.timeout(5000), 'tree')]);
   await Promise.all([a.close(), b.close()]);
   const tree = readFileSync(join(dir, 'tree', `${localDay()}.jsonl`), 'utf8').trim().split('\n');
   assert.ok(tree.length > a.tree.size, 'both writers saved the same nodes');
   const reopened = new Memory(dir, compress, () => {});
   try {
-    await reopened.settle(AbortSignal.timeout(5000), true);
+    await reopened.settle(AbortSignal.timeout(5000), 'tree');
     assert.equal(reopened.root.length, 3); assert.equal(reopened.tree.size, a.tree.size);
   } finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
 });
@@ -187,18 +230,184 @@ test('a live profile cannot be opened by a second writer; other profiles can run
   const again = await lockProfile(dir, 'after close'); await again(); rmSync(dir, { recursive: true, force: true });
 });
 
-test('stable cache cuts preserve every character and cap marks at four', () => {
+test('the view goes in blocks of 4 lines, with marks on its last whole block, 20 and 40 blocks before it, and at the request\'s end', () => {
   const line = '0+1|summary of a decision\n';
   for (const quoted of [false, true]) {
     const view = '<chat>\n' + line.repeat(2000) + (quoted ? '0+1|the summary quotes </chat> in passing\n' : '') + line.repeat(3500) + '</chat>';
-    assert.equal(splitView(view).join(''), view);
-    const payload = { system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
+    const pieces = splitView(view);
+    assert.equal(pieces.join(''), view);
+    assert.ok(pieces.slice(0, -1).every(piece => piece.split('\n').length === 5), 'every block but the last holds 4 lines');
+    assert.deepEqual(splitView(view.replace(/<\/chat>$/, line.repeat(3) + '</chat>')).slice(0, pieces.length - 1), pieces.slice(0, -1),
+      'a view that grows at its end keeps every whole block');
+    const payload = { system: [{ type: 'text', text: 'identity', cache_control: { type: 'ephemeral' } }, { type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
+      tools: [{ name: 'zoom', cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: [{ type: 'text', text: view }, { type: 'text', text: 'new question', cache_control: { type: 'ephemeral' } }] }],
     };
-    const output = JSON.stringify(cachePayload(payload));
-    assert.equal((output.match(/cache_control/g) ?? []).length, 4, quoted ? 'a quoted closing tag keeps all marks' : 'plain view');
-    assert.equal(payload.messages[0].content.map(b => b.text).join(''), view + 'new question');
+    const output = cachePayload(payload) as typeof payload & { cache_control?: unknown };
+    assert.equal((JSON.stringify(output).match(/cache_control/g) ?? []).length, 4, quoted ? 'a quoted closing tag keeps the marks' : 'plain view');
+    assert.ok(output.system.every(b => !('cache_control' in b)) && !('cache_control' in output.tools[0]));
+    const blocks = output.messages[0].content;
+    assert.deepEqual(blocks.flatMap((b, j) => 'cache_control' in b ? [j] : []), [pieces.length - 42, pieces.length - 22, pieces.length - 2]);
+    assert.ok(output.cache_control);
+    assert.equal(blocks.map(b => b.text).join(''), view + 'new question');
   }
+});
+
+test('after a turn adds up to 60 blocks of lines, a mark of the next call still finds one of the last call\'s within 20 blocks', () => {
+  const line = '0+1|summary of a decision\n', marks = (lines: number) => {
+    const payload = { messages: [{ role: 'user', content: [{ type: 'text', text: '<chat>\n' + line.repeat(lines) + '</chat>' }] }] };
+    return (cachePayload(payload) as typeof payload).messages[0].content.flatMap((b, j) => 'cache_control' in b ? [j] : []);
+  };
+  const found = (added: number) => marks(1000 + added).some(next => marks(1000).some(last => next >= last && next - last <= 20));
+  assert.ok([4, 100, 240].every(found), 'a turn that adds 1, 25 or 60 blocks');
+  assert.ok(!found(400), 'beyond 60 blocks the last entry is out of reach');
+});
+
+test('the most due pair is the one that ended longest ago in its own line size, so the view merges as Taelin\'s rollback push', () => {
+  // Recipe §3.2: at T=10 the old rule, measured from a pair's first message, merged 0-7; push merges 8-9.
+  assert.equal(mostDue([{ l: 2, i: 0 }, { l: 2, i: 1 }, { l: 0, i: 8 }, { l: 0, i: 9 }], 10, () => true), 2);
+  assert.equal(mostDue([{ l: 2, i: 0 }, { l: 2, i: 1 }, { l: 0, i: 8 }, { l: 0, i: 9 }], 10, part => part.l !== 1), 0, 'a pair whose parent is unbuilt waits');
+  type States = { keep: number, state: number, older: States } | null;
+  const push = (state: number, states: States): States => !states ? { keep: 0, state, older: null }
+    : !states.keep ? { ...states, keep: 1 } : { keep: 0, state, older: push(states.state, states.older) };
+  let states: States = null;
+  const view: Part[] = [];
+  for (let t = 0; t <= 4096; t++) {
+    states = push(t, states);
+    const starts: number[] = [];
+    for (let s = states; s; s = s.older) starts.unshift(s.state);
+    view.push({ l: 0, i: t });
+    while (view.length > starts.length) {
+      const j = mostDue(view, t + 1, () => true), a = view[j];
+      view.splice(j, 2, { l: a.l + 1, i: a.i / 2 });
+    }
+    assert.deepEqual(view.map(start), starts, `step ${t}`);
+  }
+});
+
+test('the view merges in one batch from its budget down to half, and between batches only grows at its end', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-batch-'));
+  const memory = new Memory(dir, async () => 's'.repeat(300), () => {}, 6000);
+  try {
+    let previous: Part[] = [], batches = 0;
+    for (let i = 0; i < 120; i++) {
+      memory.append('user', `${i} ${'.'.repeat(600)}`);
+      await memory.settle(AbortSignal.timeout(5000), 'tree');
+      const kept = previous.every((part, j) => memory.view[j].l === part.l && memory.view[j].i === part.i);
+      if (!kept) { batches++; assert.ok(memory.size <= 3000, `a batch ends at half the budget, not at ${memory.size}`); }
+      else assert.equal(memory.view.length, previous.length + 1, 'otherwise the new message only appends its line');
+      assert.ok(memory.size <= 6000);
+      previous = [...memory.view];
+    }
+    assert.ok(batches >= 5 && batches <= 15, `${batches} batches over 120 messages`);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the view is saved and loaded as it was, and rebuilt only when the saved one no longer tiles the log', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-saved-view-'));
+  const compress = async () => 's'.repeat(300), parts = (memory: Memory) => memory.view.map(p => [p.l, p.i]);
+  let memory = new Memory(dir, compress, () => {}, 3000);
+  try {
+    for (let i = 0; i < 16; i++) { memory.append('user', `${i} ${'.'.repeat(600)}`); await memory.settle(AbortSignal.timeout(5000), 'tree'); }
+    const live = parts(memory);
+    await memory.close();
+    memory = new Memory(dir, compress, () => {}, 3000);
+    assert.deepEqual(parts(memory), live, 'the saved view plus a line per later message is the live view');
+    await memory.close();
+    // A view the fold would not produce, but a valid tiling: loading keeps it rather than refolding.
+    const saved = [[3, 0], [2, 2], [0, 12], [0, 13], [0, 14], [0, 15]];
+    writeFileSync(join(dir, 'view.json'), JSON.stringify(saved));
+    memory = new Memory(dir, compress, () => {}, 3000);
+    assert.deepEqual(parts(memory), saved);
+    memory.append('user', 'one more');
+    assert.deepEqual(parts(memory), [...saved, [0, 16]]);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'view.json'), 'utf8')), saved, 'a line added without a merge is not saved');
+    await memory.close();
+    const warnings: string[] = [];
+    writeFileSync(join(dir, 'view.json'), JSON.stringify([[0, 0], [0, 2]]));
+    memory = new Memory(dir, compress, text => warnings.push(text), 3000);
+    assert.match(warnings.join('\n'), /Rebuilt the memory view/);
+    assert.equal(start(memory.view[0]), 0); assert.equal(end(memory.view.at(-1)!), 17);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'view.json'), 'utf8')), parts(memory));
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('compactions get their own view, a quarter of the budget at most, that ends at the node and between its batches only grows', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-context-'));
+  const leaves: (Compression & { view: Part[] })[] = [];
+  const memory: Memory = new Memory(dir, async input => { if (!input.part.l) leaves.push({ ...input, view: [...memory.view] }); return 's'.repeat(300); }, () => {}, 32000);
+  try {
+    for (let i = 0; i < 400; i++) { memory.append('user', `${i} ${'.'.repeat(600)}`); await memory.settle(AbortSignal.timeout(5000), 'tree'); }
+    let rewrites = 0, previous = '', total = 0, chatBatches = 0;
+    for (const [k, { context, part, view }] of leaves.entries()) {
+      const lines = context.slice('<chat>\n'.length, -'\n</chat>'.length).split('\n').filter(Boolean);
+      assert.ok(lines.every(line => /^\d+\+\d+\|s+$/.test(line)), 'built lines only, under their id+n| heads');
+      if (lines.length) assert.equal(lines.reduce((n, line) => n + Number(line.split(/[+|]/)[1]), 0), part.i, 'the lines tile the chat up to the message');
+      for (const line of lines) {
+        const [id, n] = line.split(/[+|]/).map(Number);
+        assert.ok(view.some(p => start(p) === id && 2 ** p.l <= n), `${id}+${n} is the chat's view merged further`);
+      }
+      // A batch that waits on a merge still being built can leave it a line or two over.
+      const size = bytes(lines.map(line => line.split('|')[1]).join(''));
+      assert.ok(size <= 8000 + 600, `at most a quarter of the budget, not ${size}`);
+      if (part.i > 100) total += size;
+      if (k && view.length < leaves[k - 1].view.length) { chatBatches++; assert.ok(size <= 4000 + 600, `a batch of the chat's view merges it down to an eighth, not ${size}`); }
+      if (!context.startsWith(previous)) rewrites++;
+      previous = context.slice(0, -'</chat>'.length);
+    }
+    assert.ok(memory.view.length > previous.split('\n').length, 'coarser than the chat\'s view');
+    assert.ok(chatBatches >= 2, `${chatBatches} batches of the chat's view`);
+    const mean = total / leaves.filter(c => c.part.i > 100).length;
+    assert.ok(mean > 4000 && mean < 8000, `between an eighth and a quarter of the budget on average, not ${mean}`);
+    // About one batch per 4,000 bytes of new lines (13 messages here), plus one per batch of the chat's view.
+    assert.ok(rewrites >= 20 && rewrites <= 45, `${rewrites} rewrites over ${leaves.length} compactions`);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a message\'s node starts once fewer than 8 lines before it are unbuilt, so 8 run at once on one shared view', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-ahead-'));
+  const calls: { input: Compression; release: () => void }[] = [];
+  const memory = new Memory(dir, input => new Promise(resolve => calls.push({ input, release: () => resolve('s'.repeat(300)) })), () => {}, 128000, 20);
+  try {
+    memory.append('user', `old ${'.'.repeat(600)}`); await new Promise(resolve => setTimeout(resolve, 20)); calls[0].release(); await memory.settle(AbortSignal.timeout(5000), 'tree');
+    for (let i = 1; i <= 12; i++) memory.append('user', `${i} ${'.'.repeat(600)}`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(calls.slice(1).map(c => c.input.part.i), [1, 2, 3, 4, 5, 6, 7, 8]);
+    const views = calls.slice(1).map(c => c.input.context.replace(/\n<\/chat>$/, ''));
+    assert.ok(views.every((view, k) => !k || view.startsWith(views[k - 1])), 'each view extends the one before, so they share a cached prefix');
+    calls[1].release();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(calls.slice(9).filter(c => !c.input.part.l).map(c => c.input.part.i), [9]);
+    calls.forEach(c => c.release());
+  } finally { calls.forEach(c => c.release()); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a summary sees the built lines after one still being built, such as an echo\'s own tool call', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-gaps-'));
+  const calls: { input: Compression; release: () => void }[] = [];
+  const memory = new Memory(dir, input => new Promise(resolve => calls.push({ input, release: () => resolve('s'.repeat(300)) })), () => {});
+  try {
+    memory.append('talk', `reply ${'.'.repeat(600)}`);
+    memory.append('tool', 'read src/memory.ts');
+    memory.append('echo', `contents ${'.'.repeat(600)}`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const echo = calls.find(c => c.input.part.i === 2)!.input.context;
+    assert.match(echo, /^0\+1\|\(not summarized yet: zoom it\)$/m);
+    assert.match(echo, /^1\+1\|tool: read src\/memory\.ts$/m);
+  } finally { calls.forEach(c => c.release()); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a view that cannot be saved only warns, since the log stays authoritative', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-unsaved-view-')), warnings: string[] = [];
+  mkdirSync(join(dir, 'view.json'), { recursive: true });
+  const memory = new Memory(dir, async () => 's'.repeat(300), text => warnings.push(text), 3000);
+  try {
+    for (let i = 0; i < 16; i++) { memory.append('user', `${i} ${'.'.repeat(600)}`); await memory.settle(AbortSignal.timeout(5000), 'tree'); }
+    assert.equal(memory.root.length, 16);
+    assert.ok(memory.view.some(p => p.l > 0), 'the view merged');
+    assert.match(warnings.join('\n'), /Could not save the memory view/);
+    assert.equal(memory.lastError, undefined);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('next turn excludes old conversation; current tool loop and reasoning remain verbatim', async () => {
@@ -259,7 +468,7 @@ test('incremental view size and pending count match the rendered view across fai
       memory.append(i % 3 ? 'echo' : 'user', `${i} ${'detail '.repeat(i % 7 ? 90 : 2)}`);
       assert.equal(memory.size, measured(memory), `size after append ${i}`);
     }
-    await memory.settle(AbortSignal.timeout(5000), true);
+    await memory.settle(AbortSignal.timeout(5000), 'tree');
     assert.equal(memory.pending, 0);
     assert.equal(memory.size, measured(memory));
     await memory.close();
@@ -281,7 +490,7 @@ test('a retry that falls due while the compactor is scheduling still runs', asyn
       memory.append('user', 'x'.repeat(600));
       // A ref'd timer keeps the process alive, so a hang fails here instead of draining the event loop.
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const result = await Promise.race([memory.settle(undefined, true).then(() => 'settled'),
+      const result = await Promise.race([memory.settle(undefined, 'tree').then(() => 'settled'),
         new Promise(resolve => { timer = setTimeout(resolve, 1000, 'hung'); })]);
       clearTimeout(timer);
       assert.equal(result, 'settled', `clock step ${step}`);
@@ -323,14 +532,50 @@ test('a new message is summarized without rescanning every built node', async ()
   const memory = new Memory(dir, async () => 'unused', () => {}, 1000);
   try {
     assert.ok(memory.view.length < 100);
-    await memory.settle(AbortSignal.timeout(10000), true); // the first pump after load finds each level's frontier
+    await memory.settle(AbortSignal.timeout(10000), 'tree'); // the first pump after load finds each level's frontier
     const get = memory.tree.get;
     let lookups = 0;
     memory.tree.get = function (this: typeof memory.tree, key) { lookups++; return get.call(this, key); };
     memory.append('user', 'one more');
-    await memory.settle(AbortSignal.timeout(10000), true);
+    await memory.settle(AbortSignal.timeout(10000), 'tree');
     assert.equal(memory.pending, 0);
     assert.ok(lookups < count / 2, `${lookups} tree lookups for one new message over ${count}`);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('merges that keep failing are queued, so a new message never scans their level of the tree', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-queue-'));
+  // Each 300-byte message is its own line, and merging two needs the compactor, which refuses. The budget keeps the view from merging.
+  const memory = new Memory(dir, async () => { throw new Error('refused'); }, () => {}, 10_000_000, 8, 60_000);
+  const idle = async () => { while (memory.pending || memory.active) await new Promise(resolve => setTimeout(resolve, 5)); };
+  try {
+    for (let i = 0; i < 200; i++) memory.append('user', `${i} ${'.'.repeat(300)}`);
+    await idle();
+    const get = memory.tree.get;
+    let lookups = 0;
+    memory.tree.get = function (this: typeof memory.tree, key) { lookups++; return get.call(this, key); };
+    memory.append('user', `one more ${'.'.repeat(300)}`);
+    await idle();
+    assert.ok(lookups < 100, `${lookups} tree lookups for one new message, with all 100 merges failing`);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a message whose node keeps failing is queued, so later messages never scan the leaves after it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-stuck-leaf-'));
+  // Message 0 needs the compactor, which refuses it; every later message is its own line and their merges succeed.
+  const memory = new Memory(dir, async input => { if (input.part.l === 0) throw new Error('refused'); return 's'.repeat(100); }, () => {}, 10_000_000, 8, 60_000);
+  const idle = async () => { while (memory.pending > 1 || memory.active) await new Promise(resolve => setTimeout(resolve, 5)); };
+  try {
+    memory.append('user', `0 ${'.'.repeat(600)}`);
+    for (let i = 1; i < 200; i++) memory.append('user', `${i} ${'.'.repeat(300)}`);
+    await idle();
+    assert.equal(memory.pending, 1, 'only message 0 is unbuilt');
+    const get = memory.tree.get;
+    let lookups = 0;
+    memory.tree.get = function (this: typeof memory.tree, key) { lookups++; return get.call(this, key); };
+    memory.append('user', `one more ${'.'.repeat(300)}`);
+    await idle();
+    assert.ok(lookups < 100, `${lookups} tree lookups for one new message, with message 0 failing`);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -363,7 +608,7 @@ test('rebuilding a leaf that a saved parent already hides does not inflate the v
   try {
     assert.ok(memory.view.every(p => p.l > 0), 'the unbuilt leaf 0 is hidden by its saved parent');
     assert.equal(memory.pending, 1);
-    await memory.settle(AbortSignal.timeout(3000), true);
+    await memory.settle(AbortSignal.timeout(3000), 'tree');
     assert.equal(memory.pending, 0);
     assert.equal(memory.size, measured(memory));
     assert.ok(memory.size <= 80);
@@ -476,7 +721,7 @@ test('view size counts the flattened text that render emits, for new and reloade
   try {
     memory.append('user', 'a\r\n\r\n\r\nb\n\n\nc');
     assert.equal(memory.size, measured(memory), 'built from the entry');
-    await memory.settle(AbortSignal.timeout(2000), true);
+    await memory.settle(AbortSignal.timeout(2000), 'tree');
     assert.equal(memory.size, measured(memory));
     await memory.close();
     memory = new Memory(dir, async () => 'x');

@@ -4,11 +4,11 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { createAssistantMessageEventStream, type AssistantMessage, type Context, type UserMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
+import { createAssistantMessageEventStream, type AssistantMessage, type Context, type ImageContent, type TextContent, type UserMessage } from '@earendil-works/pi-ai';
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
-import { buildContext, PREVIOUS_EXCHANGE, previousExchange, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
+import { asUser, buildContext, PREVIOUS_EXCHANGE, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 
@@ -223,6 +223,82 @@ test('real Pi lifecycle retains one exchange across tool calls and resume, witho
   }
 });
 
+test('another extension\'s shown custom message becomes a user message tagged with its type, images kept; reports and hidden messages stay as they are', () => {
+  const custom = (customType: string, content: string | (TextContent | ImageContent)[], display = true) => asUser({ role: 'custom', customType, content, display, timestamp: 1 });
+  const image = { type: 'image' as const, data: 'image-bytes', mimeType: 'image/png' };
+  assert.deepEqual(custom('subagent_status', 'Subagent status: Scout stalled.'), { role: 'user', content: '[subagent_status] Subagent status: Scout stalled.', timestamp: 1 });
+  assert.deepEqual(custom('screenshot', [{ type: 'text', text: 'Screenshot attached.' }, image]), { role: 'user', content: [{ type: 'text', text: '[screenshot] Screenshot attached.' }, image], timestamp: 1 });
+  assert.deepEqual(custom('screenshot', [image]), { role: 'user', content: [{ type: 'text', text: '[screenshot]' }, image], timestamp: 1 });
+  assert.deepEqual(custom(REPORT_TYPE, '[8964a512] Done.'), { role: 'user', content: '[8964a512] Done.', timestamp: 1 });
+  assert.deepEqual(custom('plan-mode-context', '[PLAN MODE ACTIVE]', false), { role: 'custom', customType: 'plan-mode-context', content: '[PLAN MODE ACTIVE]', display: false, timestamp: 1 });
+});
+
+test('another extension\'s shown custom message starts a turn and stays in memory; context it hides and injects each turn reaches the model but not memory', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-custom-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  const captured: Context['messages'][] = [];
+  // As Pi's plan-mode example extension injects its instructions with every prompt while plan mode is on.
+  const plan = '[PLAN MODE ACTIVE]\nYou are in plan mode.';
+  let planning = false;
+  const planMode = (pi: ExtensionAPI) => pi.on('before_agent_start', () => planning ? { message: { customType: 'plan-mode-context', content: plan, display: false } } : undefined);
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    saveConfig(profilePath('fixture'), { ...loadConfig(profilePath('fixture')), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
+      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+    runtime.registerProvider('fixture', {
+      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+      streamSimple(model, context) {
+        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+        if (!compression) captured.push(context.messages.filter(m => m.role !== 'system'));
+        const reply = answer(compression ? 'Summary.' : `Answer to: ${textContent(context.messages.at(-1)?.content).split('</chat>').at(-1)?.trim()}`);
+        reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end();
+        return stream;
+      },
+    });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat, planMode] });
+    await loader.reload();
+    const manager = SessionManager.inMemory(dir);
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
+      resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom'] })).session;
+    await session.bindExtensions({});
+    await session.prompt('Start the scout.');
+    // As pi-interactive-subagents reports a finished subagent while Pi is idle.
+    const result = 'Sub-agent "Scout" finished: found three files.';
+    await session.sendCustomMessage({ customType: 'subagent_result', content: result, display: true }, { triggerTurn: true, deliverAs: 'steer' });
+    await session.agent.waitForIdle();
+    const tagged = `[subagent_result] ${result}`;
+    assert.equal(session.getLastAssistantText(), `Answer to: ${tagged}`);
+    assert.equal(textContent(captured.at(-1)!.at(-1)?.content), tagged);
+    await session.prompt('What did it find?');
+    assert.deepEqual(captured.at(-1)!.map(m => m.role), ['user', 'assistant', 'user']);
+    assert.ok(textContent(captured.at(-1)![0].content).endsWith(tagged));
+    assert.equal(textContent(captured.at(-1)![1].content), `Answer to: ${tagged}`);
+    const main = join(dir, 'profiles', 'fixture', 'main');
+    const log = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n').map(line => JSON.parse(line)));
+    assert.ok(log.some(entry => entry.kind === 'user' && entry.text === tagged));
+    planning = true;
+    await session.prompt('Plan the change.');
+    assert.ok(captured.at(-1)!.some(m => m.role === 'user' && textContent(m.content) === plan));
+    const after = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n').map(line => JSON.parse(line)));
+    assert.ok(after.some(entry => entry.kind === 'user' && entry.text === 'Plan the change.'));
+    assert.ok(!after.some(entry => entry.kind === 'user' && entry.text.includes('PLAN MODE')));
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('main agent keeps Pi\'s AGENTS.md files and skills, with profile instructions last', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-prompt-'));
   const agentDir = join(dir, 'agent');
@@ -323,12 +399,14 @@ test('a /skill: command is logged once, as its expansion, and never recovered as
   }
 });
 
-test('an aborted wait for summaries clears the working message', async () => {
+/** Runs a second turn that waits on a summary which never lands: the compactor stalls, or fails with `failure`. Returns the working messages shown. */
+async function waitForSummaries(failure: string | undefined, shown: (working: (string | undefined)[], asked: string[]) => boolean) {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-wait-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
   const working: (string | undefined)[] = [];
-  let stall = true, session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  const asked: string[] = [];
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
     createProfile('fixture');
     const config = loadConfig(profilePath('fixture'));
@@ -341,9 +419,15 @@ test('an aborted wait for summaries clears the working message', async () => {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context, options) {
         const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+        if (!compression) asked.push(context.messages.map(m => textContent(m.content)).join('\n'));
         const reply = answer(compression ? 'Summary.' : 'Done.'); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
         const stream = createAssistantMessageEventStream();
-        if (compression && stall) {
+        if (compression && failure) {
+          reply.stopReason = 'error'; reply.errorMessage = failure;
+          // Fail only once the turn is waiting, so the message has to change while it is shown.
+          const fail = () => working.at(-1) === 'Waiting for OptChat summaries…' ? (stream.push({ type: 'error', reason: 'error', error: reply }), stream.end()) : options?.signal?.aborted || setTimeout(fail, 10);
+          fail();
+        } else if (compression) {
           reply.stopReason = 'aborted'; reply.errorMessage = 'closed';
           options?.signal?.addEventListener('abort', () => { stream.push({ type: 'error', reason: 'aborted', error: reply }); stream.end(); }, { once: true });
         } else queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
@@ -362,21 +446,34 @@ test('an aborted wait for summaries clears the working message', async () => {
     await session.prompt('First question. ' + 'padding '.repeat(400));
     working.length = 0;
     const second = session.prompt('Second question.');
-    for (let i = 0; i < 200 && !working.includes('Waiting for OptChat summaries…'); i++) await new Promise(resolve => setTimeout(resolve, 10));
-    assert.deepEqual(working, ['Waiting for OptChat summaries…'], 'the second turn waits for summaries');
+    for (let i = 0; i < 200 && !shown(working, asked); i++) await new Promise(resolve => setTimeout(resolve, 10));
+    const seen = [...working];
     await session.abort(); await second;
-    assert.equal(working.at(-1), undefined, 'the message is cleared although the wait threw');
-    assert.equal(working.length, 2);
+    return { seen, working, asked };
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+test('an aborted wait for summaries clears the working message', async () => {
+  const { seen, working } = await waitForSummaries(undefined, w => w.includes('Waiting for OptChat summaries…'));
+  assert.deepEqual(seen, ['Waiting for OptChat summaries…'], 'the second turn waits for summaries');
+  assert.equal(working.at(-1), undefined, 'the message is cleared although the wait threw');
+  assert.equal(working.length, 2);
 });
 
+test('a failing summarizer says why the turn is waiting, then the turn goes on without the missing summary', async () => {
+  const { seen, asked } = await waitForSummaries('No API key for anthropic', (_, asked) => asked.length > 1);
+  assert.deepEqual(seen.slice(0, 2), ['Waiting for OptChat summaries…', 'Waiting for OptChat summaries… failing: No API key for anthropic (see /optchat model)']);
+  assert.equal(seen.at(-1), undefined, 'the message is cleared once the wait gives up');
+  assert.match(asked.at(-1)!, /not summarized yet: zoom it\)[\s\S]*Second question\./);
+});
 
 // A 1x1 PNG.
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
 test('typed text drops image placeholders and the image notes Pi appends', () => {
   const content = [{ type: 'text', text: 'see\n\n[Image: original 4000x3000, displayed at 2000x1500. Multiply coordinates by 2.00 to map to original image.]\n[Image converted from image/gif to image/png.]' },
     { type: 'image', data: 'x', mimeType: 'image/png' }];

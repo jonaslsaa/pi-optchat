@@ -2,7 +2,7 @@ import { clampThinkingLevel, type Api, type AssistantMessage, type Message, type
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { COMPACT } from './prompts.ts';
-import { bytes, NODE, type Compressor } from './memory.ts';
+import { bytes, NODE, start, type Compressor, type Part } from './memory.ts';
 import { cachePayload, splitView } from './cache.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
@@ -13,16 +13,25 @@ export const reasoningFor = (model: Model<Api>, level: ThinkingLevel) => {
   const thinking = clampThinkingLevel(model, level);
   return thinking === 'off' ? undefined : thinking;
 };
-/** The size example: a line of exactly NODE bytes about OptChat itself. Every claim in it is true and timeless (no ids, PRs or decisions),
- * so a summary that copies it states nothing false; the request also fences it off from the input. */
-export const SCALE = 'note: How OptChat memory works. Each message becomes a leaf line: a short message is its own line, a longer one is compressed to about 512 bytes. Adjacent lines merge in pairs into a binary tree: two lines into one line covering both, two of those into one covering four, and so on. The view shows recent messages one per line and older ones more per line, within a fixed byte budget. zoom(id, n) opens line id+n into the two lines it was made from, down to the original message; date(id) tells when it was sent.';
+/** Models can't count bytes, so the task shows the limit as a ruler; a real sample line got its content copied (recipe §4). */
+const RULER = '-'.repeat(NODE);
+const label = (part: Part) => `${start(part)}+${2 ** part.l}`;
+/** The recipe's compaction task, verbatim. */
+export function task({ source, part }: { source: string; part: Part }) {
+  if (!part.l) return `Compaction: compress message ${part.i} into one line of at most 512 bytes\n(about 70 words), the length of this ruler:\n${RULER}\n<input>\n${source}\n</input>`;
+  const a = { l: part.l - 1, i: 2 * part.i }, b = { l: part.l - 1, i: 2 * part.i + 1 };
+  return `Compaction: merge lines ${label(a)} and ${label(b)}, adjacent, into one line of at most\n512 bytes (about 70 words), the length of this ruler:\n${RULER}\n`
+    + `<chat> may hold their messages, ${start(part)} to ${start(part) + 2 ** part.l - 1}, in more detail: take details\nof them from there too.\n<input>\n${source}\n</input>`;
+}
 const WARM_MS = 4 * 60_000; // Anthropic's short cache lives 5 minutes from its last use.
 
-/** Parallel calls can't read a cache entry that isn't written yet, so one call primes a cold prefix and the rest wait until it answers. */
+/** Parallel calls can't read a cache entry that isn't written yet, so one call primes a cold prefix and the rest wait until it answers.
+ * Parallel compactions end their views at different messages, so a call also waits for a primer of a shorter prefix of its own view. */
 function primeFirst() {
   const warm = new Map<string, number | Promise<void>>();
   return async (prefix: string, signal: AbortSignal) => {
-    for (let state = warm.get(prefix); state !== undefined; state = warm.get(prefix)) {
+    const priming = () => { for (const [k, state] of warm) if (typeof state !== 'number' && prefix.startsWith(k)) return state; };
+    for (let state = warm.get(prefix) ?? priming(); state !== undefined; state = warm.get(prefix) ?? priming()) {
       if (typeof state === 'number') { if (Date.now() - state < WARM_MS) break; warm.delete(prefix); continue; }
       // A cancelled waiter leaves at once instead of waiting for someone else's primer.
       signal.throwIfAborted();
@@ -52,8 +61,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const model = registry.find(selected.provider, selected.model);
     if (!model) throw new Error(`Compactor model unavailable: ${selected.provider}/${selected.model}. Use /optchat model.`);
     const thinking = reasoningFor(model, selected.thinking);
-    // Shown bare between the view and the input, the example was sometimes summarized as if it were chat, so it is labelled and both are tagged.
-    const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}For scale only, here is an example line, not from this chat; it is exactly 512 bytes and is never part of your input or your line:\n<example>${SCALE}</example>\n\n${input.merge ? 'Merge these two lines into one' : 'Compress this message into one line'}, in at most 512 bytes:\n<input>\n${input.source}\n</input>`;
+    const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}${task(input)}`;
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
@@ -74,14 +82,15 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       } finally { warmed(false); }
       onUsage(reply);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
-      const line = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim();
+      // The compactions' view shows each line under its id+n| head, which a line can copy.
+      const line = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim().replace(/^\d+\+\d+\|\s*/, '');
       if (!line) throw new Error('Compactor returned no text.');
       tries.push(line);
       // A merge of two short lines can come back nearly as big as both, so a line must also shrink what it replaces.
       if (bytes(line) <= accepted() && bytes(line) < bytes(input.source)) break;
       messages.push(reply);
       const cut = Buffer.from(line).subarray(0, NODE).toString('utf8').replace(/\uFFFD$/, '');
-      messages.push({ role: 'user', content: `That line is ${bytes(line)} bytes; the limit is 512. It must end where it is cut here:\n${cut}| ← LIMIT`, timestamp: Date.now() });
+      messages.push({ role: 'user', content: `Too long: your line is ${bytes(line)} bytes, over the 512-byte limit. Write\nthe whole line again for the same <input>, cutting just enough of the\nleast valuable items to fit before this cut:\n${cut}| ← LIMIT`, timestamp: Date.now() });
     }
     return tries.reduce((a, b) => bytes(a) <= bytes(b) ? a : b);
   };

@@ -311,6 +311,26 @@ test('Claude discovery keeps the parent conversation and skips modern, legacy, a
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('a resumed Claude session adds only its new messages, also over entries an older import stored with another header', async () => {
+  const dir = temp(), at = (s: number) => `2026-01-02T12:00:0${s}.000Z`, model = '<command-name>/model</command-name>\n<command-args>opus</command-args>';
+  const user = (uuid: string, session: string, content: string, s: number) => ({ type: 'user', uuid, sessionId: session, timestamp: at(s), message: { role: 'user', content } });
+  const reply = (uuid: string, session: string, text: string, s: number) => ({ type: 'assistant', uuid, sessionId: session, timestamp: at(s),
+    message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'thinking', thinking: 'hm' }, { type: 'text', text }] } });
+  // Claude Code copies the earlier messages into the resumed file, under the new session id.
+  const copied = (session: string) => [user('u1', session, model, 1), user('u2', session, 'q2', 2), reply('a2', session, 'r2', 3)];
+  lines(join(dir, 'aaaa.jsonl'), copied('aaaa'));
+  lines(join(dir, 'bbbb.jsonl'), [...copied('bbbb'), user('u3', 'bbbb', 'q3', 4), reply('a3', 'bbbb', 'r3', 5), user('u2', 'bbbb', 'q2 edited', 6)]);
+  const read = async (id: string) => (await readConversation({ ...conversation('claude', join(dir, `${id}.jsonl`)), id })).entries;
+  const body = (e: ImportedEntry) => e.text.slice(e.text.indexOf('\n') + 1);
+  try {
+    const [a, b] = [await read('aaaa'), await read('bbbb')];
+    assert.deepEqual(deduplicate([], [...a, ...b]).added.map(body), ['/model opus', 'q2', 'r2', 'q3', 'r3', 'q2 edited']);
+    // An older import stored the original with a longer header and the command as Claude Code logged it.
+    const stored = a.map((e, i) => ({ ...e, i, size: 0, text: `[Historical claude · ${e.date} · conversation aaaa · Fixture]\n${body(e) === '/model opus' ? model : body(e)}` }));
+    assert.deepEqual(deduplicate(stored, b).added.map(body), ['q3', 'r3', 'q2 edited'], 'a uuid with other text is another message');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('Claude discovery checks late sidechain markers without extending metadata extraction or Codex scanning', async () => {
   const dir = temp(), parent = join(dir, 'parent.jsonl'), child = join(dir, 'renamed-child.jsonl');
   const metadata = Array.from({ length: 60 }, () => ({ type: 'file-history-snapshot' }));
@@ -422,7 +442,7 @@ test('append activates only after complete indexing, retains original summaries,
   let activated: Memory | undefined;
   try {
     old.append('user', 'original exact message', '2026-06-01T00:00:00.000Z');
-    await old.settle(undefined, true); await old.close();
+    await old.settle(undefined, 'tree'); await old.close();
     const original = old.node({ l: 0, i: 0 });
     const job = prepareImport(dir, old, [entry('one'), entry('one')], 'append'); assert.ok(job);
     assert.equal(job.added, 1); assert.equal(job.skipped, 1); assert.equal(memoryDirectory(dir), dir);
@@ -443,7 +463,7 @@ test('paused imports retain completed summaries, resume from disk, and preserve 
   const dir = temp(); const old = new Memory(dir, short);
   let current: Memory | undefined;
   try {
-    old.append('user', 'native later', '2026-06-01T00:00:00.000Z'); await old.settle(undefined, true); await old.close();
+    old.append('user', 'native later', '2026-06-01T00:00:00.000Z'); await old.settle(undefined, 'tree'); await old.close();
     prepareImport(dir, old, [entry('a'), entry('b', date, 'large '.repeat(200))], 'rebuild');
     await assert.rejects(runImport(dir, async (_input, signal) => {
       await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
@@ -463,7 +483,7 @@ test('paused imports retain completed summaries, resume from disk, and preserve 
 test('discard leaves original memory active and a completed pointer swap can finish recovery idempotently', async () => {
   const dir = temp(), old = new Memory(dir, short);
   try {
-    old.append('user', 'original'); await old.settle(undefined, true); await old.close();
+    old.append('user', 'original'); await old.settle(undefined, 'tree'); await old.close();
     const discarded = prepareImport(dir, old, [entry('discard')], 'append'); assert.ok(discarded);
     discardImport(dir); assert.equal(memoryDirectory(dir), dir); assert.equal(pendingImport(dir), undefined);
     const job = prepareImport(dir, old, [entry('keep')], 'append'); assert.ok(job);
@@ -485,7 +505,7 @@ test('an import gives the compactor the same inputs as a live chat that sent the
   // 300 lines of 500 bytes overflow the view, so merges run while later messages still wait to be summarized.
   const dir = temp(), live = temp(), old = new Memory(dir, short);
   const imported = Array.from({ length: 300 }, (_, i) => entry(`m${i}`, date, `${i} ${'imported detail '.repeat(40)}`));
-  const record = (calls: string[]) => async (input: Parameters<Compressor>[0]) => { calls.push(JSON.stringify([input.merge, input.historical, input.source, input.context])); return input.source.slice(0, 500); };
+  const record = (calls: string[]) => async (input: Parameters<Compressor>[0]) => { calls.push(JSON.stringify([input.part.l > 0, input.historical, input.source, input.context])); return input.source.slice(0, 500); };
   const fromImport: string[] = [], fromChat: string[] = [];
   let chat: Memory | undefined;
   try {
@@ -494,16 +514,29 @@ test('an import gives the compactor the same inputs as a live chat that sent the
     await runImport(dir, record(fromImport), AbortSignal.timeout(20000));
     chat = new Memory(live, record(fromChat), () => {});
     for (const e of imported) { chat.append(e.kind, e.text, e.date, e.receipt, e.origin); await chat.settle(AbortSignal.timeout(20000)); }
-    await chat.settle(AbortSignal.timeout(20000), true);
+    await chat.settle(AbortSignal.timeout(20000), 'tree');
     assert.ok(fromChat.some(call => call.startsWith('[true')), 'the view overflowed and merged');
     assert.deepEqual(fromImport.sort(), fromChat.sort());
   } finally { await chat?.close(); rmSync(dir, { recursive: true, force: true }); rmSync(live, { recursive: true, force: true }); }
 });
 
+test('append keeps the saved view with the tree, so the old view stays cached; rebuild starts without one', async () => {
+  const dir = temp(), old = new Memory(dir, short);
+  try {
+    old.append('user', 'original'); await old.settle(undefined, 'tree'); await old.close();
+    writeFileSync(join(dir, 'view.json'), '[[0,0]]');
+    const appended = prepareImport(dir, old, [entry('a')], 'append'); assert.ok(appended);
+    assert.equal(readFileSync(join(dir, appended.target, 'view.json'), 'utf8'), '[[0,0]]');
+    discardImport(dir);
+    const rebuilt = prepareImport(dir, old, [entry('b')], 'rebuild'); assert.ok(rebuilt);
+    assert.equal(existsSync(join(dir, rebuilt.target, 'view.json')), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('a staged plan with an invalid entry, or missing lines, is refused before anything is written', async () => {
   const dir = temp(), old = new Memory(dir, short);
   try {
-    old.append('user', 'original'); await old.settle(undefined, true); await old.close();
+    old.append('user', 'original'); await old.settle(undefined, 'tree'); await old.close();
     const job = prepareImport(dir, old, [entry('a'), entry('b'), entry('c')], 'append'); assert.ok(job);
     const staged = join(dir, job.target, 'staged.jsonl'), plan = readFileSync(staged, 'utf8'), lines = plan.split('\n').filter(Boolean);
     const damaged = {
