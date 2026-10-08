@@ -66,6 +66,7 @@ test('by default (Group subagent reports off), real SDK children stream, deliver
     assert.ok(JSON.stringify(children.messages(slow)).includes('Working on slow'));
     assert.match(runTranscript(children.transcript(slow) ?? []), /^user\|Your task:\nslow\ntalk\|Working on slow$/, 'a running child\'s chat so far');
     assert.equal(children.transcript('gone0000'), undefined);
+    assert.equal(children.transcript(slow, fast), undefined, 'a child cannot read a sibling\'s chat');
     await children.tell(slow, 'Please include tests.');
     assert.equal(children.history.records.get(slow)?.guidance[0].state, 'queued');
     releases.get('fast')!();
@@ -187,6 +188,8 @@ test('one spawn\'s reports arrive together once its last child finishes, also to
     await until(() => state(x) === 'completed');
     releases.get('y')!();
     await until(() => !children.active);
+    assert.ok(children.transcript(x, boss)?.length, 'a parent reads its child\'s chat');
+    assert.equal(children.transcript(boss, x), undefined, 'a child cannot read its parent\'s chat');
     assert.equal(reports.at(-1), `[${boss}] boss heard: [${x}] x done\n\n[${y}] y done`, 'the parent is woken once, with both reports');
     assert.equal(held.length, journaled, 'a parent subagent holds its children\'s reports itself; they would not outlive it');
   } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }

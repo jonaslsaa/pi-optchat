@@ -44,6 +44,7 @@ test('zoom takes a run id: the transcript in pages that say where to go on; an u
     assert.equal(await text({ id: 'feed0000', offset: PAGE, limit: 10 }), `${all.slice(PAGE, PAGE + 10)}\n[characters ${PAGE}-${PAGE + 10} of ${all.length}; go on with offset ${PAGE + 10}]`);
     assert.equal(await text({ id: '12345678' }), '\n[characters 0-0 of 0]', 'an all-digit run id is a run, even before it has said anything');
     await assert.rejects(zoom.execute('call', { id: 'gone0000' }), /^Error: No run gone0000\.$/);
+    await assert.rejects(zoom.execute('call', { id: '87654321' }), /^Error: No run 87654321\.$/, 'eight digits is a run id, even one that is gone');
     assert.equal(await text({ id: '0', n: 1 }), '0+0|user: hello', 'a message id sent as a string still opens the message');
     assert.equal(await text({ id: 0 }), '0+0|user: hello', 'n defaults to 1');
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }

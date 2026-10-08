@@ -51,8 +51,8 @@ export function memoryTools(memory: () => Memory, runs?: (id: string) => readonl
         if (typeof id === 'string') {
           const messages = runs?.(id);
           if (messages) return result(runPage(runTranscript(messages), offset, limit));
-          // A model may quote a message id.
-          if (!/^\d+$/.test(id)) throw new Error(`No run ${id}.`);
+          // A model may quote a message id; eight digits can be a run id (src/agents.ts), so those never open a message.
+          if (!/^\d+$/.test(id) || id.length === 8) throw new Error(`No run ${id}.`);
         }
         const m = memory(), text = m.zoom(Number(id), n, offset, limit), page = result(text);
         // A message's images come back with its text, as read returns a PNG; summaries stay text.

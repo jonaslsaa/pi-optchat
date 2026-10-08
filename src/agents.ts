@@ -109,8 +109,11 @@ export class Children {
     const file = this.history.records.get(id)?.sessionFile;
     return file ? sessionMessages(file) : [];
   }
-  /** A run's messages for zoom, live or finished; undefined for no such run. */
-  transcript(id: string) { return this.running.has(id) || this.history.records.has(id) ? this.messages(id) : undefined; }
+  /** A run's messages for zoom, live or finished; undefined for no such run. A subagent `reader` sees only its own descendants, as with tell. */
+  transcript(id: string, reader?: string) {
+    const known = reader ? this.history.descendants(reader).some(run => run.id === id) : this.running.has(id) || this.history.records.has(id);
+    return known ? this.messages(id) : undefined;
+  }
   /** Runs at work now: running, waiting for children, or stopping; not paused. */
   get working() { return [...this.running.values()].filter(live => isRunning(live.info)).map(live => live.info); }
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
@@ -243,7 +246,7 @@ export class Children {
     await loader.reload();
     const { session } = await (this.options.createSession ?? createAgentSession)({ cwd: directory, resourceLoader: loader, settingsManager,
       model: o.model, thinkingLevel: o.thinking, sessionManager: o.sessionManager,
-      customTools: [...memoryTools(() => this.memory, id => this.transcript(id)), ...(memorySearch ? [searchTool(() => this.memory)] : []), ...(delegates ? this.delegationTools(id, directory, subagentLevels, maxAgents) : []), this.parentTool(id, parentId, connected)],
+      customTools: [...memoryTools(() => this.memory, run => this.transcript(run, id)), ...(memorySearch ? [searchTool(() => this.memory)] : []), ...(delegates ? this.delegationTools(id, directory, subagentLevels, maxAgents) : []), this.parentTool(id, parentId, connected)],
       excludeTools: delegates ? [] : ['spawn', 'tell'],
     });
     // Callers track the session only after this returns: clean up here if its extensions fail to start.
