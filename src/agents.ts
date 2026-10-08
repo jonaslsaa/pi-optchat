@@ -7,7 +7,7 @@ import * as sdk from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import { SUBAGENT, VIEW_DOC } from './prompts.ts';
-import { memoryTools, SEARCH_DOC, searchTool } from './tools.ts';
+import { allowSearch, memoryTools, SEARCH_DOC, searchTool } from './tools.ts';
 import { type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cachePayload } from './cache.ts';
@@ -229,7 +229,7 @@ export class Children {
         if (provider) pi.registerProvider(o.provider, provider);
         // Same prompt as the main agent (AGENTS.md files, skills, cwd); only the OptChat preamble differs.
         pi.on('before_agent_start', event => {
-          event.systemPromptOptions.customPrompt = `${SUBAGENT}\n\n${VIEW_DOC}${memorySearch ? SEARCH_DOC : ''}`;
+          event.systemPromptOptions.customPrompt = allowSearch(`${SUBAGENT}\n\n${VIEW_DOC}${memorySearch ? SEARCH_DOC : ''}`, memorySearch);
           event.systemPromptOptions.sections.instructions = instructions;
         });
         pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
@@ -384,10 +384,10 @@ export class Children {
       if (parent && parent.info.state !== 'stopping') { parent.pendingReports.push(text); this.changed(); }
       return;
     }
-    if (this.closing) this.memory.append('user', text);
+    if (this.closing) this.memory.append('work', text);
     else try { await this.report(text, { count }); }
     catch (error) {
-      this.memory.append('user', text);
+      this.memory.append('work', text);
       this.warn(`Subagent report saved but could not wake the parent: ${String(error)}`);
     }
     if (batch && batch.ids.length > 1) this.options.hold?.(batch.ids[0], []);

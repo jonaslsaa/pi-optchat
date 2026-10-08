@@ -166,7 +166,7 @@ export function settingsPage(theme: Theme, o: Options, close: () => void, redraw
     if (problem) { list.updateValue(key, value(key, config[key])); notice.setText(theme.fg('error', problem)); }
   }, close);
   const page = frame(theme, 'OptChat settings', o.profile, [
-    new Text(theme.fg('dim', 'Saved as you change them · Victor\'s recipe by default, except Previous exchange and Summary size tolerance'), 1, 0),
+    new Text(theme.fg('dim', 'Saved as you change them · Victor\'s recipe by default, except Previous exchange, Summary size tolerance and Group subagent reports'), 1, 0),
     new Spacer(1), list, notice]);
   return Object.assign(page, { handleInput: (data: string) => { notice.setText(''); list.handleInput(data); redraw(); } });
 }

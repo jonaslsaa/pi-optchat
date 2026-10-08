@@ -14,8 +14,6 @@ import { textContent } from '../src/transcript.ts';
 
 /** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
 const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
-/** The same, with each child reporting as soon as it finishes instead of with the rest of its spawn. */
-const each = () => ({ ...nested(), groupReports: false });
 
 // Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
@@ -25,7 +23,7 @@ async function until(condition: () => boolean) {
   while (!condition()) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 10)); }
 }
 
-test('with Group subagent reports off, real SDK children stream, deliver independently, acknowledge steering, stop, and retain profile-local history/usage', async () => {
+test('by default (Group subagent reports off), real SDK children stream, deliver independently, acknowledge steering, stop, and retain profile-local history/usage', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-agents-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const usage = new UsageLedger(dir), reports: string[] = [], warnings: string[] = [];
@@ -60,7 +58,7 @@ test('with Group subagent reports off, real SDK children stream, deliver indepen
   });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
     async text => { reports.push(text); }, text => warnings.push(text), dir,
-    { settings: each, usage, parentSession: 'parent-session', createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    { settings: nested, usage, parentSession: 'parent-session', createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   try {
     const [slow, fast, stopped] = await children.spawn([{ task: 'slow' }, { task: 'fast' }, { task: 'stop-me' }], dir);
     await until(() => releases.size === 3);
@@ -149,8 +147,8 @@ test('one spawn\'s reports arrive together once its last child finishes, also to
       return stream;
     },
   });
-  // No groupReports given: grouping is the default. The first spawn's sessions turn it off while they open.
-  const settings: Partial<Settings> = nested();
+  // The first spawn's sessions turn grouping off while they open.
+  const settings: Partial<Settings> = { ...nested(), groupReports: true };
   let opening = () => { settings.groupReports = false; };
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
     async (text, options) => { reports.push(text); counts.push(options?.count); }, () => {}, dir, { settings: () => settings, hold: (_batch, texts) => held.push(texts), createSession: options => {
@@ -160,7 +158,7 @@ test('one spawn\'s reports arrive together once its last child finishes, also to
   const state = (id: string) => children.history.records.get(id)?.state;
   try {
     const answer = await children.start([{ task: 'a' }, { task: 'b' }, { task: 'stopped' }], dir);
-    delete settings.groupReports;
+    settings.groupReports = true;
     await until(() => releases.size === 3);
     assert.match(answer, /arrive together/, 'the answer describes the mode the spawn started with');
     const [a, b, stopped] = /^Started: (.+?)\./.exec(answer)![1].split(', ');
@@ -338,7 +336,7 @@ test('a child that fails to clean up still reports, is disposed, and frees its s
     },
   });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { settings: each, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(text); }, text => warnings.push(text), dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   const breakDispose = (id: string) => {
     const session = children.live(id)!.session, dispose = session.dispose.bind(session);
     session.dispose = () => { dispose(); throw new Error('dispose failed'); };
@@ -477,7 +475,7 @@ async function busyChildren(dir: string, reports: string[]) {
     },
   });
   const children = new Children(new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, () => {}, join(dir, 'profile'), { settings: each, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(text); }, () => {}, join(dir, 'profile'), { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   return { children, asked };
 }
 
