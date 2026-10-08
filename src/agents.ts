@@ -367,6 +367,8 @@ export class Children {
       if (info.state === 'stopped' && transition(info, 'interrupted')) { info.report = CUT_OFF; this.save(info); return; }
       delete info.cutOff; // It finished on its own while Pi was closing.
     }
+    // Its cut-off children were named to it when it was resumed; having ended on its own, it no longer will resume them.
+    if (!this.closing) for (const run of this.history.descendants(info.id)) if (run.cutOff) { delete run.cutOff; this.save(run); }
     if (info.connected) {
       info.handoff ??= { reason: 'failed' };
       transition(info, info.handoff.reason === 'complete' ? 'completed' : 'interrupted');
@@ -498,14 +500,16 @@ export class Children {
       }
       // The finished record stays untouched (and resumable) unless the new one is saved.
       const { ended: _ended, cutOff: _cutOff, ...rest } = run;
+      const cut = [...this.history.records.values()].filter(r => r.parentId === id && r.cutOff).map(r => r.id);
+      const prompt = cut.length ? `${text}\n\nYour subagents ${cut.join(', ')} were cut off by a Pi restart: tell resumes one if you still need its result.` : text;
       const info: RunInfo = { ...rest, state: 'running', started: Date.now(), parentSession: this.options.parentSession ?? run.parentSession,
-        guidance: [...run.guidance, { text, date: Date.now(), state: 'queued', from: 'manager' }] };
+        guidance: [...run.guidance, { text: prompt, date: Date.now(), state: 'queued', from: 'manager' }] };
       try { this.save(info); } catch (error) { this.history.records.set(id, run); await this.shutdown(session); this.dispose(session); throw error; }
       const live: LiveRun = { session, info, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [] };
       this.running.set(id, live);
       this.launching--; reserved = false;
       session.subscribe(event => this.observe(live, event));
-      const work = this.execute(live, text).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
+      const work = this.execute(live, prompt).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
         .finally(() => { this.completions.delete(work); this.changed(); });
       this.completions.add(work);
       live.completion = work;
@@ -515,20 +519,24 @@ export class Children {
   }
   /**
    * Resumes the main agent's subagents that the last Pi close or crash cut off, then tells the main agent once.
-   * Their own cut-off children are left to them: the nudge names them, and their `tell` resumes them.
+   * Cut-off children of a cut-off parent wait for it: resuming it names them, and its `tell` resumes them.
    */
   async resumeCutOff() {
-    const cut = [...this.history.records.values()].filter(run => run.cutOff).sort((a, b) => a.started - b.started);
-    const resumed: string[] = [], failed: string[] = [];
-    for (const run of cut.filter(r => !r.parentId)) {
-      const children = cut.filter(r => r.parentId === run.id).map(r => r.id);
-      const nudge = `Pi restarted while you were working; nothing you did is lost. Continue your task.${children.length ? ` Your subagents ${children.join(', ')} were cut off too: tell resumes one if you still need its result.` : ''}`;
-      try { await this.track(this.resume(run.id, nudge, undefined)); resumed.push(run.id); }
-      catch (error) { failed.push(`Could not resume ${run.id}: ${error instanceof Error ? error.message : String(error)}`); }
+    const cut = [...this.history.records.values()].filter(run => run.cutOff).sort((a, b) => a.depth - b.depth || a.started - b.started);
+    const resumed: string[] = [], lines: string[] = [], orphans: string[] = [];
+    const drop = (run: RunInfo) => { delete run.cutOff; this.save(run); };
+    for (const run of cut) {
+      if (run.parentId) {
+        // Its parent was not cut off (it was paused, say) or could not be resumed: nobody else will mention it.
+        if (!this.history.records.get(run.parentId)?.cutOff && !this.running.has(run.parentId)) { orphans.push(`${run.id} (under ${run.parentId})`); drop(run); }
+        continue;
+      }
+      try { await this.track(this.resume(run.id, 'Pi restarted while you were working; nothing you did is lost. Continue your task.', undefined)); resumed.push(run.id); }
+      catch (error) { lines.push(`Could not resume ${run.id}: ${error instanceof Error ? error.message : String(error)}`); drop(run); }
     }
-    for (const run of cut) if (run.cutOff) { delete run.cutOff; this.save(run); } // Resumed records were replaced without the flag.
-    if (!resumed.length && !failed.length) return;
-    await this.report([`Pi restarted while subagents were working.${resumed.length ? ` Resumed ${resumed.join(', ')} from where ${resumed.length > 1 ? 'they' : 'it'} left off; reports arrive as usual.` : ''}`, ...failed].join('\n'));
+    if (orphans.length) lines.push(`Also cut off, but not resumed because their parent agent is not running: ${orphans.join(', ')}.`);
+    if (!resumed.length && !lines.length) return;
+    await this.report([`Pi restarted while subagents were working.${resumed.length ? ` Resumed ${resumed.join(', ')} from where ${resumed.length > 1 ? 'they' : 'it'} left off; reports arrive as usual.` : ''}`, ...lines].join('\n'));
   }
   async finish(id: string, reason: FinishReason) {
     const live = this.running.get(id);

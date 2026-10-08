@@ -366,3 +366,28 @@ test('runs stopped or paused by the user, finished runs and older interrupted on
     assert.deepEqual([stopped, paused, done, old].map(id => later!.history.records.get(id)?.state), ['stopped', 'stopped', 'completed', 'interrupted']);
   } finally { await cleanup(first, ...(later ? [later] : [])); }
 });
+
+test('a cut-off child is named to its resumed parent, or to the main agent when its parent was not cut off', async () => {
+  const { dir, releases, reports, make, cleanup } = await setup('optchat-resume-restart-nested-');
+  const first = make('first-session');
+  let later: Children | undefined;
+  try {
+    const [boss, idle] = await first.spawn([{ task: 'boss' }, { task: 'boss idle' }], dir);
+    await until(() => releases.has('boss') && releases.has('boss idle'));
+    const [worker] = await first.spawn([{ task: 'hold worker' }], dir, undefined, boss);
+    const [stray] = await first.spawn([{ task: 'hold stray' }], dir, undefined, idle);
+    await until(() => releases.has('hold worker') && releases.has('hold stray'));
+    assert.equal(await first.interrupt(idle), 'paused'); // Waiting for the user: not resumed, but its working child was cut off.
+    await until(() => first.history.records.get(idle)?.state === 'paused');
+    reports.length = 0;
+    await first.close();
+
+    later = make('second-session');
+    await later.resumeCutOff();
+    assert.equal(reports[0], `Pi restarted while subagents were working. Resumed ${boss} from where it left off; reports arrive as usual.\nAlso cut off, but not resumed because their parent agent is not running: ${stray} (under ${idle}).`);
+    await until(() => !later!.active);
+    assert.match(users(later, boss).at(-1) ?? '', new RegExp(`Your subagents ${worker} were cut off by a Pi restart: tell resumes one`));
+    assert.deepEqual([worker, stray].map(id => later!.history.records.get(id)?.cutOff), [undefined, undefined], 'each was named once');
+    assert.deepEqual(later.ids, []);
+  } finally { await cleanup(first, ...(later ? [later] : [])); }
+});
