@@ -5,6 +5,7 @@ import { getCurrentSystemMessage, type SystemMessage, type UserMessage } from '@
 import { CAP, cap, type Memory } from './memory.ts';
 import { record } from './cache.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
+import { imageRef, isImage } from './images.ts';
 
 export const RUN_BOUNDARY = 'optchat.run';
 /** Subagent traffic to the main agent: a custom message on screen, a plain user message to the model, `work` in memory. */
@@ -19,11 +20,11 @@ export function textContent(content: unknown, images = true): string {
   return content.map((part: unknown) => {
     if (typeof part !== 'object' || part === null) return '';
     if ('type' in part && part.type === 'text' && 'text' in part && typeof part.text === 'string') return part.text;
-    if (images && 'type' in part && part.type === 'image') return '[image attachment: available in Pi session; text memory does not preserve image bytes]';
+    if (images && isImage(part)) return imageRef(part);
     return '';
   }).filter(Boolean).join('\n');
 }
-/** What the user typed, as Pi's input event (and so the inbox) saw it: no image placeholders, and without the
+/** What the user typed, as Pi's input event (and so the inbox) saw it: no image references, and without the
  * `[Image …]` notes Pi appends after the text when it resizes, converts or omits an attached image. */
 export function typedText(content: unknown) {
   const text = textContent(content, false);
@@ -54,7 +55,9 @@ export function logMessage(memory: Memory, message: AgentMessage, receipt?: stri
     }
     if (message.stopReason === 'error' || message.stopReason === 'aborted')
       memory.append('echo', `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`, date);
-  } else if (message.role === 'toolResult') memory.append('echo', cap(`${message.toolName}: ${textContent(message.content)}`), date);
+  } else if (message.role === 'toolResult')
+    // A zoom's page already names the images it returns.
+    memory.append('echo', cap(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom')}`), date);
 }
 export function boundedMessage(message: AgentMessage): AgentMessage {
   if (message.role !== 'toolResult') return message;

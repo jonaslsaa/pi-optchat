@@ -36,9 +36,9 @@ test('retain the exact last answer and its requests, excluding prior working con
   appendRun(manager, history.slice(0, 2));
   appendRun(manager, history.slice(2));
   const previous = previousExchange(manager.getBranch());
-  assert.deepEqual(previous.map(m => textContent(m.content)), [
-    first.content, 'Focus on option two.\n[image attachment: available in Pi session; text memory does not preserve image bytes]', finalText,
-  ]);
+  const [request, steered, reply] = previous.map(m => textContent(m.content));
+  assert.deepEqual([request, reply], [first.content, finalText]);
+  assert.match(steered, /^Focus on option two\.\n\[image [0-9a-f]{16}\]$/);
   const current = user('Why is that?');
   const thinking = answer('Working on the follow-up.');
   thinking.content.unshift({ type: 'thinking', thinking: 'CURRENT REASONING' });
@@ -522,8 +522,9 @@ test('inputs with images are claimed too, including /skill: commands and Pi\'s i
     const main = join(dir, 'profiles', 'fixture', 'main');
     const log = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n')).map(line => JSON.parse(line));
     assert.deepEqual(log.map(entry => entry.kind), ['user', 'talk', 'user', 'talk']);
-    assert.match(log[0].text, /^<skill name="demo"[\s\S]*\ngo\n\[image attachment/);
-    assert.match(log[2].text, /^look at this\n\[image attachment/);
+    assert.match(log[0].text, /^<skill name="demo"[\s\S]*\ngo\n\[image [0-9a-f]{16}\]$/);
+    assert.match(log[2].text, /^look at this\n\[image [0-9a-f]{16}\]$/);
+    assert.deepEqual(readdirSync(join(dir, 'profiles', 'fixture', 'images')).map(file => readFileSync(join(dir, 'profiles', 'fixture', 'images', file)).toString('base64')), [PNG]);
     assert.deepEqual(JSON.parse(readFileSync(join(dir, 'profiles', 'fixture', 'pending-inputs.json'), 'utf8')), []);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }

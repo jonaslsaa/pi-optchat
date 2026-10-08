@@ -11,6 +11,7 @@ import { createCompressor } from './compactor.ts';
 import { createProfile, instructions, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { MASTER, VIEW_DOC } from './prompts.ts';
 import { cachePayload, record } from './cache.ts';
+import { saveImages } from './images.ts';
 import { asUser, boundedMessage, buildContext, logMessage, previousExchange, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer, type ReportDetails } from './report-message.ts';
 import { allowSearch, memoryTools, result, SEARCH_DOC, searchTool } from './tools.ts';
@@ -311,17 +312,23 @@ export default function optchat(pi: ExtensionAPI) {
     event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
     prompt = event.systemPrompt;
   });
-  pi.on('message_end', (event, ctx) => {
+  pi.on('message_end', async (event, ctx) => {
     if (!active || !runStarted) return;
     const bounded = boundedMessage(event.message);
     const message = asUser(bounded);
+    // Before the message is logged, so the image its text names is already there for zoom; zoom's own images are kept already.
+    if (message.role === 'user' || message.role === 'toolResult' && message.toolName !== 'zoom') {
+      try { await saveImages(active.memory.directory, message.content); }
+      catch (error) { ctx.ui.notify(`OptChat could not keep an image: ${errorText(error)}`, 'warning'); }
+    }
+    if (!active) return;
     if (message.role === 'user') {
       try {
         const text = textContent(message.content);
         // A report is shown as our custom message, or sent as plain text before the first run has a prompt to reuse.
         if (bounded.role === 'custom' && bounded.customType === REPORT_TYPE || reports.some(r => !r.batch && r.text === text)) receipts.set(message, reportReceipt(text));
         else {
-          // The inbox journaled the typed input: match without image placeholders or Pi's image notes.
+          // The inbox journaled the typed input: match without image references or Pi's image notes.
           const typed = typedText(message.content), skill = parseSkillBlock(typed.bare);
           let receipt = active.inbox.claim(typed.text) ?? active.inbox.claim(typed.bare)
             ?? (skill ? active.inbox.claimSkill(skill.name, skill.userMessage) : undefined);
