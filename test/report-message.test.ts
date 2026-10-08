@@ -9,7 +9,7 @@ import { createAgentSession, CustomMessageComponent, DefaultResourceLoader, init
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { registerReportRenderer, reportParts } from '../src/report-message.ts';
-import { REPORT_TYPE, textContent } from '../src/transcript.ts';
+import { REPORT_TYPE, textContent, withoutFullChat } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { isAtWork } from '../src/cache.ts';
@@ -208,9 +208,10 @@ test('a report steered into a running turn reaches the main agent once, even whe
       baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context, options) {
+        context = { ...context, messages: context.messages.filter(m => !isAtWork(m)) }; // OptChat's last line
         const last = context.messages.at(-1), text = textContent(last && 'content' in last ? last.content : '');
         const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT), child = text.includes('\n\nYour task:\n');
-        if (!compression && !child) main.push(text);
+        if (!compression && !child) main.push(withoutFullChat(text));
         const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'Summary.' : child ? 'Child done.' : 'ok' }],
           timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
         if (!compression && !child && text.endsWith('Spawn one.')) {
