@@ -111,7 +111,8 @@ export default function optchat(pi: ExtensionAPI) {
     catch { note = ' · import journal invalid'; }
     ctx.ui.setStatus('optchat', `OptChat: ${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending · ${a.children.ids.length} agents${note}`);
   };
-  const saveReports = () => { if (active) atomicWrite(join(active.dir, 'pending-reports.json'), JSON.stringify(reports)); };
+  // `steered` describes this process's Pi queue, so it is not journaled.
+  const saveReports = () => { if (active) atomicWrite(join(active.dir, 'pending-reports.json'), JSON.stringify(reports, (key, value: unknown) => key === 'steered' ? undefined : value)); };
   const flush = () => {
     if (!active) return;
     while (logged < run.length) {

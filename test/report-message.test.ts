@@ -200,7 +200,7 @@ test('a report steered into a running turn reaches the main agent once, even whe
     saveConfig(profile, { ...loadConfig(profile), compactor: fixture, subagent: fixture });
     const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
     const main: string[] = [];
-    let release = () => {};
+    let release = () => {}, hold = true, settling = false;
     runtime.registerProvider('fixture', {
       baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
@@ -211,12 +211,13 @@ test('a report steered into a running turn reaches the main agent once, even whe
         const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'Summary.' : child ? 'Child done.' : 'ok' }],
           timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
         if (!compression && !child && text.endsWith('Spawn one.')) {
-          reply.content = [{ type: 'toolCall', id: 'spawn-1', name: 'spawn', arguments: { tasks: [{ task: 'Say done.' }] } }]; reply.stopReason = 'toolUse';
+          reply.content = [{ type: 'toolCall', id: 'spawn-1', name: 'spawn', arguments: { tasks: [{ task: hold ? 'Say done.' : 'Say done slowly.' }] } }]; reply.stopReason = 'toolUse';
         }
         const stream = createAssistantMessageEventStream();
         void (async () => {
           // After the spawn, main keeps writing until released or aborted, so the child's report waits in Pi's steering queue.
-          if (last?.role === 'toolResult') {
+          if (child && text.endsWith('slowly.')) await new Promise(r => setTimeout(r, 300));
+          if (last?.role === 'toolResult' && hold) {
             stream.push({ type: 'start', partial: reply });
             await new Promise<void>(resolve => { release = resolve; options?.signal?.addEventListener('abort', () => resolve(), { once: true }); });
           }
@@ -229,7 +230,14 @@ test('a report steered into a running turn reaches the main agent once, even whe
     });
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
     const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
-      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [(pi: ExtensionAPI) => {
+        // Another extension's slow settle handler, during which the child reports: Pi is idle, so it holds that report for its own run.
+        pi.on('agent_settled', async () => {
+          if (!settling) return;
+          settling = false;
+          await until(() => readFileSync(join(profile, 'pending-reports.json'), 'utf8').includes('Child done.'), 'the child reports while settling');
+        });
+      }, optchat] });
     await loader.reload();
     const manager = SessionManager.create(dir, join(dir, 'sessions'));
     manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
@@ -265,6 +273,15 @@ test('a report steered into a running turn reaches the main agent once, even whe
     await reportTurn('none');
     assert.equal(work().length, 3, 'a report that arrived in its turn is not sent again');
     assert.equal(main.filter(t => t.endsWith('Child done.')).length, 1);
+
+    const dropped = () => s.messages.filter(m => m.role === 'custom' && textContent(m.content).startsWith('(duplicate')).length, droppedBefore = dropped();
+    main.length = 0; hold = false; settling = true;
+    await s.prompt('Spawn one.');
+    await until(() => work().length > 3 && s.isIdle, 'the report sent while settling is logged');
+    await new Promise(r => setTimeout(r, 100));
+    assert.equal(work().length, 4);
+    assert.equal(main.filter(t => t.endsWith('Child done.')).length, 1);
+    assert.equal(dropped(), droppedBefore, 'a report sent while Pi settles already has its own run: not sent again');
     assert.deepEqual(errors, []);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
