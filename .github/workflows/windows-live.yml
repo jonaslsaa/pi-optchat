@@ -1,6 +1,6 @@
 # A real Windows machine for a maintainer's hands-on test: dispatch it, then SSH in with the command in the run's
-# "SSH:" annotation (detached mode posts it as soon as the session starts; the API has no live logs).
-# Only the dispatching user's GitHub SSH keys can connect. Exiting the session, `touch /continue`, or the timeout ends the job.
+# ssh-command artifact (gh run download <run> -n ssh-command). upterm, since tmate's public servers are gone (mxschmitt/action-tmate#255).
+# Only the dispatching user's GitHub SSH keys can connect. `exit` in the session, or the 60-minute cap, ends the job.
 name: Windows live
 on: workflow_dispatch
 permissions:
@@ -9,6 +9,8 @@ jobs:
   live:
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      ANTHROPIC_OAUTH_TOKEN: ${{ secrets.OPTCHAT_TEST_ANTHROPIC_OAUTH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,9 +19,17 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm install -g @earendil-works/pi-coding-agent@1.1.0
-      - uses: mxschmitt/action-tmate@v3
+      - id: upterm
+        uses: owenthereal/action-upterm@v2
         with:
           limit-access-to-actor: true
           detached: true
-        env:
-          ANTHROPIC_OAUTH_TOKEN: ${{ secrets.OPTCHAT_TEST_ANTHROPIC_OAUTH_TOKEN }}
+          wait-timeout-minutes: 15
+      # The API serves a job's log only after it ends, so the command goes out as an artifact, downloadable while it runs.
+      - run: echo "${{ steps.upterm.outputs.ssh-command }}" > ssh-command.txt
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssh-command
+          path: ssh-command.txt
+          retention-days: 1
