@@ -273,7 +273,7 @@ export default function optchat(pi: ExtensionAPI) {
       try {
         const text = textContent(message.content);
         // A report is shown as our custom message, or sent as plain text before the first run has a prompt to reuse.
-        if (bounded.role === 'custom' || reports.some(r => !r.batch && r.text === text)) receipts.set(message, reportReceipt(text));
+        if (bounded.role === 'custom' && bounded.customType === REPORT_TYPE || reports.some(r => !r.batch && r.text === text)) receipts.set(message, reportReceipt(text));
         else {
           // The inbox journaled the typed input: match without image placeholders or Pi's image notes.
           const typed = typedText(message.content), skill = parseSkillBlock(typed.bare);
