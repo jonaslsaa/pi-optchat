@@ -228,6 +228,8 @@ test('Pi / OMP imports what the user typed and the replies that ended a turn, an
     // OMP records a skill as its own message; Pi expands it into the user message.
     { type: 'custom_message', id: 'k1', customType: 'skill-prompt', attribution: 'user', display: true, content: 'SKILL BODY',
       details: { name: 'grill-me', path: '/skills/grill-me/SKILL.md', args: 'one question at a time', lineCount: 3 } },
+    { type: 'custom_message', id: 'k3', customType: 'skill-prompt', attribution: 'user', display: true, content: 'SKILL BODY',
+      details: { name: 'grill-me', path: '/skills/grill-me/SKILL.md', args: 'the plan', prompt: 'first read this, then /skill:grill-me the plan', lineCount: 3 } },
     piUser('k2', '<skill name="review" location="/skills/review/SKILL.md">\nSKILL BODY\n</skill>\n\ncheck the PR'),
     piUser('u2', 'why are you adding redis? I just wanted the refactor'),
     piReply('a4', 'aborted', [{ type: 'text', text: 'ABORTED REPLY' }]),
@@ -245,7 +247,8 @@ test('Pi / OMP imports what the user typed and the replies that ended a turn, an
     assert.deepEqual(parsed.entries.map(e => [e.kind, body(e)]), [
       ['user', 'exact user question'], ['talk', 'final answer'],
       ['user', '[alternate branch]\n!git status'], ['user', '[alternate branch]\n!!cat .env'], ['user', '[alternate branch]\n$print(1)'],
-      ['user', '[alternate branch]\n/skill:grill-me one question at a time'], ['user', '[alternate branch]\n/skill:review check the PR'],
+      ['user', '[alternate branch]\n/skill:grill-me one question at a time'], ['user', '[alternate branch]\nfirst read this, then /skill:grill-me the plan'],
+      ['user', '[alternate branch]\n/skill:review check the PR'],
       ['user', '[alternate branch]\nwhy are you adding redis? I just wanted the refactor'],
       ['user', 'do only the refactor'], ['talk', 'long answer, cut off']]);
     assert.doesNotMatch(JSON.stringify(parsed.entries),

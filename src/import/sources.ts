@@ -85,9 +85,10 @@ async function piRoots(): Promise<string[]> {
 }
 /** What the user typed for a Pi or OMP session message, or undefined for anything they did not type. */
 function piUserText(v: Record<string, unknown>): string | undefined {
-  // OMP records `/skill:name args` as its own message, holding the skill's body and what was typed after the name.
+  // OMP records `/skill:name args` as its own message, holding the skill's body. Newer versions keep the whole typed prompt;
+  // older ones only the name and what followed it.
   if (v.type === 'custom_message' && v.customType === 'skill-prompt' && v.attribution === 'user' && record(v.details) && typeof v.details.name === 'string')
-    return `/skill:${v.details.name} ${string(v.details.args) ?? ''}`.trimEnd();
+    return string(v.details.prompt)?.trim() || `/skill:${v.details.name} ${string(v.details.args) ?? ''}`.trimEnd();
   const m = v.type === 'message' ? v.message : undefined;
   if (!record(m)) return undefined;
   // Pi expands `/skill:name args` into the skill's body followed by the args.
