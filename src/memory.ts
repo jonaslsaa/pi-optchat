@@ -310,10 +310,11 @@ export class Memory {
     if (!this.retryAt.size) this.lastError = undefined;
     if (this.fit()) this.save();
   }
-  /** The compactions' view up to the node, and up to its first unbuilt line, so no call sees a placeholder or half a message. */
+  /** The compactions' view up to the node. A line still being built shows as a placeholder instead of ending the view: an A/B on
+   * real turns (#101) found that cutting there also hid the built lines after it, such as an echo's own tool call. */
   private compactionView(part: Part) {
     const boundary = part.l === 0 ? start(part) : end(part), lines: string[] = [];
-    for (const p of this.compaction.parts) { if (end(p) > boundary || !this.node(p)) break; lines.push(`${start(p)}+${2 ** p.l}|${flat(this.text(p))}`); }
+    for (const p of this.compaction.parts) { if (end(p) > boundary) break; lines.push(`${start(p)}+${2 ** p.l}|${flat(this.text(p))}`); }
     return `${VIEW_OPEN}${lines.join('\n')}\n</chat>`;
   }
   private queueParent({ l, i }: Part) {

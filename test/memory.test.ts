@@ -373,11 +373,27 @@ test('a message\'s node starts once fewer than 8 lines before it are unbuilt, so
     for (let i = 1; i <= 12; i++) memory.append('user', `${i} ${'.'.repeat(600)}`);
     await new Promise(resolve => setTimeout(resolve, 20));
     assert.deepEqual(calls.slice(1).map(c => c.input.part.i), [1, 2, 3, 4, 5, 6, 7, 8]);
-    assert.equal(new Set(calls.slice(1).map(c => c.input.context)).size, 1, 'their views stop at the first unbuilt line');
+    const views = calls.slice(1).map(c => c.input.context.replace(/\n<\/chat>$/, ''));
+    assert.ok(views.every((view, k) => !k || view.startsWith(views[k - 1])), 'each view extends the one before, so they share a cached prefix');
     calls[1].release();
     await new Promise(resolve => setTimeout(resolve, 20));
     assert.deepEqual(calls.slice(9).filter(c => !c.input.part.l).map(c => c.input.part.i), [9]);
     calls.forEach(c => c.release());
+  } finally { calls.forEach(c => c.release()); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a summary sees the built lines after one still being built, such as an echo\'s own tool call', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-gaps-'));
+  const calls: { input: Compression; release: () => void }[] = [];
+  const memory = new Memory(dir, input => new Promise(resolve => calls.push({ input, release: () => resolve('s'.repeat(300)) })), () => {});
+  try {
+    memory.append('talk', `reply ${'.'.repeat(600)}`);
+    memory.append('tool', 'read src/memory.ts');
+    memory.append('echo', `contents ${'.'.repeat(600)}`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const echo = calls.find(c => c.input.part.i === 2)!.input.context;
+    assert.match(echo, /^0\+1\|\(not summarized yet: zoom it\)$/m);
+    assert.match(echo, /^1\+1\|tool: read src\/memory\.ts$/m);
   } finally { calls.forEach(c => c.release()); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
