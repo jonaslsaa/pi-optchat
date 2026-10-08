@@ -159,7 +159,7 @@ export class Memory {
   private readonly compaction: Sawtooth;
   lastError?: string;
 
-  /** `jobs`: summaries built at once, and how many unbuilt lines a new message's node waits behind. Chat keeps 8; imports pass the Import jobs setting. */
+  /** `jobs`: summaries built at once, and how many unbuilt lines a new message's node waits behind. Chat keeps 8; imports pass the "Import: summaries at once" setting. */
   constructor(readonly directory: string, private readonly compress: Compressor,
     private readonly warn: (s: string) => void = console.error,
     readonly budget = VIEW, private readonly jobs = 8, private readonly retryMs = 10_000) {
