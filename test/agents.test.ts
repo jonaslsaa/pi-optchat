@@ -10,7 +10,7 @@ import type { Settings } from '../src/settings.ts';
 import { Memory } from '../src/memory.ts';
 import { RunHistory } from '../src/runs.ts';
 import { emptyUsage, UsageLedger } from '../src/usage.ts';
-import { textContent } from '../src/transcript.ts';
+import { runTranscript, textContent, withoutFullChat } from '../src/transcript.ts';
 
 /** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
 const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
@@ -64,11 +64,14 @@ test('by default (Group subagent reports off), real SDK children stream, deliver
     await until(() => releases.size === 3);
     await until(() => !!children.live(slow)?.streaming);
     assert.ok(JSON.stringify(children.messages(slow)).includes('Working on slow'));
+    assert.match(runTranscript(children.transcript(slow) ?? []), /^user\|Your task:\nslow\ntalk\|Working on slow$/, 'a running child\'s chat so far');
+    assert.equal(children.transcript('gone0000'), undefined);
     await children.tell(slow, 'Please include tests.');
     assert.equal(children.history.records.get(slow)?.guidance[0].state, 'queued');
     releases.get('fast')!();
     await until(() => reports.length === 1);
     assert.match(reports[0], new RegExp(`^\\[${fast}\\]`));
+    assert.ok(reports[0].endsWith(`\n\nFull chat: zoom("${fast}")`), 'the report says how to read the whole chat');
     assert.equal(children.history.records.get(slow)?.state, 'running', 'fast must report before slow finishes');
     await children.tell(stopped, 'This should remain undelivered.');
     await children.stop(stopped);
@@ -151,7 +154,7 @@ test('one spawn\'s reports arrive together once its last child finishes, also to
   const settings: Partial<Settings> = { ...nested(), groupReports: true };
   let opening = () => { settings.groupReports = false; };
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async (text, options) => { reports.push(text); counts.push(options?.count); }, () => {}, dir, { settings: () => settings, hold: (_batch, texts) => held.push(texts), createSession: options => {
+    async (text, options) => { reports.push(withoutFullChat(text)); counts.push(options?.count); }, () => {}, dir, { settings: () => settings, hold: (_batch, texts) => held.push(texts.map(withoutFullChat)), createSession: options => {
       opening(); opening = () => {};
       return createAgentSession({ ...options, modelRuntime: runtime });
     } });
@@ -268,7 +271,7 @@ test('children can message their parent mid-run: the main agent, an idle parent,
     },
   });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(withoutFullChat(text)); }, text => warnings.push(text), dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   const heard = (id: string, from: string) => children.messages(id).some(m => m.role === 'assistant' && textContent(m.content).includes(`heard: [${from}] Message from subagent (still running): question from`));
   try {
     // Top-level child: the message reaches the main agent before the final report.
@@ -336,7 +339,7 @@ test('a child that fails to clean up still reports, is disposed, and frees its s
     },
   });
   const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); }, text => warnings.push(text), dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(withoutFullChat(text)); }, text => warnings.push(text), dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   const breakDispose = (id: string) => {
     const session = children.live(id)!.session, dispose = session.dispose.bind(session);
     session.dispose = () => { dispose(); throw new Error('dispose failed'); };
@@ -475,7 +478,7 @@ async function busyChildren(dir: string, reports: string[], options: { settings?
     },
   });
   const children = new Children(new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(text); options.onReport?.(text); }, () => {}, join(dir, 'profile'), { settings: options.settings ?? nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    async text => { reports.push(withoutFullChat(text)); options.onReport?.(text); }, () => {}, join(dir, 'profile'), { settings: options.settings ?? nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   return { children, asked };
 }
 

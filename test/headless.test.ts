@@ -9,6 +9,7 @@ import optchat from '../src/index.ts';
 import { createProfile, lastProfile, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig } from '../src/profiles.ts';
 import { textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
+import { isAtWork } from '../src/cache.ts';
 
 // Short paths: the profile lock socket has a ~103-byte limit on macOS. Windows uses a hashed named pipe, so any directory fits.
 const root = mkdtempSync(process.platform === 'win32' ? join(tmpdir(), 'oc-headless-') : '/tmp/oc-headless-');
@@ -34,6 +35,7 @@ async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?:
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
     models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
     streamSimple(model, context) {
+      context = { ...context, messages: context.messages.filter(m => !isAtWork(m)) }; // OptChat's last line
       sent.push(JSON.stringify(context.messages));
       const last = context.messages.at(-1);
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `OK to: ${textContent(last && 'content' in last ? last.content : '')}` }],

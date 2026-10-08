@@ -12,6 +12,7 @@ import { registerReportRenderer, reportParts } from '../src/report-message.ts';
 import { REPORT_TYPE, textContent } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
+import { isAtWork } from '../src/cache.ts';
 
 initTheme('dark', false);
 const plain = (lines: string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b[\]_][^\x07\x1b]*(\x07|\x1b\\)/g, '');
@@ -62,6 +63,7 @@ test('a report reaches an idle or busy main agent as a user message to the model
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context) {
+        context = { ...context, messages: context.messages.filter(m => !isAtWork(m)) }; // OptChat's last line
         const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
         const text = textContent(context.messages.at(-1)?.content);
         if (!compression) {
@@ -151,6 +153,7 @@ test('reports a crash held back with unfinished siblings are delivered at the ne
       baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context) {
+        context = { ...context, messages: context.messages.filter(m => !isAtWork(m)) }; // OptChat's last line
         if (!context.messages.some(m => m.role === 'system' && m.content === COMPACT)) asked.push(textContent(context.messages.at(-1)?.content));
         const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'ok' }], timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
         const stream = createAssistantMessageEventStream();

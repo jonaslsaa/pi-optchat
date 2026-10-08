@@ -1,6 +1,8 @@
-import { Type } from 'typebox';
+import { Type, type Static } from 'typebox';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { flat, PAGE, start, type Memory } from './memory.ts';
 import { loadImages } from './images.ts';
+import { runTranscript } from './transcript.ts';
 export const result = (text: string) => ({ content: [{ type: 'text' as const, text }], details: {} });
 export const SEARCH_PAGE = 20;
 const SNIPPET = 200;
@@ -27,20 +29,39 @@ export function searchPage(memory: Memory, text: string, before?: number) {
   return `${hits.length} ${older}${hits.length === 1 ? 'message contains' : 'messages contain'} "${text}", newest first:\n${lines.join('\n')}${more}`;
 }
 
-export function memoryTools(memory: () => Memory) {
+const zoomParameters = Type.Object({ id: Type.Union([Type.Integer({ minimum: 0 }), Type.String({ minLength: 1 })]), n: Type.Optional(Type.Integer({ minimum: 1 })),
+  offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: PAGE })) });
+
+/** A page of a run's transcript, saying where the next one starts. */
+export function runPage(text: string, offset = 0, limit = PAGE) {
+  if (offset > text.length) throw new Error(`This transcript has ${text.length} characters; offset must be 0 to ${text.length}.`);
+  // Never split a surrogate pair: a page starts on its first half and ends after its second.
+  const from = /[\udc00-\udfff]/.test(text[offset] ?? '') ? offset - 1 : offset;
+  let to = Math.min(text.length, from + limit);
+  if (to < text.length && /[\ud800-\udbff]/.test(text[to - 1])) to += to - 1 === from ? 1 : -1;
+  return `${text.slice(from, to)}\n[characters ${from}-${to} of ${text.length}${to < text.length ? `; go on with offset ${to}` : ''}]`;
+}
+
+/** `runs` gives a subagent's messages by run id, live or finished; undefined for no such run. */
+export function memoryTools(memory: () => Memory, runs?: (id: string) => readonly AgentMessage[] | undefined) {
   return [
-    { name: 'zoom', label: 'Zoom memory', description: `Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. A message over ${PAGE.toLocaleString('en-US')} characters comes in pages; offset and limit (characters) read any part of it, and are not needed for a shorter one. A message's images come back with it.`,
-      parameters: Type.Object({ id: Type.Integer({ minimum: 0 }), n: Type.Integer({ minimum: 1 }),
-        offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: PAGE })) }),
-      async execute(_id: string, args: { id: number; n: number; offset?: number; limit?: number }) {
-        const m = memory(), text = m.zoom(args.id, args.n, args.offset, args.limit), page = result(text);
+    { name: 'zoom', label: 'Zoom memory', description: `Open the line id+n of the view into the two lines of n/2 under it; n = 1 (the default) gives the message whole. A message over ${PAGE.toLocaleString('en-US')} characters comes in pages; offset and limit (characters) read any part of it, and are not needed for a shorter one. A message's images come back with it. zoom("<run id>") gives a subagent's whole chat so far, in the same pages.`,
+      parameters: zoomParameters,
+      async execute(_id: string, { id, n = 1, offset, limit }: Static<typeof zoomParameters>) {
+        if (typeof id === 'string') {
+          const messages = runs?.(id);
+          if (messages) return result(runPage(runTranscript(messages), offset, limit));
+          // A model may quote a message id.
+          if (!/^\d+$/.test(id)) throw new Error(`No run ${id}.`);
+        }
+        const m = memory(), text = m.zoom(Number(id), n, offset, limit), page = result(text);
         // A message's images come back with its text, as read returns a PNG; summaries stay text.
-        return args.n === 1 ? { ...page, content: [...page.content, ...loadImages(m.directory, text)] } : page;
+        return n === 1 ? { ...page, content: [...page.content, ...loadImages(m.directory, text)] } : page;
       } },
     { name: 'date', label: 'Memory date', description: 'The date and time of message id.',
       parameters: Type.Object({ id: Type.Integer({ minimum: 0 }) }),
       async execute(_id: string, args: { id: number }) { return result(memory().date(args.id)); } },
-  ];
+  ] as const;
 }
 
 export const searchTool = (memory: () => Memory) => ({ name: 'search', label: 'Search memory',

@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { getCurrentSystemMessage, type SystemMessage, type UserMessage } from '@earendil-works/pi-ai';
-import { CAP, cap, type Memory } from './memory.ts';
+import { CAP, cap, flat, isView, type Memory } from './memory.ts';
+import { AT_WORK } from './prompts.ts';
 import { record } from './cache.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
 import { imageRef, isImage } from './images.ts';
@@ -124,9 +125,34 @@ function latestExchange(branch: readonly SessionEntry[]) {
   return latest;
 }
 
-/** Keep one completed exchange plus the current run; all other history comes from the view. */
+/** Ends every subagent report, so the parent knows it can check the report against what the child did. */
+export const fullChat = (id: string) => `Full chat: zoom("${id}")`;
+export const withoutFullChat = (text: string) => text.replace(/\n\nFull chat: zoom\("[\w-]+"\)$/gm, '');
+/** Tool calls and results in a run transcript keep their head and tail, so a page holds many steps. */
+const STEP = 1_000;
+/** A subagent's chat for zoom, as `kind|text` lines: its task without the memory view, replies, tool calls and results, and what it was told. */
+export function runTranscript(messages: readonly AgentMessage[]) {
+  return messages.flatMap(message => {
+    if (message.role === 'user') {
+      const text = textContent(message.content, false);
+      return [`user|${isView(text) ? text.slice(text.indexOf('\n</chat>') + '\n</chat>'.length).trimStart() : text}`];
+    }
+    if (message.role === 'toolResult') return [`echo|${cap(`${message.toolName}: ${textContent(message.content, false)}`, STEP)}`];
+    if (message.role !== 'assistant') return [];
+    return [...message.content.flatMap(block => block.type === 'text' && block.text.trim() ? [`talk|${block.text}`]
+      : block.type === 'toolCall' ? [`tool|${cap(`${block.name} ${JSON.stringify(block.arguments)}`, STEP)}`] : []),
+    ...message.stopReason === 'error' || message.stopReason === 'aborted' ? [`echo|Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`] : []];
+  }).join('\n');
+}
+/** One line naming the running agents by id and the first words of their task. */
+export const atWork = (runs: readonly { id: string; task: string }[]) => AT_WORK + (runs.map(({ id, task }) => {
+  const words = flat(task).replaceAll('"', "'").split(/\s+/).filter(Boolean);
+  return `${id} "${words.slice(0, 6).join(' ')}${words.length > 6 ? '…' : ''}"`;
+}).join(', ') || 'none') + '.';
+
+/** Keep one completed exchange plus the current run; all other history comes from the view. `atWork` goes last, so it never moves the cached prefix. */
 export function buildContext(canonical: AgentMessage[], run: AgentMessage[], view: string, prompt: string,
-  previous: readonly AgentMessage[] = []): AgentMessage[] {
+  previous: readonly AgentMessage[] = [], atWork?: string): AgentMessage[] {
   const system = getCurrentSystemMessage(canonical);
   const head: SystemMessage = { role: 'system', content: prompt, toolsAdded: system?.toolsAdded, timestamp: 0 };
   if (!run.some(m => m.role === 'user')) throw new Error('OptChat has no current user message; refusing to send historical context.');
@@ -136,5 +162,5 @@ export function buildContext(canonical: AgentMessage[], run: AgentMessage[], vie
     injected = true;
     return { ...message, content: [{ type: 'text' as const, text: view }, ...(typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content)] };
   });
-  return [head, ...messages];
+  return [head, ...messages, ...atWork ? [{ role: 'user' as const, content: [{ type: 'text' as const, text: atWork }], timestamp: 0 }] : []];
 }

@@ -11,6 +11,7 @@ import { mainTitle, statusState, TabTitle, windowTitle, type StatusState } from 
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
+import { isAtWork } from '../src/cache.ts';
 
 const agentDir = process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 after(() => rmSync(agentDir, { recursive: true, force: true }));
@@ -73,6 +74,7 @@ test('the main window title follows the real Pi session: profile, working, runni
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context) {
+        context = { ...context, messages: context.messages.filter(m => !isAtWork(m)) }; // OptChat's last line
         const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
         const last = context.messages.at(-1);
         const text = textContent(last?.content);

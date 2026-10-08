@@ -1,6 +1,6 @@
 import { getMarkdownTheme, type ExtensionAPI, type Theme } from '@earendil-works/pi-coding-agent';
 import { Box, Markdown, Text } from '@earendil-works/pi-tui';
-import { REPORT_TYPE, textContent } from './transcript.ts';
+import { REPORT_TYPE, textContent, withoutFullChat } from './transcript.ts';
 
 const HEAD = /^\[([0-9a-f]{8})\] (?:(Message from subagent \(still running\)|Connected agent message): )?/;
 
@@ -9,6 +9,7 @@ export interface ReportDetails { count?: number }
 
 /** Split "[id] Message from subagent (still running): body" into a short label and the body. */
 export function reportParts(text: string, count = 1) {
+  text = withoutFullChat(text); // For the agent: the user has the Agents page.
   if (count > 1) return { label: `${count} subagent reports`, body: text };
   const match = HEAD.exec(text);
   if (!match) return { label: 'subagent', body: text };

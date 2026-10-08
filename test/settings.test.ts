@@ -15,6 +15,7 @@ import { COMPACT } from '../src/prompts.ts';
 import { REPORT_TYPE, textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { SEARCH_DOC } from '../src/tools.ts';
+import { isAtWork } from '../src/cache.ts';
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 const model = { provider: 'fixture', model: 'fixture', thinking: 'off' } as const;
@@ -32,6 +33,7 @@ async function fixture(dir: string, reply: (context: Context) => string = () => 
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
     models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
     streamSimple(m, context, options) {
+      context = { ...context, messages: context.messages.filter(m => !isAtWork(m)) }; // OptChat's last line
       const stream = createAssistantMessageEventStream();
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: reply(context) }], api: m.api, provider: m.provider, model: m.id,
         timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
@@ -120,6 +122,7 @@ test('a raised max active agents also applies to a subagent that was already run
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
     models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
     streamSimple(m, context) {
+      context = { ...context, messages: context.messages.filter(m => !isAtWork(m)) }; // OptChat's last line
       const stream = createAssistantMessageEventStream();
       const delegating = textContent(context.messages.find(x => x.role === 'user')?.content).endsWith('delegate') && !context.messages.some(x => x.role === 'toolResult');
       const message: AssistantMessage = { role: 'assistant', api: m.api, provider: m.provider, model: m.id, timestamp: Date.now(), usage: emptyUsage(),
