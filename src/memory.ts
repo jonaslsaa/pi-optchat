@@ -321,9 +321,9 @@ export class Memory {
     const parent = { l: l + 1, i: Math.floor(i / 2) };
     if (!this.node(parent) && this.node({ l, i: i % 2 ? i - 1 : i + 1 })) this.merges.set(key(parent), parent);
   }
-  /** Waits until every part of the view is built ('turn'), or every node ('tree'). As in the recipe, the view may run over budget until
-   * pending merges land. A 'turn' also stops waiting once everything pending has failed: it goes on with placeholders for the
-   * missing lines, `lastError` says why, and the failed nodes are still retried in the background.
+  /** A 'turn' waits until every part of the view is built, or until everything pending has failed: it then goes on with placeholders
+   * for the missing lines, `lastError` says why, and the failed nodes are still retried in the background. 'tree' waits for every
+   * node, through failures. As in the recipe, the view may run over budget until pending merges land.
    * 'ahead' (imports) waits until a new message's node would start at once. Due merges count too: messages go first, so a steady
    * stream of them would otherwise take every worker and the views could never merge. */
   async settle(signal?: AbortSignal, until: 'turn' | 'tree' | 'ahead' = 'turn'): Promise<void> {
