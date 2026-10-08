@@ -89,6 +89,7 @@ test('with Memory search on, a subagent gets the search tool and its prompt line
     const session = c.live(child)!.session;
     assert.ok(session.getActiveToolNames().includes('search'));
     assert.ok(session.systemPrompt.includes(SEARCH_DOC.trim()));
+    assert.match(session.systemPrompt, /zoom and search are your only\s+allowed mechanisms/);
   } finally { await close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -257,7 +258,7 @@ test('turning Previous exchange off also reaches a turn that a subagent report s
   }
 });
 
-test('Memory search turned on and off in /optchat settings adds and removes the tool and its prompt line, also for a report turn', async () => {
+test('Memory search turned on and off in /optchat settings adds and removes the tool and its prompt lines, also for a report turn', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'oc-search-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
@@ -286,18 +287,18 @@ test('Memory search turned on and off in /optchat settings adds and removes the 
     await session.bindExtensions({ uiContext: { ...session.extensionRunner.getUIContext(), custom }, mode: 'tui' });
     // Pi declares the tools on the leading system message, next to the prompt.
     const search = ({ messages: [system] }: Context) => system.role === 'system'
-      ? [!!system.toolsAdded?.some(t => t.name === 'search'), JSON.stringify(system.content).includes('search(text)')] : [];
+      ? [!!system.toolsAdded?.some(t => t.name === 'search'), JSON.stringify(system.content).includes('search(text)'), JSON.stringify(system.content).includes('zoom and search are')] : [];
     await session.prompt('Hello.');
-    assert.deepEqual(search(turns.at(-1)!), [false, false], 'off by default');
+    assert.deepEqual(search(turns.at(-1)!), [false, false, false], 'off by default');
     await session.prompt('/optchat settings');
     assert.equal(loadConfig(profilePath('fixture')).memorySearch, true);
     // A report turn started while idle skips before_agent_start, and still gets the change.
     await session.sendCustomMessage({ customType: REPORT_TYPE, content: '[8964a512] Done.', display: true }, { triggerTurn: true, deliverAs: 'steer' });
     await session.agent.waitForIdle();
-    assert.deepEqual(search(turns.at(-1)!), [true, true]);
+    assert.deepEqual(search(turns.at(-1)!), [true, true, true]);
     await session.prompt('/optchat settings');
     await session.prompt('Again.');
-    assert.deepEqual(search(turns.at(-1)!), [false, false]);
+    assert.deepEqual(search(turns.at(-1)!), [false, false, false]);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
