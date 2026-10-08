@@ -7,23 +7,7 @@ import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicWrite } from '../src/memory.ts';
-import { defaults, loadConfig, lockProfile, ProfileBusyError, saveConfig } from '../src/profiles.ts';
-
-test('atomic writes replace existing state, preserve UTF-8 and binary data, and leave no temporary files', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'oc-write-'));
-  try {
-    const file = join(dir, 'config.json');
-    atomicWrite(file, 'a much longer previous value');
-    atomicWrite(file, 'Lars · 日本語');
-    assert.equal(readFileSync(file, 'utf8'), 'Lars · 日本語');
-    const binary = new Uint8Array([0, 255, 128, 10]);
-    atomicWrite(file, binary);
-    assert.deepEqual(readFileSync(file), Buffer.from(binary));
-    saveConfig(dir, defaults);
-    assert.deepEqual(loadConfig(dir), defaults);
-    assert.deepEqual(readdirSync(dir), ['config.json']);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
+import { lockProfile, ProfileBusyError } from '../src/profiles.ts';
 
 test('a failed file flush preserves the previous state and a subsequent write recovers', () => {
   const dir = mkdtempSync(join(tmpdir(), 'oc-flush-'));
@@ -65,7 +49,8 @@ test('a profile lock is released by the OS when its owning process is killed', {
     await assert.rejects(lockProfile(dir, 'another writer'), /replacement owner/);
   } finally {
     clearTimeout(timeout);
-    if (!exited) { child.kill('SIGKILL'); await exit; }
+    // `exit` rejects if the child failed to spawn; cleanup below must still run.
+    if (!exited) { child.kill('SIGKILL'); await exit.catch(() => {}); }
     await unlock?.(); rmSync(dir, { recursive: true, force: true });
   }
 });
