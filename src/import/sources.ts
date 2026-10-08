@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
+import { getAgentDir, parseSkillBlock } from '@earendil-works/pi-coding-agent';
 import { record } from '../cache.ts';
 import { bytes, type Entry, type Kind, type Origin } from '../memory.ts';
 
@@ -15,7 +16,7 @@ export interface Conversation {
   source: Source; id: string; file: string; title: string; project: string; date: string; size: number;
   exported?: Record<string, unknown>;
 }
-export interface Scan { conversations: Conversation[]; warnings: string[] }
+export interface Scan { conversations: Conversation[]; warnings: string[]; note?: string }
 const exec = promisify(execFile);
 const string = (v: unknown) => typeof v === 'string' ? v : undefined;
 const codexSubagent = (metadata: Record<string, unknown>) => metadata.source === 'subagent'
@@ -65,17 +66,37 @@ const CODEX_EXACT = /^(?:<external_([^>]+)>[\s\S]*<\/external_\1>|<codex_interna
 /** What the user typed in a Codex message: every part except the context Codex injected. */
 const codexTyped = (content: unknown) => (Array.isArray(content) ? content : [content]).map(text)
   .filter(piece => piece && !CODEX_MARKED.test(piece.trim()) && !CODEX_EXACT.test(piece.trim())).join('\n');
-/** OMP logs reminders and nudges it injects as user messages attributed to the agent; the user typed everything else. */
-const ompTyped = (m: Record<string, unknown>) => m.role === 'user' && m.attribution !== 'agent' && m.synthetic !== true;
-/** OMP keeps sessions per profile: the default profile in ~/.omp/agent/sessions, others in ~/.omp/profiles/<name>/agent/sessions. */
-async function ompRoots(): Promise<string[]> {
+/**
+ * Pi and OMP write the same session format: an id/parentId tree in file order. OMP injects reminders and nudges as user
+ * messages it attributes to the agent; the user typed everything else.
+ */
+const piTyped = (m: Record<string, unknown>) => m.role === 'user' && m.attribution !== 'agent' && m.synthetic !== true;
+/** OptChat writes `optchat.*` entries into every session it runs; those messages are already in a profile's memory. */
+const optchatEntry = (v: Record<string, unknown>) => v.type === 'custom' && String(v.customType).startsWith('optchat.');
+/** Pi's sessions, then OMP's: its default profile in ~/.omp/agent/sessions, others in ~/.omp/profiles/<name>/agent/sessions. */
+async function piRoots(): Promise<string[]> {
   const profiles = join(homedir(), '.omp/profiles');
   const entries = await readdir(profiles, { withFileTypes: true }).catch(error => {
     if (missingSource(error)) return [];
     throw error;
   });
   const named = entries.filter(e => e.isDirectory()).map(e => join(profiles, e.name, 'agent/sessions')).sort();
-  return [join(homedir(), '.omp/agent/sessions'), ...named];
+  return [join(getAgentDir(), 'sessions'), join(homedir(), '.omp/agent/sessions'), ...named];
+}
+/** What the user typed for a Pi or OMP session message, or undefined for anything they did not type. */
+function piUserText(v: Record<string, unknown>): string | undefined {
+  // OMP records `/skill:name args` as its own message, holding the skill's body and what was typed after the name.
+  if (v.type === 'custom_message' && v.customType === 'skill-prompt' && v.attribution === 'user' && record(v.details) && typeof v.details.name === 'string')
+    return `/skill:${v.details.name} ${string(v.details.args) ?? ''}`.trimEnd();
+  const m = v.type === 'message' ? v.message : undefined;
+  if (!record(m)) return undefined;
+  // Pi expands `/skill:name args` into the skill's body followed by the args.
+  if (piTyped(m)) { const typed = text(m.content), skill = parseSkillBlock(typed); return skill ? `/skill:${skill.name} ${skill.userMessage ?? ''}`.trimEnd() : typed; }
+  // `!cmd` and `$code` the user ran (doubled when kept out of the model's context): the command as typed, never its output.
+  const twice = m.excludeFromContext === true;
+  if (m.role === 'bashExecution' && typeof m.command === 'string') return `${twice ? '!!' : '!'}${m.command}`;
+  if (m.role === 'pythonExecution' && typeof m.code === 'string') return `${twice ? '$$' : '$'}${m.code}`;
+  return undefined;
 }
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
 /**
@@ -95,7 +116,8 @@ function imported(c: Conversation, id: string, kind: Kind, content: string, date
   // The agent reads only text, so the id's first 13 characters stay in it: enough to find a Claude or Codex transcript by
   // glob. Codex ids are UUIDv7, whose first 8 characters are a coarse timestamp shared by many sessions.
   return { kind, date, origin, text: `[Historical ${c.source} · ${minute(date)} · ${c.id.slice(0, 13)} · ${c.title}]\n${content}`,
-    receipt: `import:${digest(JSON.stringify([c.source, c.id, id, kind, identity]))}` };
+    // A Pi or OMP fork copies the earlier entries, ids and dates included, into a new session, so the session id stays out.
+    receipt: `import:${digest(JSON.stringify(c.source === 'pi' ? [c.source, id, kind, date, identity] : [c.source, c.id, id, kind, identity]))}` };
 }
 async function* jsonLines(file: string, warnings: string[], limit = Infinity, signal?: AbortSignal) {
   const stream = createReadStream(file, { encoding: 'utf8', signal });
@@ -123,27 +145,29 @@ async function filesUnder(path: string, accept: (name: string) => boolean, signa
   }
   return files.sort();
 }
-export async function scanLocal(source: 'claude' | 'codex' | 'omp', roots?: string[], signal?: AbortSignal): Promise<Scan> {
+export async function scanLocal(source: 'claude' | 'codex' | 'pi', roots?: string[], signal?: AbortSignal): Promise<Scan> {
   const folders = roots ?? (source === 'claude' ? [join(homedir(), '.claude/projects')]
-    : source === 'omp' ? await ompRoots()
+    : source === 'pi' ? await piRoots()
     : [join(homedir(), '.codex/sessions'), join(homedir(), '.codex/archived_sessions')]);
   const conversations: Conversation[] = [], warnings: string[] = [];
+  let underOptChat = 0;
   // Claude workflow journals contain orchestration events, not conversation messages.
   for (const folder of folders) for (const file of await filesUnder(folder, n => n.endsWith('.jsonl') && !(source === 'claude' && n === 'journal.jsonl'), signal)) {
     signal?.throwIfAborted();
     // Import user conversations, not separate delegated runs (including Claude's older flat layout).
     if (source === 'claude' && (relative(folder, dirname(file)).split(/[\\/]/).includes('subagents') || basename(file).startsWith('agent-'))) continue;
     // OMP keeps a session's subagent and advisor logs in a folder named after the session, below the project folder.
-    if (source === 'omp' && relative(folder, file).split(/[\\/]/).length > 2) continue;
+    if (source === 'pi' && relative(folder, file).split(/[\\/]/).length > 2) continue;
     try {
       const info = await stat(file);
       let id = basename(file, '.jsonl'), project = dirname(file), date = info.mtime.toISOString(), title = '';
-      // OMP's own title: its first line is rewritten with the current one; older logs only have renames and the header.
-      let named = '', current = false;
+      // OMP's own title: a first line it rewrites on rename, else the header's.
+      let named = '';
       let sidechain = false;
-      for await (const { value: v, line } of jsonLines(file, warnings, source === 'claude' ? Infinity : 60, signal)) {
-        // Sidechain markers can appear late; picker metadata still comes from the first 60 lines.
+      for await (const { value: v, line } of jsonLines(file, warnings, source === 'codex' ? 60 : Infinity, signal)) {
+        // Sidechain and OptChat markers can appear late; picker metadata still comes from the first 60 lines.
         if (source === 'claude' && v.isSidechain === true) { sidechain = true; break; }
+        if (source === 'pi' && optchatEntry(v)) { sidechain = true; underOptChat++; break; }
         if (line > 60) continue;
         if (source === 'codex' && v.type === 'session_meta' && record(v.payload)) {
           if (codexSubagent(v.payload)) { sidechain = true; break; }
@@ -154,19 +178,17 @@ export async function scanLocal(source: 'claude' | 'codex' | 'omp', roots?: stri
           project = string(v.cwd) ?? project;
           if (v.type === 'custom-title' || v.type === 'ai-title') title = string(v.customTitle ?? v.aiTitle) ?? title;
         }
-        if (source === 'omp') {
-          if (v.type === 'title') { named = string(v.title) ?? named; current = true; }
-          else if (v.type === 'title_change' && !current) named = string(v.title) ?? named;
+        if (source === 'pi') {
+          if (v.type === 'title' && line === 1) named = string(v.title) ?? named;
           else if (v.type === 'session') {
             id = string(v.id) ?? id; project = string(v.cwd) ?? project; date = timestamp(v.timestamp, date);
             if (!named) named = string(v.title) ?? '';
           }
         }
-        const m = source === 'claude' ? v.message : source === 'omp' ? v.type === 'message' ? v.message : undefined
-          : v.type === 'response_item' ? v.payload : undefined;
-        const user = record(m) && m.role === 'user' && !title && (source !== 'omp' || ompTyped(m));
-        const first = !user ? '' : source === 'claude' ? claudeCommand(text(m.content)) ?? text(m.content)
-          : source === 'omp' ? text(m.content) : codexTyped(m.content);
+        const m = source === 'claude' ? v.message : v.type === 'response_item' ? v.payload : undefined;
+        const user = source === 'pi' || record(m) && m.role === 'user';
+        const first = !user || title ? '' : source === 'pi' ? piUserText(v) ?? '' : !record(m) ? ''
+          : source === 'claude' ? claudeCommand(text(m.content)) ?? text(m.content) : codexTyped(m.content);
         if (first.trim()) {
           title = first.replace(/\s+/g, ' ').slice(0, 110);
           date = timestamp(v.timestamp, date);
@@ -180,7 +202,8 @@ export async function scanLocal(source: 'claude' | 'codex' | 'omp', roots?: stri
       warnings.push(missingWarning(file));
     }
   }
-  return { conversations: conversations.sort((a, b) => b.date.localeCompare(a.date)), warnings };
+  return { conversations: conversations.sort((a, b) => b.date.localeCompare(a.date)), warnings,
+    note: underOptChat ? `${underOptChat} session${underOptChat === 1 ? '' : 's'} ran under OptChat and ${underOptChat === 1 ? 'is' : 'are'} already in a profile's memory; skipped.` : undefined };
 }
 export async function scanChatGPT(input: string, signal?: AbortSignal): Promise<Scan> {
   const path = resolve(input.startsWith('~/') ? join(homedir(), input.slice(2)) : input);
@@ -298,6 +321,21 @@ async function readMemory(c: Conversation, signal?: AbortSignal): Promise<{ entr
     receipt: `import:${digest(JSON.stringify([c.source, c.id, hash]))}` }] };
 }
 
+/** Entries of a Pi or OMP session that are not on the path from its last entry back to the root: branches left by a rewind. */
+async function rewound(file: string, signal?: AbortSignal): Promise<Set<string>> {
+  const parents = new Map<string, string | undefined>();
+  let leaf: string | undefined;
+  for await (const { value: v } of jsonLines(file, [], Infinity, signal)) {
+    const id = string(v.id);
+    if (v.type === 'session' || !id) continue;
+    parents.set(id, string(v.parentId)); leaf = id;
+  }
+  // Older logs without parent links are one straight line.
+  if (![...parents.values()].some(Boolean)) return new Set();
+  const path = new Set<string>();
+  for (let at = leaf; at && !path.has(at); at = parents.get(at)) path.add(at);
+  return new Set([...parents.keys()].filter(id => !path.has(id)));
+}
 export async function readConversation(c: Conversation, signal?: AbortSignal): Promise<{ entries: ImportedEntry[]; warnings: string[] }> {
   signal?.throwIfAborted();
   if (c.source === 'claude-memory') return readMemory(c, signal);
@@ -375,6 +413,7 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
       if (final) finish();
     };
     try {
+      const offPath = c.source === 'pi' ? await rewound(c.file, signal) : new Set<string>();
       for await (const { value: v, line } of jsonLines(c.file, warnings, Infinity, signal)) {
         const date = timestamp(v.timestamp, c.date);
         // Context replay and compaction scaffolding are not new user requests.
@@ -406,14 +445,15 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
             else if (!final) pending = [];
           }
         }
-        if (c.source === 'omp' && v.type === 'message' && record(v.message)) {
-          const m = v.message, id = string(v.id) ?? `line:${line}`;
-          if (ompTyped(m)) add(id, 'user', text(m.content), date);
-          // A `!command` the user ran: the command stays as typed and its output is dropped, as for Claude Code.
-          else if (m.role === 'bashExecution' && typeof m.command === 'string') add(id, 'user', `!${m.command}`, date);
-          // A turn's answer is the reply that stopped on its own. Replies that call tools, fail or are aborted are work in progress.
-          else if (m.role === 'assistant' && m.stopReason === 'stop' && Array.isArray(m.content)) m.content.forEach((block: unknown, index: number) => {
-            if (record(block) && block.type === 'text') add(`${id}:${index}`, 'talk', text(block), date);
+        if (c.source === 'pi') {
+          const id = string(v.id) ?? `line:${line}`, typed = piUserText(v), m = v.type === 'message' ? v.message : undefined;
+          // Off the path to the session's last entry: rewound, so kept for its intent but marked as not the outcome.
+          const mark = (content: string) => offPath.has(id) ? `[alternate branch]\n${content}` : content;
+          if (typed !== undefined) add(id, 'user', mark(typed), date, typed);
+          // A turn's answer is a reply that ended on its own and calls no tool. Any other reply is work in progress.
+          else if (record(m) && m.role === 'assistant' && (m.stopReason === 'stop' || m.stopReason === 'length') && Array.isArray(m.content)
+            && !m.content.some(block => record(block) && block.type === 'toolCall')) m.content.forEach((block: unknown, index: number) => {
+            if (record(block) && block.type === 'text') add(`${id}:${index}`, 'talk', mark(text(block)), date, text(block));
           });
         }
         if (c.source === 'codex' && v.type === 'session_meta' && record(v.payload) && codexSubagent(v.payload)) return { entries: [], warnings };

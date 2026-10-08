@@ -82,7 +82,7 @@ function when(a, b) {
   if (lo === hi) return day(x) + ', ' + time(x);
   return x.toDateString() === y.toDateString() ? day(x) + ', ' + time(x) + '–' + time(y) : day(x) + ' ' + time(x) + ' – ' + day(y) + ' ' + time(y);
 }
-const SOURCE = { claude: 'Claude Code', 'claude-memory': 'Claude Code memory', codex: 'Codex', omp: 'OMP', chatgpt: 'ChatGPT' };
+const SOURCE = { claude: 'Claude Code', 'claude-memory': 'Claude Code memory', codex: 'Codex', pi: 'Pi / OMP', chatgpt: 'ChatGPT' };
 // Imported text starts with a "[Historical …]" line for the model; the meta line already says it.
 const body = e => { const j = e.origin && e.text.startsWith('[Historical ') ? e.text.indexOf(']\n') : -1; return j < 0 ? e.text : e.text.slice(j + 2); };
 const short = (s, n) => { s = s.replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };

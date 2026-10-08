@@ -9,7 +9,7 @@ export const CAP = 30_000;
 export const PAGE = 25_000;
 export const KINDS = ['user', 'talk', 'tool', 'echo', 'note', 'work'] as const;
 export type Kind = typeof KINDS[number];
-export interface Origin { source: 'claude' | 'claude-memory' | 'codex' | 'omp' | 'chatgpt'; conversation: string; message: string; title: string; project?: string }
+export interface Origin { source: 'claude' | 'claude-memory' | 'codex' | 'pi' | 'chatgpt'; conversation: string; message: string; title: string; project?: string }
 export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin }
 export interface Part { l: number; i: number }
 export interface Summary extends Part { text: string; size: number }

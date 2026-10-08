@@ -10,10 +10,10 @@ type ImportUI = { ui: Pick<ExtensionUIContext, 'select' | 'input' | 'confirm' | 
 const clean = (s: string) => s.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
 const size = (n: number) => `${(n / 1_000_000).toFixed(1)} MB`;
 export async function chooseImport(ctx: ImportUI, profile: string, memory: Memory, model: string, signal: AbortSignal): Promise<{ entries: ImportedEntry[]; mode: ImportMode } | undefined> {
-  const sourceLabel = await ctx.ui.select(`Import into ${profile} · source`, ['Claude Code', 'Claude Code memories', 'Codex', 'OMP', 'ChatGPT export'], { signal });
+  const sourceLabel = await ctx.ui.select(`Import into ${profile} · source`, ['Claude Code', 'Claude Code memories', 'Codex', 'Pi / OMP', 'ChatGPT export'], { signal });
   if (!sourceLabel) return;
   const source: Source = sourceLabel === 'Claude Code' ? 'claude' : sourceLabel === 'Claude Code memories' ? 'claude-memory'
-    : sourceLabel === 'Codex' ? 'codex' : sourceLabel === 'OMP' ? 'omp' : 'chatgpt';
+    : sourceLabel === 'Codex' ? 'codex' : sourceLabel === 'Pi / OMP' ? 'pi' : 'chatgpt';
   const unit = source === 'claude-memory' ? 'memories' : 'conversations';
   ctx.ui.setWidget('optchat-import', ['Scanning local conversation metadata…']);
   let scan;
@@ -25,12 +25,12 @@ export async function chooseImport(ctx: ImportUI, profile: string, memory: Memor
     } else scan = source === 'claude-memory' ? await scanClaudeMemories(undefined, signal) : await scanLocal(source, undefined, signal);
   } finally { ctx.ui.setWidget('optchat-import', undefined); }
   let candidates = scan.conversations;
-  if (!candidates.length) throw new Error(`No ${unit} found for this source.${scan.warnings.length ? '\n' + scan.warnings.slice(0, 4).map(clean).join('\n') : ''}`);
+  if (!candidates.length) throw new Error(`No ${unit} found for this source.${[...scan.note ? [scan.note] : [], ...scan.warnings.slice(0, 4)].map(w => '\n' + clean(w)).join('')}`);
   if (source !== 'chatgpt') {
     const counts = new Map<string, number>();
     for (const c of candidates) counts.set(c.project, (counts.get(c.project) ?? 0) + 1);
     const projects = [...counts].sort(([a, x], [b, y]) => y - x || a.localeCompare(b)).map(([p]) => p);
-    const selected = await selectMany(ctx.ui, 'Projects', projects, p => `${p.startsWith(homedir() + '/') ? '~' + p.slice(homedir().length) : p} (${counts.get(p)} ${unit})`, signal);
+    const selected = await selectMany(ctx.ui, scan.note ? `Projects · ${scan.note}` : 'Projects', projects, p => `${p.startsWith(homedir() + '/') ? '~' + p.slice(homedir().length) : p} (${counts.get(p)} ${unit})`, signal);
     if (!selected) return;
     candidates = candidates.filter(c => selected.includes(c.project));
   }
