@@ -29,10 +29,20 @@ export function typedText(content: unknown) {
   const text = textContent(content, false);
   return { text, bare: text.replace(/\n\n\[Image[ :][^\n]*\](?:\n\[Image[ :][^\n]*\])*$/, '') };
 }
-/** Reports reach the model and the previous-exchange replay as the user messages they used to be; memory logs them as `work`. */
+/** Pi's convertToLlm sends every custom message to the model as a user message. A shown one is part of the chat, so it
+ * becomes a user message here too; another extension's starts with "[customType] ", as the recipe marks background work, so
+ * the compactor never takes it for the user's words. A hidden one (display false), such as context an extension injects
+ * each turn, stays custom: the model still sees it, and memory and the replay leave it out. Reports reach the model and the
+ * previous-exchange replay as user messages; memory logs them as `work`. */
 export function asUser(message: AgentMessage): AgentMessage {
-  if (message.role !== 'custom' || message.customType !== REPORT_TYPE) return message;
-  return { role: 'user', content: textContent(message.content), timestamp: message.timestamp };
+  if (message.role !== 'custom' || !message.display) return message;
+  const { content, customType, timestamp } = message;
+  if (customType === REPORT_TYPE) return { role: 'user', content, timestamp };
+  const tag = `[${customType}] `;
+  if (typeof content === 'string') return { role: 'user', content: tag + content, timestamp };
+  const [first, ...rest] = content;
+  if (first?.type === 'text') return { role: 'user', content: [{ ...first, text: tag + first.text }, ...rest], timestamp };
+  return { role: 'user', content: [{ type: 'text', text: tag.trimEnd() }, ...content], timestamp };
 }
 export function logMessage(memory: Memory, message: AgentMessage, receipt?: string) {
   const date = new Date(message.timestamp).toISOString();
@@ -82,7 +92,7 @@ export function previousExchange(branch: readonly SessionEntry[], limit = PREVIO
 function latestExchange(branch: readonly SessionEntry[]) {
   let end = -1;
   let legacyEnd = branch.length;
-  const messages = (entries: readonly SessionEntry[]) => entries.flatMap(entry => entry.type === 'message' ? [asUser(entry.message)] : entry.type === 'custom_message' && entry.customType === REPORT_TYPE ? [asUser({ role: 'custom', customType: entry.customType, content: entry.content, display: entry.display, timestamp: Date.parse(entry.timestamp) })] : []);
+  const messages = (entries: readonly SessionEntry[]) => entries.flatMap(entry => entry.type === 'message' ? [asUser(entry.message)] : entry.type === 'custom_message' ? [asUser({ role: 'custom', customType: entry.customType, content: entry.content, display: entry.display, timestamp: Date.parse(entry.timestamp) })] : []);
   for (let i = branch.length - 1; i >= 0; i--) {
     const entry = branch[i];
     if (entry.type !== 'custom' || entry.customType !== RUN_BOUNDARY || !record(entry.data)) continue;

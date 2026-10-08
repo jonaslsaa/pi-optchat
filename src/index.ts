@@ -13,7 +13,7 @@ import { MASTER, VIEW_DOC } from './prompts.ts';
 import { cachePayload, record } from './cache.ts';
 import { asUser, boundedMessage, buildContext, logMessage, previousExchange, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer, type ReportDetails } from './report-message.ts';
-import { memoryTools, result, SEARCH_DOC, searchTool } from './tools.ts';
+import { allowSearch, memoryTools, result, SEARCH_DOC, searchTool } from './tools.ts';
 import { Children, CWD_DOC, loadedBuiltins } from './agents.ts';
 import { exportBrowser } from './browser.ts';
 import { Inbox } from './inbox.ts';
@@ -36,7 +36,7 @@ const CONTINUITY = '\n\nFor conversational continuity, the memory view may be fo
 const toggle = (prompt: string, line: string, on: boolean, after: string) => on === prompt.includes(line) ? prompt : on ? prompt.replace(after, after + line) : prompt.replace(line, '');
 /** A report run while idle reuses the last built prompt, so Previous exchange and Memory search changes since then are applied here. */
 const promptFor = (prompt: string, { previousExchange, memorySearch }: ProfileConfig) =>
-  toggle(toggle(prompt, CONTINUITY, previousExchange, VIEW_DOC), SEARCH_DOC, memorySearch, previousExchange ? VIEW_DOC + CONTINUITY : VIEW_DOC);
+  allowSearch(toggle(toggle(prompt, CONTINUITY, previousExchange, VIEW_DOC), SEARCH_DOC, memorySearch, previousExchange ? VIEW_DOC + CONTINUITY : VIEW_DOC), memorySearch);
 interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
 export default function optchat(pi: ExtensionAPI) {
@@ -261,7 +261,7 @@ export default function optchat(pi: ExtensionAPI) {
     const a = required();
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
     syncSearch(a.config);
-    event.systemPromptOptions.customPrompt = `${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}${a.config.memorySearch ? SEARCH_DOC : ''}`;
+    event.systemPromptOptions.customPrompt = allowSearch(`${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}${a.config.memorySearch ? SEARCH_DOC : ''}`, a.config.memorySearch);
     event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
     prompt = event.systemPrompt;
   });
