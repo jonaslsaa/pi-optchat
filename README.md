@@ -21,7 +21,7 @@ pi install npm:pi-web-access   # optional, for web search and page fetching
 
 Or from GitHub: `pi install git:github.com/jonaslsaa/pi-optchat`.
 
-Requirements: Pi 1.0.2 or compatible, Node.js 22.19+, and Git. Tested on macOS; the offline tests also run on Linux.
+Requirements: Pi 1.0.2 or compatible, Node.js 22.19+, and Git. Tested on macOS; the offline tests also run on Linux and Windows.
 
 Web access is not bundled. Subagents load the Pi extensions you have installed (except pi-optchat itself), so installing `pi-web-access` gives web tools to the main agent and every subagent.
 
@@ -152,7 +152,7 @@ Guidance shows as queued until delivered, or undelivered if the child stops firs
 
 Pick the destination profile, then run `/optchat import`.
 
-1. **Source**: Claude Code (`~/.claude/projects`), Claude Code memories, Codex (`~/.codex/sessions`, `~/.codex/archived_sessions`), Pi / OMP (`~/.pi/agent/sessions`, `~/.omp/agent/sessions`, and each OMP profile's `~/.omp/profiles/<name>/agent/sessions`; both write the same session format), or a ChatGPT export (ZIP, folder, or `conversations.json`; ZIP needs `unzip`). Scanning is local and makes no model calls.
+1. **Source**: Claude Code (`~/.claude/projects`), Claude Code memories, Codex (`~/.codex/sessions`, `~/.codex/archived_sessions`), Pi / OMP (`~/.pi/agent/sessions`, `~/.omp/agent/sessions`, and each OMP profile's `~/.omp/profiles/<name>/agent/sessions`; both write the same session format), or a ChatGPT export (ZIP, folder, or `conversations.json`; a ZIP is read with `unzip` on macOS/Linux and the built-in `tar.exe` on Windows). Scanning is local and makes no model calls.
 2. **Select**: for Claude Code, its memories, Codex, and Pi / OMP, pick projects (busiest first), optionally filter by start date, then take all conversations or pick some. **Tab** toggles (and **Space** when the filter is empty), **Enter** continues, type to filter, **Ctrl+A**/**Ctrl+D** select/clear matches, **Esc** cancels. Nothing is classified as work or personal for you.
 3. **Mode** (only if the profile already has history):
    - **Append**: keep existing summaries and add the import. Faster and cheaper.
@@ -209,6 +209,16 @@ Profile data lives in `~/.optchat/profiles/<name>/` (override the root with `OPT
 Each profile folder is a local Git repository, committed after each turn and on clean shutdown (memory and config; not runs, HTML, or usage). It has no remote, so it is not a backup. To back up, copy the folder while Pi is closed.
 
 To delete a profile, delete its folder. Your original Pi sessions are kept in Pi's normal session directory.
+
+## Windows
+
+The same install and commands work on Windows, and the offline tests run there too. What differs:
+
+- **Named pipes, not socket files.** The profile lock and the connected-window bridge listen on `\\.\pipe\optchat-<hash>-lock` and `optchat-<hash>-windows`, where the hash comes from the profile path: a Windows pipe has no filesystem entry inside the profile, so the hash is the only thing separating profiles. Pipes are machine-wide and carry no file permissions, so a Windows profile is not permission-protected the way a POSIX socket file (mode 0600) is.
+- **ZIP exports** are read with Windows' own `tar.exe` (in System32 since Windows 10) instead of `unzip`; nothing is extracted to disk.
+- **Home paths.** `~` in a subagent task directory is your home directory; `~\project` is read as a home path only on Windows.
+- **File modes and fsync** (profile folder 0700, socket 0600, directory fsync after a rename) are POSIX-only and are skipped on Windows.
+- Files are opened with `explorer.exe` instead of `open` or `xdg-open`.
 
 ## Good to know
 

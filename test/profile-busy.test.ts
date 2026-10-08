@@ -1,13 +1,13 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { Memory } from '../src/memory.ts';
-import { createProfile, loadConfig, lockProfile, profilePath, profileSocket, saveConfig, SOCKET_PATH_LIMIT } from '../src/profiles.ts';
+import { checkSocketPath, createProfile, isWindows, loadConfig, lockProfile, profilePath, profileSocket, saveConfig, SOCKET_PATH_LIMIT } from '../src/profiles.ts';
 
 const agentDir = process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 after(() => rmSync(agentDir, { recursive: true, force: true }));
@@ -122,7 +122,8 @@ test('two Pis with different TMPDIRs still share one profile lock', async () => 
   }
 });
 
-test('a regular file named like the lock socket is refused, not deleted', async () => {
+test('a regular file named like the lock socket is refused, not deleted', async (t) => {
+  if (isWindows) return t.skip('a Windows pipe has no filesystem entry to be confused with a file');
   const dir = mkdtempSync(join(tmpdir(), 'optchat-lock-'));
   try {
     writeFileSync(profileSocket(dir), 'notes');
@@ -131,9 +132,27 @@ test('a regular file named like the lock socket is refused, not deleted', async 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('a socket path over the system limit names OPTCHAT_HOME and its length without binding a truncated socket, and one at the limit locks', async () => {
-  const root = mkdtempSync('/tmp/oc.');
+test('on Windows, another spelling of the same profile (casing or a junction) finds the same lock', async (t) => {
+  if (!isWindows) return t.skip('POSIX keeps the socket file inside the profile, so every spelling already reaches it');
+  const root = mkdtempSync(join(tmpdir(), 'optchat-alias-')), dir = join(root, 'Profile'), junction = join(root, 'link');
+  mkdirSync(dir); symlinkSync(dir, junction, 'junction');
+  const unlock = await lockProfile(dir, 'holder');
   try {
+    for (const alias of [dir.toUpperCase(), junction]) await assert.rejects(lockProfile(alias, 'second'), /Profile already running: holder/);
+  } finally { await unlock(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a socket path over the system limit names OPTCHAT_HOME and its length without binding a truncated socket, and one at the limit locks', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'optchat-limit-'));
+  try {
+    if (isWindows) {
+      // The pipe name is hashed from the profile path, so a long profile directory cannot overflow it; an over-long hand-built name is still refused before listen.
+      const long = join(root, 'p'.repeat(200)); mkdirSync(long);
+      const unlock = await lockProfile(long, 'holder'); await unlock();
+      assert.match(profileSocket(root), /^\\\\\.\\pipe\\optchat-[0-9a-f]{16}-lock$/);
+      assert.throws(() => checkSocketPath(`\\\\.\\pipe\\${'q'.repeat(251)}`), /OPTCHAT_HOME to a shorter directory/);
+      return;
+    }
     const fileLength = Buffer.byteLength(basename(profileSocket(root)));
     const profileOf = (socketLength: number) => { const dir = join(root, 'q'.repeat(socketLength - fileLength - 1 - root.length - 1)); mkdirSync(dir); return dir; };
     const atLimit = profileOf(SOCKET_PATH_LIMIT), overLimit = profileOf(SOCKET_PATH_LIMIT + 1), long = join(root, 'p'.repeat(200));

@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { execFileSync } from 'node:child_process';
+import { crc32, deflateRawSync } from 'node:zlib';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { Memory, bytes, localDay, type Compressor } from '../src/memory.ts';
 import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
@@ -98,7 +99,7 @@ test('Codex imports user messages and final answers once, excluding commentary, 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-const codexFixture = new URL('./fixtures/codex-rollout.jsonl', import.meta.url).pathname;
+const codexFixture = fileURLToPath(new URL('./fixtures/codex-rollout.jsonl', import.meta.url));
 const receipt = (...identity: unknown[]) => `import:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
 const body = (e: ImportedEntry) => e.text.slice(e.text.indexOf(']\n') + 2);
 
@@ -429,16 +430,57 @@ test('a selected transcript disappearing warns without importing it; cancellatio
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+/** The ZIP fixture, built as bytes (local headers, data, central directory, EOCD), so no `zip` binary is needed. `crc` overrides the real CRC-32 to fake corruption. */
+const zipArchive = (members: { name: string; data: Buffer; stored?: boolean; crc?: number }[]) => {
+  const parts: Buffer[] = [], central: Buffer[] = [];
+  let offset = 0;
+  for (const m of members) {
+    const method = m.stored ? 0 : 8, data = m.stored ? m.data : deflateRawSync(m.data), name = Buffer.from(m.name), crc = m.crc ?? crc32(m.data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(method, 8);
+    local.writeUInt32LE(crc, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(m.data.length, 22); local.writeUInt16LE(name.length, 26);
+    parts.push(local, name, data);
+    const record = Buffer.alloc(46);
+    record.writeUInt32LE(0x02014b50, 0); record.writeUInt16LE(20, 4); record.writeUInt16LE(20, 6); record.writeUInt16LE(method, 10);
+    record.writeUInt32LE(crc, 16); record.writeUInt32LE(data.length, 20); record.writeUInt32LE(m.data.length, 24);
+    record.writeUInt16LE(name.length, 28); record.writeUInt32LE(offset, 42);
+    central.push(record, name);
+    offset += 30 + name.length + data.length;
+  }
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(members.length, 8); eocd.writeUInt16LE(members.length, 10);
+  eocd.writeUInt32LE(central.reduce((n, r) => n + r.length, 0), 12); eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, ...central, eocd]);
+};
+const chatJson = (id: string, text: string) => Buffer.from(JSON.stringify([{ id, title: id, create_time: 100, mapping: {
+  u: { parent: null, message: { id: 'u', author: { role: 'user' }, create_time: 100, content: { parts: [text] } } } } }]));
+
 test('ChatGPT ZIP reads numbered conversation files without extracting other archive data', async () => {
   const dir = temp(), file = join(dir, 'conversations_1.json'), zip = join(dir, 'export.zip');
-  writeFileSync(file, JSON.stringify([{ id: 'zip-chat', title: 'ZIP fixture', create_time: 100, mapping: {
-    u: { parent: null, message: { id: 'u', author: { role: 'user' }, create_time: 100, content: { parts: ['zip fixture message'] } } },
-  } }]));
+  const data = chatJson('zip-chat', 'zip fixture message');
+  writeFileSync(file, data);
   try {
-    execFileSync('zip', ['-q', zip, 'conversations_1.json'], { cwd: dir }); rmSync(file);
+    writeFileSync(zip, zipArchive([{ name: 'conversations_1.json', data }, { name: 'notes.txt', data: Buffer.from('not a conversation') }]));
+    rmSync(file);
     const scan = await scanChatGPT(zip); assert.equal(scan.conversations.length, 1);
     const parsed = await readConversation(scan.conversations[0]); assert.equal(parsed.entries.length, 1);
     assert.match(parsed.entries[0].text, /zip fixture message/); assert.equal(existsSync(file), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a ChatGPT ZIP reads stored and deflated members, and refuses a corrupt member or a file that is not a ZIP', async () => {
+  const dir = temp(), zip = join(dir, 'export.zip'), corrupt = join(dir, 'corrupt.zip'), fake = join(dir, 'fake.zip');
+  const stored = chatJson('stored-chat', 'stored member message'), deflated = chatJson('deflated-chat', 'deflated member message');
+  writeFileSync(zip, zipArchive([{ name: 'conversations_1.json', data: stored, stored: true }, { name: 'export/conversations_2.json', data: deflated }]));
+  writeFileSync(corrupt, zipArchive([{ name: 'conversations.json', data: stored, crc: (crc32(stored) ^ 1) >>> 0 }]));
+  writeFileSync(fake, 'not a zip at all');
+  try {
+    const scan = await scanChatGPT(zip);
+    assert.deepEqual(scan.conversations.map(c => [c.id, c.file]).sort(), [[`deflated-chat`, `${zip}:export/conversations_2.json`], ['stored-chat', `${zip}:conversations_1.json`]]);
+    for (const c of scan.conversations) assert.deepEqual(c.exported, JSON.parse(String(c.id === 'stored-chat' ? stored : deflated))[0]);
+    await assert.rejects(scanChatGPT(corrupt), /Could not read conversations\.json in .*Extract the ZIP and select the folder instead\./);
+    // The tool's own reason, not just the file name unzip prints first.
+    await assert.rejects(scanChatGPT(fake), /Could not read .*fake\.zip: (?!\[)\S.*\. Extract the ZIP and select the folder instead\./);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -492,6 +534,12 @@ test('append activates only after complete indexing, retains original summaries,
     assert.match(activated.zoom(1, 1), /Imported one/);
     assert.deepEqual(deduplicate(activated.root, [entry('one')]), { added: [], skipped: 1 });
     assert.ok(existsSync(join(dir, 'main')));
+    // A second import starts from the generation the first one made, which the journal names as a portable path.
+    await activated.close();
+    prepareImport(dir, activated, [entry('two')], 'append');
+    await runImport(dir, short, AbortSignal.timeout(5000));
+    activated = new Memory(memoryDirectory(dir), short);
+    assert.deepEqual(activated.root.map(e => e.receipt).slice(1), ['import:one', 'import:two']);
   } finally { await old.close(); await activated?.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
