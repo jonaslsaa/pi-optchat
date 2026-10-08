@@ -512,6 +512,8 @@ for (const scenario of ['before-first-tick', 'after-reply', 'missing-transcript'
     });
     const close = await serveWindows(f.dir, f.children, () => true, async text => { f.reports.push(text); });
     const client = await connectWindow(f.dir, event => events.push(event), () => {});
+    // The server's connection handler runs on a later tick, so the mock must stay installed until it has captured the status timer.
+    await until(() => tick !== undefined);
     interval.mock.restore();
     try {
       await client.request('start', scenario === 'after-reply' ? 'Hello' : 'provider-failure', f.dir);

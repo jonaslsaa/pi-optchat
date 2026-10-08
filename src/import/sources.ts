@@ -208,6 +208,23 @@ export async function scanLocal(source: 'claude' | 'codex' | 'pi', roots?: strin
   return { conversations: conversations.sort((a, b) => b.date.localeCompare(a.date)), warnings,
     note: underOptChat ? `${underOptChat} session${underOptChat === 1 ? '' : 's'} ran under OptChat and ${underOptChat === 1 ? 'is' : 'are'} already in a profile's memory; skipped.` : undefined };
 }
+/**
+ * Lists a ZIP, or reads one member, with the system's own tool, which checks CRCs and handles ZIP64: `unzip` on macOS and
+ * Linux, and on Windows the bsdtar in System32 since Windows 10 (by full path, because Git's GNU tar on PATH can't read ZIP).
+ */
+async function unzip(zip: string, member?: string, signal?: AbortSignal) {
+  const windows = process.platform === 'win32';
+  const tool = windows ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe') : 'unzip';
+  const args = member === undefined ? (windows ? ['-tf', zip] : ['-Z1', zip]) : windows ? ['-xOf', zip, member] : ['-p', zip, member];
+  try { return (await exec(tool, args, { signal, maxBuffer: member === undefined ? 10_000_000 : 1_000_000_000, windowsHide: true })).stdout; }
+  catch (error) {
+    if (signal?.aborted || !record(error)) throw error;
+    // unzip opens with a `[file]` line and wraps its message, so keep the first sentence after it.
+    const said = string(error.stderr)?.split(/\r?\n/).filter(line => !line.trim().startsWith('[')).join(' ').replace(/\s+/g, ' ').trim();
+    const reason = error.code === 'ENOENT' ? `${tool} was not found` : said?.match(/^.*?[.!](?=\s|$)/)?.[0] ?? (said?.slice(0, 200) || String(error.message));
+    throw new Error(`Could not read ${member === undefined ? zip : `${member} in ${zip}`}: ${reason.replace(/[.!]$/, '')}. Extract the ZIP and select the folder instead.`);
+  }
+}
 export async function scanChatGPT(input: string, signal?: AbortSignal): Promise<Scan> {
   const path = resolve(input.startsWith('~/') ? join(homedir(), input.slice(2)) : input);
   const info = await stat(path);
@@ -216,11 +233,8 @@ export async function scanChatGPT(input: string, signal?: AbortSignal): Promise<
   if (info.isDirectory()) {
     for (const file of await filesUnder(path, accept, signal)) documents.push({ file, content: await readFile(file, { encoding: 'utf8', signal }) });
   } else if (path.toLowerCase().endsWith('.zip')) {
-    const listing = await exec('unzip', ['-Z1', path], { signal, maxBuffer: 10_000_000 });
-    for (const name of listing.stdout.split('\n').filter(accept)) {
-      const result = await exec('unzip', ['-p', path, name], { signal, maxBuffer: 1_000_000_000 });
-      documents.push({ file: `${path}:${name}`, content: result.stdout });
-    }
+    for (const name of (await unzip(path, undefined, signal)).split(/\r?\n/).filter(accept))
+      documents.push({ file: `${path}:${name}`, content: await unzip(path, name, signal) });
   } else documents.push({ file: path, content: await readFile(path, { encoding: 'utf8', signal }) });
   if (!documents.length) throw new Error('No conversations.json or numbered conversation JSON files found. Select a ChatGPT export ZIP, extracted folder, or JSON file.');
   const conversations: Conversation[] = [], warnings: string[] = [];

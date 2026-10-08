@@ -613,19 +613,20 @@ test('close() does not wait for a spawn that is still waiting for memory to be s
 
 test('a task cwd may start with ~ or be relative to the spawning agent; a missing one is refused', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-cwd-'));
-  const oldHome = process.env.HOME;
-  mkdirSync(join(dir, 'home', 'project'), { recursive: true });
+  // os.homedir() reads HOME on POSIX and USERPROFILE on Windows, so the test must point both at its sandbox.
+  const sandboxHome = join(dir, 'home'), saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  mkdirSync(join(sandboxHome, 'project'), { recursive: true });
   mkdirSync(join(dir, 'main', 'sub'), { recursive: true });
   const children = await quickChildren(dir);
   try {
-    process.env.HOME = join(dir, 'home');
+    process.env.HOME = process.env.USERPROFILE = sandboxHome;
     const [home, relative] = await children.spawn([{ task: 'home', cwd: '~/project' }, { task: 'relative', cwd: 'sub' }], join(dir, 'main'));
-    assert.equal(children.live(home)?.info.cwd, join(dir, 'home', 'project'));
+    assert.equal(children.live(home)?.info.cwd, join(sandboxHome, 'project'));
     assert.equal(children.live(relative)?.info.cwd, join(dir, 'main', 'sub'));
     await assert.rejects(children.spawn([{ task: 'typo', cwd: '~/projcet' }], join(dir, 'main')), /No such directory/);
     await until(() => !children.active);
   } finally {
-    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    for (const [name, value] of Object.entries(saved)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
     await children.close(); rmSync(dir, { recursive: true, force: true });
   }
 });

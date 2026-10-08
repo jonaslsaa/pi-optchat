@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, rmSync, cpSync, mkdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Memory, bytes, isEntry, type Entry, type Compressor } from '../memory.ts';
 import { atomicWrite } from '../memory.ts';
@@ -81,7 +81,7 @@ export function prepareImport(dir: string, old: Memory, incoming: readonly Impor
     // The old messages keep their ids, so their saved view (and its prompt cache) still holds.
     if (existsSync(join(old.directory, 'view.json'))) cpSync(join(old.directory, 'view.json'), join(path, 'view.json'));
   }
-  const job: ImportJob = { id, mode, previous: relative(dir, old.directory) || '.', target,
+  const job: ImportJob = { id, mode, previous: relative(dir, old.directory).split(sep).join('/') || '.', target,
     created: new Date().toISOString(), added: added.length, skipped, total: entries.length,
     inputBytes: (mode === 'rebuild' ? entries : added).reduce((n, e) => n + bytes(e.text), 0) };
   atomicWrite(pendingFile(dir), JSON.stringify(job, null, 2));
