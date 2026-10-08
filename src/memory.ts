@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
@@ -13,6 +13,7 @@ export interface Summary extends Part { text: string; size: number }
 export interface Compression { context: string; source: string; merge: boolean; historical?: boolean }
 export type Compressor = (input: Compression, signal: AbortSignal) => Promise<string>;
 const key = ({ l, i }: Part) => l * 2 ** 40 + i;
+const VIEW_FILE = 'view.json';
 const UNBUILT = '(not summarized yet: zoom it)';
 export const start = ({ l, i }: Part) => i * 2 ** l;
 export const end = (part: Part) => start(part) + 2 ** part.l;
@@ -72,6 +73,18 @@ function isSummary(value: unknown): value is Summary {
   return object(value) && Number.isSafeInteger(value.l) && Number.isSafeInteger(value.i)
     && typeof value.text === 'string';
 }
+/** Recipe §3.2: the sibling pair that ended longest ago, in units of its own line size, whose parent is built; the oldest of equal pairs.
+ * Measured from the pair's last message this makes exactly the merges of Taelin's rollback `push`; from its first, old lines churn. */
+export function mostDue(view: readonly Part[], total: number, built: (part: Part) => boolean) {
+  let best = -1, due = -Infinity;
+  for (let j = 0; j + 1 < view.length; j++) {
+    const a = view[j], b = view[j + 1];
+    if (a.l !== b.l || a.i % 2 || b.i !== a.i + 1) continue;
+    const age = (total - (end(b) - 1)) / 2 ** a.l;
+    if (age > due && built({ l: a.l + 1, i: a.i / 2 })) { best = j; due = age; }
+  }
+  return best;
+}
 
 /** The log is authoritative. The tree and monotonically coarsening view follow recipe §§2–6. */
 export class Memory {
@@ -85,6 +98,9 @@ export class Memory {
   private readonly reported = new Set<number>();
   private readonly lastSeenBytes = new Map<string, number>();
   private viewBytes = 0;
+  /** A batch merge is under way: it began when the view passed the budget and runs until the view is at most half of it. */
+  private shrinking = false;
+  private saved = '';
   private leaves = 0;
   /** Per level, every node below this index is built. */
   private readonly low: number[] = [];
@@ -110,8 +126,9 @@ export class Memory {
       if (value.l === 0 && !this.tree.has(key(value))) this.leaves++;
       this.tree.set(key(value), { ...value, size: lineBytes(value.text) });
     }
-    // Fold history in order; do not retile the entire log on each turn.
-    for (let i = 0; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
+    // The saved view is what the cache holds; a view rebuilt from the log differs from it. Profiles saved before view.json fold once.
+    if (!this.load()) this.extend(0);
+    this.save();
     this.schedule();
   }
   private checkLog(next: string) {
@@ -124,7 +141,7 @@ export class Memory {
     const file = join(this.directory, 'main', `${localDay()}.jsonl`);
     if (!this.lastSeenBytes.has(file)) this.checkLog(file);
     this.lastSeenBytes.set(file, appendJson(file, entry, this.lastSeenBytes.get(file) ?? 0));
-    this.root.push(entry); this.push(entry.i); this.fit(); this.schedule();
+    this.root.push(entry); this.push(entry.i); this.fit(); this.save(); this.schedule();
     return entry;
   }
   node(part: Part) { return this.tree.get(key(part)); }
@@ -153,21 +170,48 @@ export class Memory {
     }
   }
   private visible(part: Part) { const p = this.covering(start(part)); return p?.l === part.l && p.i === part.i; }
+  /** Folds messages `from` on into the view, in order, as if each had just arrived. */
+  private extend(from: number) { for (let i = from; i < this.root.length; i++) { this.push(i); this.fit(i + 1); } }
+  /** Uses view.json if it still tiles the start of the log in order with built merged lines; the messages after it are folded in. */
+  private load() {
+    let saved: unknown;
+    try { saved = JSON.parse(readFileSync(join(this.directory, VIEW_FILE), 'utf8')); } catch { return false; }
+    if (!object(saved) || !Array.isArray(saved.view)) return false;
+    const parts: Part[] = [];
+    for (const pair of saved.view) {
+      if (!Array.isArray(pair) || pair.length !== 2 || !pair.every(n => Number.isSafeInteger(n) && n >= 0)) return false;
+      const part = { l: pair[0], i: pair[1] }, at = parts.length ? end(parts[parts.length - 1]) : 0;
+      if (start(part) !== at || end(part) > this.root.length || (part.l > 0 && !this.node(part))) return false;
+      parts.push(part);
+    }
+    for (const part of parts) { this.view.push(part); this.viewBytes += this.partBytes(part); }
+    this.shrinking = saved.shrinking === true;
+    this.extend(parts.length ? end(parts[parts.length - 1]) : 0);
+    return true;
+  }
+  private save() {
+    const text = JSON.stringify({ view: this.view.map(p => [p.l, p.i]), shrinking: this.shrinking });
+    if (text === this.saved || this.stopped) return;
+    // Losing it only costs one cache rewrite: a missing or stale file is rebuilt from the log.
+    try {
+      const file = join(this.directory, VIEW_FILE);
+      writeFileSync(`${file}.tmp`, text, { mode: 0o600 }); renameSync(`${file}.tmp`, file);
+      this.saved = text;
+    } catch (error) { this.warn(`Could not save ${VIEW_FILE}: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+  /** Recipe §3.2: a new message only appends its line. Past the budget, one batch merges the most due pairs down to half of it,
+   * so between batches the view only grows at its end and stays in the prompt cache. Pairs whose parent isn't built yet wait for later fits. */
   private fit(total = this.root.length) {
-    while (this.viewBytes > this.budget) {
-      let best = -1; let due = -Infinity;
-      for (let j = 0; j + 1 < this.view.length; j++) {
-        const a = this.view[j], b = this.view[j + 1];
-        if (a.l !== b.l || a.i % 2 || b.i !== a.i + 1) continue;
-        const age = (total - start(a)) / 2 ** (a.l + 2);
-        if (age > due && this.node({ l: a.l + 1, i: a.i / 2 })) { best = j; due = age; }
-      }
+    if (this.viewBytes > this.budget) this.shrinking = true;
+    while (this.shrinking && this.viewBytes > this.budget / 2) {
+      const best = mostDue(this.view, total, part => !!this.node(part));
       if (best < 0) break;
       const a = this.view[best], b = this.view[best + 1];
       const parent = { l: a.l + 1, i: a.i / 2 };
       this.viewBytes += this.partBytes(parent) - this.partBytes(a) - this.partBytes(b);
       this.view.splice(best, 2, parent);
     }
+    if (this.viewBytes <= this.budget / 2) this.shrinking = false;
     const owed = this.owed();
     this.peak = owed > 0 ? Math.max(this.peak, owed) : 0;
     this.events.emit('change');
@@ -224,7 +268,7 @@ export class Memory {
     // A leaf is usually still in the view when built, but after a damaged tree file a saved parent can already hide it.
     if (part.l === 0) { this.leaves++; if (this.visible(part)) this.viewBytes += node.size - UNBUILT_BYTES; }
     if (!this.retryAt.size) this.lastError = undefined;
-    this.fit();
+    this.fit(); this.save();
   }
   /** Waits until every part of the view is built. As in the recipe, the view may run over budget until pending merges land. */
   async settle(signal?: AbortSignal, all = false): Promise<void> {

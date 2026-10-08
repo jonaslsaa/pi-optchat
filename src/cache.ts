@@ -4,20 +4,23 @@ export function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Stable, line-aligned cuts from recipe §8. Text is preserved byte for byte. */
+const BLOCK = 4;
+/** Recipe §3.3: the view goes in blocks of 4 lines, then the rest (its unfinished block and `</chat>`). Text is preserved byte for byte.
+ * Anthropic looks back about 20 blocks from a mark for an earlier entry, so the next call finds this call's mark. */
 export function splitView(text: string) {
+  const close = text.lastIndexOf('\n</chat>');
   const pieces: string[] = [];
-  let offset = 0;
-  for (const mark of [50_000, 80_000, 100_000]) {
-    if (mark >= text.length) break;
-    const cut = text.lastIndexOf('\n', mark) + 1;
-    if (cut > offset) { pieces.push(text.slice(offset, cut)); offset = cut; }
+  for (let offset = 0, at = 0, lines = 0; ;) {
+    const next = text.indexOf('\n', at);
+    if (next < 0 || next >= close) { pieces.push(text.slice(offset)); return pieces; }
+    at = next + 1;
+    if (++lines % BLOCK === 0) { pieces.push(text.slice(offset, at)); offset = at; }
   }
-  pieces.push(text.slice(offset));
-  return pieces;
 }
+/** The view up to its last whole block: the prefix a call caches and the next call reads. */
+export const cachedPrefix = (pieces: readonly string[]) => pieces.slice(0, -1).join('');
 
-/** Anthropic: three stable view marks plus automatic end-of-request caching. */
+/** Anthropic: one mark on the view's last whole block plus automatic end-of-request caching. */
 export function cachePayload(payload: unknown): unknown {
   if (!record(payload) || !Array.isArray(payload.messages)) return payload;
   const messages = payload.messages;
@@ -27,7 +30,7 @@ export function cachePayload(payload: unknown): unknown {
     const at = message.content.findIndex((block: unknown) => record(block) && block.type === 'text' && typeof block.text === 'string' && isView(block.text));
     if (at < 0) continue;
     const pieces = splitView(message.content[at].text);
-    const blocks = pieces.map((text, j) => ({ type: 'text', text, ...(j < pieces.length - 1 ? { cache_control: { type: 'ephemeral' } } : {}) }));
+    const blocks = pieces.map((text, j) => ({ type: 'text', text, ...(j === pieces.length - 2 ? { cache_control: { type: 'ephemeral' } } : {}) }));
     message.content.splice(at, 1, ...blocks);
     for (const block of blocks) view.add(block);
     break;

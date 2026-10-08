@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Memory, appendJson, cap, CAP, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
+import { Memory, appendJson, cap, CAP, start, end, bytes, localDay, mostDue, type Compression, type Part } from '../src/memory.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload } from '../src/cache.ts';
 import { logMessage, buildContext, boundedMessage } from '../src/transcript.ts';
@@ -207,18 +207,27 @@ test('a live profile cannot be opened by a second writer; other profiles can run
   const again = await lockProfile(dir, 'after close'); await again(); rmSync(dir, { recursive: true, force: true });
 });
 
-test('stable cache cuts preserve every character and cap marks at four', () => {
+test('the view is cut in 4-line blocks, byte for byte, with one mark on the last whole block and one on the request end', () => {
   const line = '0+1|summary of a decision\n';
   for (const quoted of [false, true]) {
+    // 1 + 2000 + quoted + 3500 lines before </chat>: the last whole block ends 1 or 2 lines before it.
     const view = '<chat>\n' + line.repeat(2000) + (quoted ? '0+1|the summary quotes </chat> in passing\n' : '') + line.repeat(3500) + '</chat>';
-    assert.equal(splitView(view).join(''), view);
+    const pieces = splitView(view);
+    assert.equal(pieces.join(''), view);
+    assert.ok(pieces.slice(0, -1).every(piece => piece.split('\n').length === 5), 'every piece but the last is 4 whole lines');
+    assert.equal(pieces.at(-1), line.repeat(quoted ? 2 : 1) + '</chat>');
     const payload = { system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: [{ type: 'text', text: view }, { type: 'text', text: 'new question', cache_control: { type: 'ephemeral' } }] }],
     };
-    const output = JSON.stringify(cachePayload(payload));
-    assert.equal((output.match(/cache_control/g) ?? []).length, 4, quoted ? 'a quoted closing tag keeps all marks' : 'plain view');
+    const output = cachePayload(payload) as { cache_control?: unknown; messages: { content: { text: string; cache_control?: unknown }[] }[] };
+    const marked = output.messages[0].content.flatMap((block, j) => block.cache_control ? [j] : []);
+    assert.deepEqual(marked, [pieces.length - 2]);
+    assert.ok(output.cache_control, 'the request end is marked');
     assert.equal(payload.messages[0].content.map(b => b.text).join(''), view + 'new question');
   }
+  // A view that grows by a line keeps every earlier block, so the last call's mark is a block boundary of the next call.
+  const grown = splitView('<chat>\n' + line.repeat(10) + '</chat>'), next = splitView('<chat>\n' + line.repeat(12) + '</chat>');
+  assert.deepEqual(next.slice(0, grown.length - 1), grown.slice(0, -1));
 });
 
 test('next turn excludes old conversation; current tool loop and reasoning remain verbatim', async () => {
@@ -501,5 +510,82 @@ test('view size counts the flattened text that render emits, for new and reloade
     await memory.close();
     memory = new Memory(dir, async () => 'x');
     assert.equal(memory.size, measured(memory), 'loaded from the tree');
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+/** Taelin's rollback `push` (recipe §3.1), newest first; returns the start of each state, oldest first. */
+function pushStarts(t: number, states: { keep: number; state: number; older: unknown } | null): { keep: number; state: number; older: unknown } {
+  if (states === null) return { keep: 0, state: t, older: null };
+  return states.keep === 0 ? { ...states, keep: 1 } : { keep: 0, state: t, older: pushStarts(states.state, states.older as typeof states | null) };
+}
+test('with push\'s list length as the budget, the most due merges make exactly the view of Taelin\'s rollback push', () => {
+  let states: ReturnType<typeof pushStarts> | null = null;
+  const view: Part[] = [];
+  for (let t = 0; t <= 5000; t++) {
+    states = pushStarts(t, states);
+    const starts: number[] = [];
+    for (let s: typeof states | null = states; s; s = s.older as typeof states | null) starts.unshift(s.state);
+    view.push({ l: 0, i: t });
+    while (view.length > starts.length) {
+      const best = mostDue(view, t + 1, () => true);
+      const a = view[best];
+      view.splice(best, 2, { l: a.l + 1, i: a.i / 2 });
+    }
+    assert.deepEqual(view.map(start), starts, `t=${t}`);
+  }
+});
+
+test('the view only grows at its end until it passes the budget, then one batch merges it to at most half', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-sawtooth-'));
+  // 100-byte messages are their own lines; merges are 100 bytes too.
+  const memory = new Memory(dir, async () => 'm'.repeat(100), () => {}, 4000);
+  try {
+    let before = '', batches = 0;
+    for (let i = 0; i < 400; i++) {
+      memory.append('user', String(i).padEnd(94, '.'));
+      await memory.settle(AbortSignal.timeout(5000), true);
+      const after = memory.render().replace(/<\/chat>$/, '');
+      // At most half, counting the newest line as unbuilt if the batch ran before it was summarized.
+      if (before && !after.startsWith(before)) { batches++; assert.ok(memory.size <= 2100, `after a batch at ${i}: ${memory.size}`); }
+      assert.ok(memory.size <= 4000);
+      before = after;
+    }
+    // 20 lines of headroom per batch at first, fewer as merged lines take room: far from a rewrite per message.
+    assert.ok(batches > 0 && batches < 40, `${batches} batches`);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the saved view is restored as it was, a stale one is extended, and an invalid one is rebuilt from the log', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-saved-view-'));
+  // 300-byte lines: two of them are too long to keep verbatim, so every merged line is 300 bytes too.
+  const compress = async () => 's'.repeat(300), file = join(dir, 'view.json');
+  const pairs = (memory: Memory) => memory.view.map(p => [p.l, p.i]);
+  let memory = new Memory(dir, compress, () => {}, 6000);
+  try {
+    for (let i = 0; i < 64; i++) memory.append('user', `${i} ${'detail '.repeat(90)}`);
+    await memory.settle(AbortSignal.timeout(5000), true);
+    const live = pairs(memory);
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).view, live);
+    await memory.close();
+    memory = new Memory(dir, compress, () => {}, 6000);
+    assert.deepEqual(pairs(memory), live, 'reopened as saved');
+    await memory.close();
+    // Any tiling with built merged lines is taken as is, even one that a rebuild would never produce.
+    writeFileSync(file, JSON.stringify({ view: [[5, 0], [4, 2], [0, 48]] }));
+    memory = new Memory(dir, compress, () => {}, 6000);
+    assert.deepEqual(pairs(memory).slice(0, 3), [[5, 0], [4, 2], [0, 48]]);
+    assert.deepEqual(pairs(memory).slice(3).map(([, i]) => i), Array.from({ length: 15 }, (_, k) => 49 + k), 'later messages appended as leaves');
+    await memory.close();
+    rmSync(file);
+    memory = new Memory(dir, compress, () => {}, 6000);
+    const rebuilt = pairs(memory);
+    await memory.close();
+    for (const damaged of ['{', '[[0,0]]', JSON.stringify({ view: [[0, 1]] }), JSON.stringify({ view: [[6, 0], [0, 64]] }),
+      JSON.stringify({ view: [[0, 0], [7, 0]] }), JSON.stringify({ view: [[0, 0.5]] })]) {
+      writeFileSync(file, damaged);
+      memory = new Memory(dir, compress, () => {}, 6000);
+      assert.deepEqual(pairs(memory), rebuilt, damaged);
+      await memory.close();
+    }
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });

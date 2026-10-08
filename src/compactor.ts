@@ -3,7 +3,7 @@ import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { COMPACT } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
-import { cachePayload, splitView } from './cache.ts';
+import { cachePayload, cachedPrefix, splitView } from './cache.ts';
 import { IMPORT_GUIDANCE } from './import/guidance.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
 
@@ -18,11 +18,13 @@ export const reasoningFor = (model: Model<Api>, level: ThinkingLevel) => {
 export const SCALE = 'note: How OptChat memory works. Each message becomes a leaf line: a short message is its own line, a longer one is compressed to about 512 bytes. Adjacent lines merge in pairs into a binary tree: two lines into one line covering both, two of those into one covering four, and so on. The view shows recent messages one per line and older ones more per line, within a fixed byte budget. zoom(id, n) opens line id+n into the two lines it was made from, down to the original message; date(id) tells when it was sent.';
 const WARM_MS = 4 * 60_000; // Anthropic's short cache lives 5 minutes from its last use.
 
-/** Parallel calls can't read a cache entry that isn't written yet, so one call primes a cold prefix and the rest wait until it answers. */
+/** Parallel calls can't read a cache entry that isn't written yet, so one call primes a cold prefix and the rest wait until it answers.
+ * Parallel compactions end their views at different messages, so a call also waits for a primer of a shorter prefix of its own view. */
 function primeFirst() {
   const warm = new Map<string, number | Promise<void>>();
   return async (prefix: string, signal: AbortSignal) => {
-    for (let state = warm.get(prefix); state !== undefined; state = warm.get(prefix)) {
+    const priming = () => { for (const [k, state] of warm) if (typeof state !== 'number' && prefix.startsWith(k)) return state; };
+    for (let state = warm.get(prefix) ?? priming(); state !== undefined; state = warm.get(prefix) ?? priming()) {
       if (typeof state === 'number') { if (Date.now() - state < WARM_MS) break; warm.delete(prefix); continue; }
       // A cancelled waiter leaves at once instead of waiting for someone else's primer.
       signal.throwIfAborted();
@@ -56,7 +58,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}For scale only, here is an example line, not from this chat; it is exactly 512 bytes and is never part of your input or your line:\n<example>${SCALE}</example>\n\n${input.merge ? 'Merge these two lines into one' : 'Compress this message into one line'}, in at most 512 bytes:\n<input>\n${input.source}\n</input>`;
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
     const view = splitView(input.context);
-    const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
+    const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${cachedPrefix(view)}` : undefined;
     const tries: string[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
       const warmed = prefix ? await gate(prefix, signal) : () => {};
