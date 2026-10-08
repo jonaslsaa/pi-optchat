@@ -93,10 +93,10 @@ function piUserText(v: Record<string, unknown>): string | undefined {
   if (!record(m)) return undefined;
   // Pi expands `/skill:name args` into the skill's body followed by the args.
   if (piTyped(m)) { const typed = text(m.content), skill = parseSkillBlock(typed); return skill ? `/skill:${skill.name} ${skill.userMessage ?? ''}`.trimEnd() : typed; }
-  // `!cmd` and `$code` the user ran (doubled when kept out of the model's context): the command as typed, never its output.
-  const twice = m.excludeFromContext === true;
-  if (m.role === 'bashExecution' && typeof m.command === 'string') return `${twice ? '!!' : '!'}${m.command}`;
-  if (m.role === 'pythonExecution' && typeof m.code === 'string') return `${twice ? '$$' : '$'}${m.code}`;
+  // `!cmd` and `$code` the user ran: the command as typed, never its output. `!!` and `$$` kept them from the model, so they stay out.
+  if (m.excludeFromContext === true) return undefined;
+  if (m.role === 'bashExecution' && typeof m.command === 'string') return `!${m.command}`;
+  if (m.role === 'pythonExecution' && typeof m.code === 'string') return `$${m.code}`;
   return undefined;
 }
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');

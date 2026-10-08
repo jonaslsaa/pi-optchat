@@ -246,7 +246,7 @@ test('Pi / OMP imports what the user typed and the replies that ended a turn, an
     const parsed = await readConversation(conversation('pi', file));
     assert.deepEqual(parsed.entries.map(e => [e.kind, body(e)]), [
       ['user', 'exact user question'], ['talk', 'final answer'],
-      ['user', '[alternate branch]\n!git status'], ['user', '[alternate branch]\n!!cat .env'], ['user', '[alternate branch]\n$print(1)'],
+      ['user', '[alternate branch]\n!git status'], ['user', '[alternate branch]\n$print(1)'],
       ['user', '[alternate branch]\n/skill:grill-me one question at a time'], ['user', '[alternate branch]\nfirst read this, then /skill:grill-me the plan'],
       ['user', '[alternate branch]\n/skill:review check the PR'],
       ['user', '[alternate branch]\nwhy are you adding redis? I just wanted the refactor'],
