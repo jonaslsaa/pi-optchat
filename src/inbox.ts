@@ -22,14 +22,10 @@ export class Inbox {
   }
   private save() { atomicWrite(this.file, JSON.stringify(this.items)); }
   record(text: string, queued = false) {
-    // Sending a handed-back input again is still one input: a second copy would never be claimed and be recovered as a duplicate.
-    let id = this.items.find(i => !this.claimed.has(i.id) && i.text === text)?.id;
-    if (!id) {
-      const item = { id: randomUUID(), text, date: new Date().toISOString() };
-      this.items.push(item); this.save(); id = item.id;
-    }
-    if (queued) this.queued.add(id); else this.queued.delete(id);
-    return id;
+    const item = { id: randomUUID(), text, date: new Date().toISOString() };
+    this.items.push(item); this.save();
+    if (queued) this.queued.add(item.id);
+    return item.id;
   }
   /** Call once a run settles: Pi has delivered everything it still held, so a queued input nobody claimed went back to the editor. */
   dropReturned() {
