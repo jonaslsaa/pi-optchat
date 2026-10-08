@@ -5,6 +5,9 @@ export const SEARCH_PAGE = 20;
 const SNIPPET = 200;
 /** Added after the view doc when Memory search is on. */
 export const SEARCH_DOC = '\n\nsearch(text) finds the original messages that contain text, newest first. Use it for an exact name, number, PR, path or error the view doesn\'t show, then zoom(id, 1) to read a hit. A hit is one message: zoom around it too, especially the messages after it, where the outcome usually is.';
+const ZOOM_ONLY = 'zoom is your only\nallowed mechanism ', ZOOM_AND_SEARCH = 'zoom and search are your only\nallowed mechanisms ';
+/** With Memory search on, the view doc allows search next to zoom; also turns a built prompt either way. */
+export const allowSearch = (prompt: string, on: boolean) => on ? prompt.replace(ZOOM_ONLY, ZOOM_AND_SEARCH) : prompt.replace(ZOOM_AND_SEARCH, ZOOM_ONLY);
 
 /** One page of hits, each with its id, the view line holding it, its date and a snippet around the first match; at most ~5 KB. */
 export function searchPage(memory: Memory, text: string, before?: number) {

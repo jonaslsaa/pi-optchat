@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Memory, appendJson, cap, CAP, start, end, bytes, localDay, type Compression } from '../src/memory.ts';
+import { Memory, appendJson, cap, CAP, start, end, bytes, localDay, mostDue, type Compression, type Part } from '../src/memory.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload } from '../src/cache.ts';
 import { logMessage, buildContext, boundedMessage } from '../src/transcript.ts';
@@ -207,18 +207,119 @@ test('a live profile cannot be opened by a second writer; other profiles can run
   const again = await lockProfile(dir, 'after close'); await again(); rmSync(dir, { recursive: true, force: true });
 });
 
-test('stable cache cuts preserve every character and cap marks at four', () => {
+test('the view goes in blocks of 4 lines, with marks on its last whole block, 20 and 40 blocks before it, and at the request\'s end', () => {
   const line = '0+1|summary of a decision\n';
   for (const quoted of [false, true]) {
     const view = '<chat>\n' + line.repeat(2000) + (quoted ? '0+1|the summary quotes </chat> in passing\n' : '') + line.repeat(3500) + '</chat>';
-    assert.equal(splitView(view).join(''), view);
-    const payload = { system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
+    const pieces = splitView(view);
+    assert.equal(pieces.join(''), view);
+    assert.ok(pieces.slice(0, -1).every(piece => piece.split('\n').length === 5), 'every block but the last holds 4 lines');
+    assert.deepEqual(splitView(view.replace(/<\/chat>$/, line.repeat(3) + '</chat>')).slice(0, pieces.length - 1), pieces.slice(0, -1),
+      'a view that grows at its end keeps every whole block');
+    const payload = { system: [{ type: 'text', text: 'identity', cache_control: { type: 'ephemeral' } }, { type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
+      tools: [{ name: 'zoom', cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: [{ type: 'text', text: view }, { type: 'text', text: 'new question', cache_control: { type: 'ephemeral' } }] }],
     };
-    const output = JSON.stringify(cachePayload(payload));
-    assert.equal((output.match(/cache_control/g) ?? []).length, 4, quoted ? 'a quoted closing tag keeps all marks' : 'plain view');
-    assert.equal(payload.messages[0].content.map(b => b.text).join(''), view + 'new question');
+    const output = cachePayload(payload) as typeof payload & { cache_control?: unknown };
+    assert.equal((JSON.stringify(output).match(/cache_control/g) ?? []).length, 4, quoted ? 'a quoted closing tag keeps the marks' : 'plain view');
+    assert.ok(output.system.every(b => !('cache_control' in b)) && !('cache_control' in output.tools[0]));
+    const blocks = output.messages[0].content;
+    assert.deepEqual(blocks.flatMap((b, j) => 'cache_control' in b ? [j] : []), [pieces.length - 42, pieces.length - 22, pieces.length - 2]);
+    assert.ok(output.cache_control);
+    assert.equal(blocks.map(b => b.text).join(''), view + 'new question');
   }
+});
+
+test('after a turn adds up to 60 blocks of lines, a mark of the next call still finds one of the last call\'s within 20 blocks', () => {
+  const line = '0+1|summary of a decision\n', marks = (lines: number) => {
+    const payload = { messages: [{ role: 'user', content: [{ type: 'text', text: '<chat>\n' + line.repeat(lines) + '</chat>' }] }] };
+    return (cachePayload(payload) as typeof payload).messages[0].content.flatMap((b, j) => 'cache_control' in b ? [j] : []);
+  };
+  const found = (added: number) => marks(1000 + added).some(next => marks(1000).some(last => next >= last && next - last <= 20));
+  assert.ok([4, 100, 240].every(found), 'a turn that adds 1, 25 or 60 blocks');
+  assert.ok(!found(400), 'beyond 60 blocks the last entry is out of reach');
+});
+
+test('the most due pair is the one that ended longest ago in its own line size, so the view merges as Taelin\'s rollback push', () => {
+  // Recipe §3.2: at T=10 the old rule, measured from a pair's first message, merged 0-7; push merges 8-9.
+  assert.equal(mostDue([{ l: 2, i: 0 }, { l: 2, i: 1 }, { l: 0, i: 8 }, { l: 0, i: 9 }], 10, () => true), 2);
+  assert.equal(mostDue([{ l: 2, i: 0 }, { l: 2, i: 1 }, { l: 0, i: 8 }, { l: 0, i: 9 }], 10, part => part.l !== 1), 0, 'a pair whose parent is unbuilt waits');
+  type States = { keep: number, state: number, older: States } | null;
+  const push = (state: number, states: States): States => !states ? { keep: 0, state, older: null }
+    : !states.keep ? { ...states, keep: 1 } : { keep: 0, state, older: push(states.state, states.older) };
+  let states: States = null;
+  const view: Part[] = [];
+  for (let t = 0; t <= 4096; t++) {
+    states = push(t, states);
+    const starts: number[] = [];
+    for (let s = states; s; s = s.older) starts.unshift(s.state);
+    view.push({ l: 0, i: t });
+    while (view.length > starts.length) {
+      const j = mostDue(view, t + 1, () => true), a = view[j];
+      view.splice(j, 2, { l: a.l + 1, i: a.i / 2 });
+    }
+    assert.deepEqual(view.map(start), starts, `step ${t}`);
+  }
+});
+
+test('the view merges in one batch from its budget down to half, and between batches only grows at its end', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-batch-'));
+  const memory = new Memory(dir, async () => 's'.repeat(300), () => {}, 6000);
+  try {
+    let previous: Part[] = [], batches = 0;
+    for (let i = 0; i < 120; i++) {
+      memory.append('user', `${i} ${'.'.repeat(600)}`);
+      await memory.settle(AbortSignal.timeout(5000), true);
+      const kept = previous.every((part, j) => memory.view[j].l === part.l && memory.view[j].i === part.i);
+      if (!kept) { batches++; assert.ok(memory.size <= 3000, `a batch ends at half the budget, not at ${memory.size}`); }
+      else assert.equal(memory.view.length, previous.length + 1, 'otherwise the new message only appends its line');
+      assert.ok(memory.size <= 6000);
+      previous = [...memory.view];
+    }
+    assert.ok(batches >= 5 && batches <= 15, `${batches} batches over 120 messages`);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the view is saved and loaded as it was, and rebuilt only when the saved one no longer tiles the log', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-saved-view-'));
+  const compress = async () => 's'.repeat(300), parts = (memory: Memory) => memory.view.map(p => [p.l, p.i]);
+  let memory = new Memory(dir, compress, () => {}, 3000);
+  try {
+    for (let i = 0; i < 16; i++) { memory.append('user', `${i} ${'.'.repeat(600)}`); await memory.settle(AbortSignal.timeout(5000), true); }
+    const live = parts(memory);
+    await memory.close();
+    memory = new Memory(dir, compress, () => {}, 3000);
+    assert.deepEqual(parts(memory), live, 'the saved view plus a line per later message is the live view');
+    await memory.close();
+    // A view the fold would not produce, but a valid tiling: loading keeps it rather than refolding.
+    const saved = [[3, 0], [2, 2], [0, 12], [0, 13], [0, 14], [0, 15]];
+    writeFileSync(join(dir, 'view.json'), JSON.stringify(saved));
+    memory = new Memory(dir, compress, () => {}, 3000);
+    assert.deepEqual(parts(memory), saved);
+    memory.append('user', 'one more');
+    assert.deepEqual(parts(memory), [...saved, [0, 16]]);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'view.json'), 'utf8')), saved, 'a line added without a merge is not saved');
+    await memory.close();
+    const warnings: string[] = [];
+    writeFileSync(join(dir, 'view.json'), JSON.stringify([[0, 0], [0, 2]]));
+    memory = new Memory(dir, compress, text => warnings.push(text), 3000);
+    assert.match(warnings.join('\n'), /Rebuilt the memory view/);
+    assert.equal(start(memory.view[0]), 0); assert.equal(end(memory.view.at(-1)!), 17);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'view.json'), 'utf8')), parts(memory));
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a view that cannot be saved only warns, since the log stays authoritative', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-unsaved-view-')), warnings: string[] = [];
+  mkdirSync(join(dir, 'view.json'), { recursive: true });
+  const memory = new Memory(dir, async () => 's'.repeat(300), text => warnings.push(text), 3000);
+  try {
+    for (let i = 0; i < 16; i++) { memory.append('user', `${i} ${'.'.repeat(600)}`); await memory.settle(AbortSignal.timeout(5000), true); }
+    assert.equal(memory.root.length, 16);
+    assert.ok(memory.view.some(p => p.l > 0), 'the view merged');
+    assert.match(warnings.join('\n'), /Could not save the memory view/);
+    assert.equal(memory.lastError, undefined);
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('next turn excludes old conversation; current tool loop and reasoning remain verbatim', async () => {

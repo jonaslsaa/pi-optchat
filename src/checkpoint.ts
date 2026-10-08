@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { atomicWrite } from './profiles.ts';
+import { atomicWrite } from './memory.ts';
 const exec = promisify(execFile);
 
 export async function checkpoint(directory: string) {

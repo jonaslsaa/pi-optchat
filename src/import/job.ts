@@ -2,7 +2,7 @@ import { existsSync, readFileSync, rmSync, cpSync, mkdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Memory, bytes, isEntry, type Entry, type Compressor } from '../memory.ts';
-import { atomicWrite } from '../profiles.ts';
+import { atomicWrite } from '../memory.ts';
 import { record } from '../cache.ts';
 import { copyKey, type ImportedEntry } from './sources.ts';
 
@@ -76,7 +76,11 @@ export function prepareImport(dir: string, old: Memory, incoming: readonly Impor
   for (const sub of ['main', 'tree']) mkdirSync(join(path, sub), { recursive: true, mode: 0o700 });
   if (kept) atomicWrite(join(path, 'main', '000-import.jsonl'), entries.slice(0, kept).map(e => JSON.stringify(e)).join('\n') + '\n');
   atomicWrite(join(path, STAGED), entries.map(e => JSON.stringify(e)).join('\n') + '\n');
-  if (mode === 'append') cpSync(join(old.directory, 'tree'), join(path, 'tree'), { recursive: true });
+  if (mode === 'append') {
+    cpSync(join(old.directory, 'tree'), join(path, 'tree'), { recursive: true });
+    // The old messages keep their ids, so their saved view (and its prompt cache) still holds.
+    if (existsSync(join(old.directory, 'view.json'))) cpSync(join(old.directory, 'view.json'), join(path, 'view.json'));
+  }
   const job: ImportJob = { id, mode, previous: relative(dir, old.directory) || '.', target,
     created: new Date().toISOString(), added: added.length, skipped, total: entries.length,
     inputBytes: (mode === 'rebuild' ? entries : added).reduce((n, e) => n + bytes(e.text), 0) };

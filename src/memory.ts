@@ -1,5 +1,5 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, writeSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 
 export const NODE = 512;
@@ -7,7 +7,8 @@ export const VIEW = 128_000;
 export const CAP = 30_000;
 /** The most characters one zoom into a message returns, so a page stays under the tool output CAP instead of losing its middle. */
 export const PAGE = 25_000;
-export type Kind = 'user' | 'talk' | 'tool' | 'echo' | 'note';
+export const KINDS = ['user', 'talk', 'tool', 'echo', 'note', 'work'] as const;
+export type Kind = typeof KINDS[number];
 export interface Origin { source: 'claude' | 'claude-memory' | 'codex' | 'chatgpt'; conversation: string; message: string; title: string; project?: string }
 export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin }
 export interface Part { l: number; i: number }
@@ -34,6 +35,28 @@ export function cap(text: string, limit = CAP) {
 }
 export function localDay(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+export function atomicWrite(file: string, text: string) {
+  mkdirSync(resolve(file, '..'), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${process.pid}.tmp`;
+  writeFileSync(temporary, text, { mode: 0o600 });
+  const fd = openSync(temporary, 'r');
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+  renameSync(temporary, file);
+  const parent = openSync(resolve(file, '..'), 'r');
+  try { fsyncSync(parent); } finally { closeSync(parent); }
+}
+/** The index of the view's most due pair of sibling lines whose parent is built, or -1 (recipe §3.2). A pair is as due as
+ * long ago it ended, in its own line size; equal pairs go oldest first. This is the order of Taelin's rollback push. */
+export function mostDue(view: readonly Part[], total: number, built: (part: Part) => boolean) {
+  let best = -1, due = -Infinity;
+  for (let j = 0; j + 1 < view.length; j++) {
+    const a = view[j], b = view[j + 1];
+    if (a.l !== b.l || a.i % 2 || b.i !== a.i + 1) continue;
+    const age = (total - (end(b) - 1)) / 2 ** a.l;
+    if (age > due && built({ l: a.l + 1, i: a.i / 2 })) { best = j; due = age; }
+  }
+  return best;
 }
 const otherWriter = (file: string) => new Error(`Another process wrote ${file}. Close every other Pi on this profile and restart Pi; nothing was written.`);
 /** With `size`, refuses to append unless the file still has that size. A last line left without its newline is ended first. Returns the new size. */
@@ -67,7 +90,7 @@ function object(value: unknown): value is Record<string, unknown> {
 }
 export function isEntry(value: unknown): value is Entry {
   return object(value) && Number.isSafeInteger(value.i) && typeof value.kind === 'string'
-    && ['user', 'talk', 'tool', 'echo', 'note'].includes(value.kind)
+    && KINDS.some(kind => kind === value.kind)
     && typeof value.text === 'string' && typeof value.date === 'string';
 }
 function isSummary(value: unknown): value is Summary {
@@ -75,7 +98,8 @@ function isSummary(value: unknown): value is Summary {
     && typeof value.text === 'string';
 }
 
-/** The log is authoritative. The tree and monotonically coarsening view follow recipe §§2–6. */
+/** The log is authoritative. The tree and the view follow the recipe: the view grows a line per message and, once it passes
+ * `budget`, merges its most due pairs in one batch down to half of it, so between batches it only grows at its end. */
 export class Memory {
   readonly root: Entry[] = [];
   readonly tree = new Map<number, Summary>();
@@ -95,6 +119,8 @@ export class Memory {
   private peak = 0;
   private scheduled = false;
   private stopped = false;
+  /** A batch is under way: it ends once the view is down to half the budget, merging what it can at each change until then. */
+  private merging = false;
   lastError?: string;
 
   constructor(readonly directory: string, private readonly compress: Compressor,
@@ -112,9 +138,9 @@ export class Memory {
       if (value.l === 0 && !this.tree.has(key(value))) this.leaves++;
       this.tree.set(key(value), { ...value, size: lineBytes(value.text) });
     }
-    // Fold history in order; do not retile the entire log on each turn.
-    for (let i = 0; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
-    this.schedule();
+    // Refolding the log gives a different view than the live one, and every cache entry would miss, so the view is saved.
+    for (let i = this.load(); i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
+    this.save(); this.schedule();
   }
   private checkLog(next: string) {
     const main = dirname(next), names = readdirSync(main).filter(n => n.endsWith('.jsonl'));
@@ -126,12 +152,38 @@ export class Memory {
     const file = join(this.directory, 'main', `${localDay()}.jsonl`);
     if (!this.lastSeenBytes.has(file)) this.checkLog(file);
     this.lastSeenBytes.set(file, appendJson(file, entry, this.lastSeenBytes.get(file) ?? 0));
-    this.root.push(entry); this.push(entry.i); this.fit(); this.schedule();
+    this.root.push(entry); this.push(entry.i); if (this.fit()) this.save(); this.schedule();
     return entry;
   }
   node(part: Part) { return this.tree.get(key(part)); }
   private text(part: Part) { return this.node(part)?.text ?? UNBUILT; }
   private partBytes(part: Part) { return this.node(part)?.size ?? UNBUILT_BYTES; }
+  /** Takes the saved view if it still tiles the log from the start, and returns how many messages it covers. */
+  private load() {
+    const file = join(this.directory, 'view.json');
+    if (!existsSync(file)) return 0;
+    const rebuild = () => { this.warn(`Rebuilt the memory view: ${file} does not match the log.`); return 0; };
+    let saved: unknown;
+    try { saved = JSON.parse(readFileSync(file, 'utf8')); } catch { return rebuild(); }
+    if (!Array.isArray(saved)) return rebuild();
+    const parts: Part[] = [];
+    let covered = 0;
+    for (const value of saved) {
+      const [l, i] = Array.isArray(value) ? value : [];
+      const part = { l, i };
+      if (!Number.isSafeInteger(l) || !Number.isSafeInteger(i) || l < 0 || start(part) !== covered || end(part) > this.root.length || (l > 0 && !this.node(part)))
+        return rebuild();
+      parts.push(part); covered = end(part);
+    }
+    for (const part of parts) { this.view.push(part); this.viewBytes += this.partBytes(part); }
+    return covered;
+  }
+  /** Saved when it merges: a view that only grew is the saved one plus a line per later message, as `load` replays it.
+   * The log stays authoritative, so a failed save only warns. */
+  private save() {
+    try { atomicWrite(join(this.directory, 'view.json'), JSON.stringify(this.view.map(p => [p.l, p.i]))); }
+    catch (error) { this.warn(`Could not save the memory view: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   private push(i: number) { const part = { l: 0, i }; this.view.push(part); this.viewBytes += this.partBytes(part); }
   render() { return `${VIEW_OPEN}${this.view.map(p => `${start(p)}+${2 ** p.l}|${flat(this.text(p))}`).join('\n')}\n</chat>`; }
   get ready() { return this.view.every(p => this.node(p)); }
@@ -155,24 +207,24 @@ export class Memory {
     }
   }
   private visible(part: Part) { const p = this.covering(start(part)); return p?.l === part.l && p.i === part.i; }
+  /** Returns whether any lines merged. */
   private fit(total = this.root.length) {
-    while (this.viewBytes > this.budget) {
-      let best = -1; let due = -Infinity;
-      for (let j = 0; j + 1 < this.view.length; j++) {
-        const a = this.view[j], b = this.view[j + 1];
-        if (a.l !== b.l || a.i % 2 || b.i !== a.i + 1) continue;
-        const age = (total - start(a)) / 2 ** (a.l + 2);
-        if (age > due && this.node({ l: a.l + 1, i: a.i / 2 })) { best = j; due = age; }
-      }
+    let merged = false;
+    if (this.viewBytes > this.budget) this.merging = true;
+    while (this.merging && this.viewBytes > this.budget / 2) {
+      const best = mostDue(this.view, total, part => !!this.node(part));
       if (best < 0) break;
+      merged = true;
       const a = this.view[best], b = this.view[best + 1];
       const parent = { l: a.l + 1, i: a.i / 2 };
       this.viewBytes += this.partBytes(parent) - this.partBytes(a) - this.partBytes(b);
       this.view.splice(best, 2, parent);
     }
+    if (this.viewBytes <= this.budget / 2) this.merging = false;
     const owed = this.owed();
     this.peak = owed > 0 ? Math.max(this.peak, owed) : 0;
     this.events.emit('change');
+    return merged;
   }
   private schedule() {
     if (this.scheduled || this.stopped) return;
@@ -226,7 +278,7 @@ export class Memory {
     // A leaf is usually still in the view when built, but after a damaged tree file a saved parent can already hide it.
     if (part.l === 0) { this.leaves++; if (this.visible(part)) this.viewBytes += node.size - UNBUILT_BYTES; }
     if (!this.retryAt.size) this.lastError = undefined;
-    this.fit();
+    if (this.fit()) this.save();
   }
   /** Waits until every part of the view is built. As in the recipe, the view may run over budget until pending merges land. */
   async settle(signal?: AbortSignal, all = false): Promise<void> {
