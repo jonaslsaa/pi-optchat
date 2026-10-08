@@ -16,23 +16,20 @@ function sandbox() {
   };
 }
 
-for (const stage of ['config', 'instructions'] as const) {
-  test(`failed ${stage} write leaves no profile and the same name can be retried`, () => {
-    const cleanup = sandbox(), failure = new Error(`injected ${stage} fsync failure`);
+for (const file of ['config.json', 'AGENTS.md']) {
+  test(`failed ${file} write leaves no profile and the same name can be retried`, () => {
+    const cleanup = sandbox(), failure = new Error(`injected ${file} write failure`);
     try {
-      const original = fs.fsyncSync;
-      // Unix also syncs the directory after each file; Windows only syncs the file.
-      const failAt = stage === 'config' ? 1 : process.platform === 'win32' ? 2 : 3;
-      let calls = 0;
-      const flush = mock.method(fs, 'fsyncSync', (fd: number) => {
-        if (++calls === failAt) throw failure;
-        return original(fd);
+      const original = fs.renameSync;
+      const rename = mock.method(fs, 'renameSync', (from: fs.PathLike, to: fs.PathLike) => {
+        if (String(to).endsWith(file)) throw failure;
+        return original(from, to);
       });
       syncBuiltinESMExports();
       assert.throws(() => createProfile('retry'), error => error === failure);
       assert.ok(!fs.existsSync(profilePath('retry')));
       assert.deepEqual(listProfiles(), []);
-      flush.mock.restore(); syncBuiltinESMExports();
+      rename.mock.restore(); syncBuiltinESMExports();
       createProfile('retry');
       assert.deepEqual(loadConfig(profilePath('retry')), defaults);
       assert.match(instructions(profilePath('retry')), /This is the retry profile/);

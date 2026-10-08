@@ -34,8 +34,8 @@ export function createProfile(name: string) {
     saveConfig(dir, defaults);
     atomicWrite(join(dir, 'AGENTS.md'), `# ${name}\n\nThis is the ${name} profile.\nAdd your personal instructions here.\n`);
   } catch (error) {
-    try { rmSync(dir, { recursive: true, force: true }); }
-    catch (cleanupError) { throw new AggregateError([error, cleanupError], `Failed to create profile ${name} and remove its incomplete directory: ${dir}`); }
+    try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); }
+    catch { throw new Error(`Failed to create profile ${name}, and could not remove its incomplete directory: ${dir}`, { cause: error }); }
     throw error;
   }
 }
