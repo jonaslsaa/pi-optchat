@@ -163,12 +163,14 @@ export async function scanLocal(source: 'claude' | 'codex' | 'pi', roots?: strin
       const info = await stat(file);
       let id = basename(file, '.jsonl'), project = dirname(file), date = info.mtime.toISOString(), title = '';
       // OMP's own title: a first line it rewrites on rename, else the header's.
-      let named = '';
+      let named = '', renamed = '';
       let sidechain = false;
       for await (const { value: v, line } of jsonLines(file, warnings, source === 'codex' ? 60 : Infinity, signal)) {
         // Sidechain and OptChat markers can appear late; picker metadata still comes from the first 60 lines.
         if (source === 'claude' && v.isSidechain === true) { sidechain = true; break; }
         if (source === 'pi' && optchatEntry(v)) { sidechain = true; underOptChat++; break; }
+        // Pi's `/name` can come at any point; the latest wins.
+        if (source === 'pi' && v.type === 'session_info') renamed = string(v.name)?.trim() || renamed;
         if (line > 60) continue;
         if (source === 'codex' && v.type === 'session_meta' && record(v.payload)) {
           if (codexSubagent(v.payload)) { sidechain = true; break; }
@@ -196,7 +198,7 @@ export async function scanLocal(source: 'claude' | 'codex' | 'pi', roots?: strin
         }
       }
       if (sidechain) continue;
-      conversations.push({ source, file, id, project, date, title: named || title || id, size: info.size });
+      conversations.push({ source, file, id, project, date, title: renamed || named || title || id, size: info.size });
     } catch (error) {
       signal?.throwIfAborted();
       if (!missingSource(error)) throw error;

@@ -278,6 +278,8 @@ test('Pi / OMP discovery skips sessions that ran under OptChat and the subagent 
   lines(join(project, `${stem}.jsonl`), [{ type: 'title', v: 1, title: 'Current title' }, { type: 'session', version: 3, id: 'alpha', timestamp: date, cwd: '/work/alpha', title: 'Header title' }, typed('first request')]);
   piSession(join(project, 'beta.jsonl'), { id: 'beta', cwd: '/work/beta', title: 'Header title' }, [typed('typed request')]);
   piSession(join(project, 'gamma.jsonl'), { id: 'gamma', cwd: '/work/gamma' }, [typed('reminder', 'agent'), typed('typed request')]);
+  piSession(join(project, 'delta.jsonl'), { id: 'delta', cwd: '/work/delta' }, [typed('typed request'), ...Array.from({ length: 70 }, (_, i) => typed(`message ${i}`)),
+    { type: 'session_info', id: 'n1', name: 'First name' }, { type: 'session_info', id: 'n2', name: 'Named in Pi' }]);
   piSession(join(project, stem, 'Scout.jsonl'), { id: 'child' }, [typed('delegated task')]);
   // OptChat binds its profile when the session starts, or later in a session that began without it.
   piSession(join(project, 'optchat.jsonl'), { id: 'optchat' }, [...Array.from({ length: 80 }, (_, i) => typed(`message ${i}`)),
@@ -285,7 +287,7 @@ test('Pi / OMP discovery skips sessions that ran under OptChat and the subagent 
   try {
     const scan = await scanLocal('pi', [root]);
     assert.deepEqual(scan.conversations.map(c => [c.id, c.project, c.title]).sort(), [
-      ['alpha', '/work/alpha', 'Current title'], ['beta', '/work/beta', 'Header title'], ['gamma', '/work/gamma', 'typed request']]);
+      ['alpha', '/work/alpha', 'Current title'], ['beta', '/work/beta', 'Header title'], ['delta', '/work/delta', 'Named in Pi'], ['gamma', '/work/gamma', 'typed request']]);
     assert.ok(scan.conversations.every(c => c.date === '2026-01-02T12:05:00.000Z'), 'the start is the first message the user typed');
     assert.match(scan.note ?? '', /^1 session ran under OptChat/);
     assert.deepEqual(scan.warnings, []);
