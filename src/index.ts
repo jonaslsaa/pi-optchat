@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
@@ -25,13 +25,22 @@ import { UsageLedger } from './usage.ts';
 import { oneLine, showInspector, type InspectorPage } from './inspector.ts';
 import { showAgentView } from './agent-view.ts';
 import { inspectorShortcut, mountNavigation } from './navigation.ts';
-import { serveWindows } from './window-bridge.ts';
+import { joinHeadless, serveWindows } from './window-bridge.ts';
 import { openConnectedWindow, registerConnectedRenderer } from './connected-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
 import { showModelPicker, showSettings } from './settings-page.ts';
 
 const binding = 'optchat.profile';
+const CONNECT_MODES = ['auto', 'join', 'off'] as const;
+/** Print mode routes `process.stdout` to stderr so only the answer reaches stdout; the joined reply goes to fd 1 itself. */
+async function printReply(text: string) {
+  const bytes = Buffer.from(`${text}\n`);
+  for (let at = 0; at < bytes.length;) {
+    try { at += writeSync(1, bytes, at); }
+    catch (error) { if (!record(error) || error.code !== 'EAGAIN') throw error; await new Promise(resolve => setTimeout(resolve, 10)); }
+  }
+}
 const CONTINUITY = '\n\nFor conversational continuity, the memory view may be followed by the immediately preceding completed exchange (its user requests and final answer, in full text; left out when very long), then the new input. Use that exact wording to understand follow-ups; older exchanges and previous tool output remain accessible through memory and zoom.';
 const toggle = (prompt: string, line: string, on: boolean, after: string) => on === prompt.includes(line) ? prompt : on ? prompt.replace(after, after + line) : prompt.replace(line, '');
 /** A report run while idle reuses the last built prompt, so Previous exchange and Memory search changes since then are applied here. */
@@ -42,6 +51,8 @@ interface Active { name: string; dir: string; config: ProfileConfig; memory: Mem
 export default function optchat(pi: ExtensionAPI) {
   let active: Active | undefined;
   let remote: Awaited<ReturnType<typeof openConnectedWindow>> | undefined;
+  /** `pi -p` on a profile another Pi owns: the prompt goes to a subagent in that Pi (--optchat-connect). */
+  let joined: Awaited<ReturnType<typeof joinHeadless>> | undefined;
   let closeWindows: (() => Promise<void>) | undefined;
   let recovery: Promise<void> | undefined;
   let run: AgentMessage[] = [];
@@ -74,6 +85,15 @@ export default function optchat(pi: ExtensionAPI) {
     typeof s === 'string' || record(s) && typeof s.text === 'string' && (s.count === undefined || typeof s.count === 'number');
   const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
   pi.registerFlag('optchat-profile', { description: 'OptChat profile (required for noninteractive sessions without a saved binding)', type: 'string' });
+  pi.registerFlag('optchat-connect', { description: 'pi -p on a profile open in another Pi: auto (join it if busy, default), join (only join), off (error if busy)', type: 'string', default: 'auto' });
+  const connectMode = () => {
+    const mode = pi.getFlag('optchat-connect') ?? 'auto';
+    const known = CONNECT_MODES.find(m => m === mode);
+    if (!known) { process.exitCode = 1; throw new Error(`--optchat-connect must be ${CONNECT_MODES.join(', ')}; got ${String(mode)}`); }
+    return known;
+  };
+  /** Pi exits 0 after an extension error; a pipeline must see a failed join. */
+  const joinProfile = (name: string) => joinHeadless(profilePath(name)).catch((error: unknown) => { process.exitCode = 1; throw error; });
   const required = () => { if (!active) throw new Error('Choose an OptChat profile first: /optchat profile'); return active; };
   const status = (ctx: ExtensionContext) => {
     const a = active;
@@ -115,7 +135,7 @@ export default function optchat(pi: ExtensionAPI) {
     saveReports();
   };
   const stop = async () => {
-    remote?.close(); remote = undefined;
+    remote?.close(); remote = undefined; joined?.close(); joined = undefined;
     inspectorController?.abort(); unmountNavigation?.(); unmountNavigation = undefined;
     stopping = true; importController?.abort(); await importTask?.catch(() => {});
     if (!active) return;
@@ -206,10 +226,17 @@ export default function optchat(pi: ExtensionAPI) {
     try {
       if (boundName && typeof flag === 'string' && flag !== boundName) throw new Error(`Session belongs to ${boundName}; cannot resume it as ${flag}.`);
       let name = boundName ?? (typeof flag === 'string' ? flag : await chooseProfile(ctx));
+      // Only plain `pi -p` joins: JSON and RPC output carry Pi's own events, which a joined reply would bypass.
+      const connect = ctx.mode === 'print' ? connectMode() : 'off';
+      if (connect === 'join' && !name) { process.exitCode = 1; throw new Error('--optchat-connect join needs a profile: pass --optchat-profile'); }
       for (;;) {
         if (!name) { status(ctx); return; }
-        try { await openProfile(name, ctx); break; }
-        catch (error) {
+        try {
+          if (connect === 'join') joined = await joinProfile(name);
+          else await openProfile(name, ctx);
+          break;
+        } catch (error) {
+          if (error instanceof ProfileBusyError && connect === 'auto') { joined = await joinProfile(name); break; }
           if (!(error instanceof ProfileBusyError) || ctx.mode !== 'tui') throw error;
           // A resumed conversation already belongs to this profile, so another profile needs a new session (/optchat profile).
           const choice = await ctx.ui.select(`${name} is open in another window\n${error.owner}`, settled ? [CONNECT] : [CONNECT, BACK]);
@@ -234,6 +261,13 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('session_before_switch', () => remote || importing || active?.children.active ? { cancel: true } : undefined);
   pi.on('session_before_fork', () => remote || importing || active?.children.active ? { cancel: true } : undefined);
   pi.on('input', async (event, ctx) => {
+    if (joined) {
+      try {
+        if (event.images?.length) throw new Error('Joining a running profile accepts text only; provide a file path for the agent to read.');
+        await printReply(await joined.ask(event.text, ctx.cwd));
+      } catch (error) { process.stderr.write(`OptChat: ${errorText(error)}\n`); process.exitCode = 1; }
+      return { action: 'handled' };
+    }
     if (remote) {
       try {
         if (event.images?.length) throw new Error('Connected windows currently accept text only; provide a file path for the agent to read.');

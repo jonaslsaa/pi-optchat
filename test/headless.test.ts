@@ -25,7 +25,7 @@ for (const name of ['work', 'personal']) {
 rememberProfile('personal');
 
 /** A headless Pi (print or RPC) whose model answers "OK to: <prompt>" and records what each call was sent. */
-async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?: string } = {}) {
+async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?: string; connect?: string } = {}) {
   const dir = mkdtempSync(join(root, 's-'));
   const sent: string[] = [], errors: string[] = [];
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
@@ -50,6 +50,7 @@ async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?:
   if (options.bound) manager.appendCustomEntry('optchat.profile', { name: options.bound });
   const { session } = await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: [] });
   if (options.flag) session.extensionRunner.setFlagValue('optchat-profile', options.flag);
+  if (options.connect) session.extensionRunner.setFlagValue('optchat-connect', options.connect);
   // RPC hosts have a real UI, but a dialog there can hang the host (pi-acp), so any select fails the test.
   const uiContext: ExtensionUIContext = { ...session.extensionRunner.getUIContext(),
     select: async () => { throw new Error('a headless session must not ask for a profile'); } };
@@ -91,13 +92,17 @@ test('--optchat-profile still opens that profile headlessly', async () => {
 test('a requested profile that cannot open fails visibly and does not run without memory', async () => {
   const unlock = await lockProfile(profilePath('work'), 'work · PID 1 · elsewhere');
   try {
-    for (const [why, options] of [['typo', { flag: 'wrok' }], ['busy', { bound: 'work' }], ['deleted', { bound: 'gone' }]] as const) {
+    // `auto` would join the busy owner; this one has no windows socket, so the join fails too, with a failing exit code.
+    for (const [why, options] of [['typo', { flag: 'wrok' }], ['busy', { bound: 'work', connect: 'off' }], ['busy, nothing to join', { bound: 'work' }],
+      ['deleted', { bound: 'gone' }], ['join without a session', { flag: 'personal', connect: 'join' }]] as const) {
+      process.exitCode = undefined;
       const pi = await headless('print', options);
       try {
         assert.equal(pi.errors.length, 1, `${why}: Pi reports the error (stderr in print mode)`);
         assert.equal(await pi.ask('Say OK'), undefined, `${why}: the prompt is not answered without memory`);
         assert.equal(pi.sent.length, 0);
+        assert.equal(process.exitCode, why.includes('join') ? 1 : undefined, `${why}: exit code`);
       } finally { await pi.close(); }
     }
-  } finally { await unlock(); }
+  } finally { process.exitCode = undefined; await unlock(); }
 });

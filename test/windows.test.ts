@@ -11,7 +11,7 @@ import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { emptyUsage, UsageLedger } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
-import { serveWindows, connectWindow, type WindowEvent } from '../src/window-bridge.ts';
+import { serveWindows, connectWindow, joinHeadless, type WindowEvent } from '../src/window-bridge.ts';
 import { profileSocket, lockProfile, createProfile, profilePath } from '../src/profiles.ts';
 import { openConnectedWindow, registerConnectedRenderer } from '../src/connected-window.ts';
 import { createHandoffSummarizer } from '../src/handoff.ts';
@@ -60,6 +60,10 @@ async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
         message.content = [{ type: 'toolCall', id: 'spawn-one', name: 'spawn', arguments: { tasks: [{ task: 'hold work descendant' }] } }];
         message.stopReason = 'toolUse';
       }
+      if (last?.role === 'user' && text.split('Your task:\n').at(-1) === 'spawn quick') {
+        message.content = [{ type: 'toolCall', id: 'spawn-quick', name: 'spawn', arguments: { tasks: [{ task: 'slow descendant' }] } }];
+        message.stopReason = 'toolUse';
+      }
       if (text === 'ask main') {
         message.content = [{ type: 'toolCall', id: 'tell-main', name: 'tell_parent', arguments: { message: 'Need a decision from the main agent.' } }];
         message.stopReason = 'toolUse';
@@ -69,6 +73,8 @@ async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
         const hold = !summary && (text.includes('hold work') || last?.role === 'toolResult' && text.includes('DESCENDANT_TESTS_PASSED_123'));
         // A held reply is mid-stream, as a real one would be while the model is still writing.
         if (hold) stream.push({ type: 'text_delta', contentIndex: 0, delta: 'Reply', partial: message });
+        // Outlasts a few window status ticks, so its parent is seen waiting on it.
+        if (!summary && text.endsWith('Your task:\nslow descendant')) await new Promise(resolve => setTimeout(resolve, 500));
         if (hold) await new Promise<void>(resolve => {
           if (options?.signal?.aborted) resolve(); else options?.signal?.addEventListener('abort', () => resolve(), { once: true });
         });
@@ -155,6 +161,34 @@ test('connected window receives the real tool calls, results and live state, so 
     await f.children.spawn([{ task: 'hold work descendant' }], f.dir, undefined, id);
     await until(() => events.some(e => e.live?.agents === 1));
   } finally { client.close(); await close(); await f.close(); }
+});
+
+test("a headless run joins a busy profile: it gets the final reply after the agent's own agents report, and main gets the handoff", async () => {
+  const f = await fixture();
+  const close = await serveWindows(f.dir, f.children, () => true, async text => { f.reports.push(text); });
+  try {
+    const joined = await joinHeadless(f.dir);
+    const reply = await joined.ask('spawn quick', f.dir);
+    // The agent spawns a slow child and waits for it, then answers with its report; only that last answer is the reply.
+    assert.match(reply, /^Reply: .*Reply: slow descendant/s);
+    const [id] = [...f.children.history.records.values()].filter(run => run.connected).map(run => run.id);
+    await until(() => f.children.history.records.get(id)?.handoff?.delivered === true);
+    assert.equal(f.children.history.records.get(id)?.state, 'completed');
+    assert.match(f.reports.at(-1) ?? '', /completed by user/);
+    await assert.rejects(joined.ask('again', f.dir), /one request/);
+  } finally { await close(); await f.close(); }
+});
+
+test('a headless join fails visibly: no running session, or a provider error instead of a reply', async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(joinHeadless(f.dir), /No running OptChat session/);
+    const close = await serveWindows(f.dir, f.children, () => true, async text => { f.reports.push(text); });
+    try {
+      const joined = await joinHeadless(f.dir);
+      await assert.rejects(joined.ask('provider-failure', f.dir), /Synthetic provider error/);
+    } finally { await close(); }
+  } finally { await f.close(); }
 });
 
 initTheme('dark', false);
