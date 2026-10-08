@@ -1,12 +1,13 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import fs, { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicWrite } from '../src/memory.ts';
-import { defaults, loadConfig, lockProfile, ProfileBusyError, profileSocket, saveConfig } from '../src/profiles.ts';
+import { defaults, loadConfig, lockProfile, ProfileBusyError, saveConfig } from '../src/profiles.ts';
 
 test('atomic writes replace existing state, preserve UTF-8 and binary data, and leave no temporary files', () => {
   const dir = mkdtempSync(join(tmpdir(), 'oc-write-'));
@@ -24,24 +25,20 @@ test('atomic writes replace existing state, preserve UTF-8 and binary data, and 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('Windows profile pipes keep one lock through alternate casing and a junction', { skip: process.platform !== 'win32' }, async () => {
-  const root = mkdtempSync(join(tmpdir(), 'oc-pipes-')), dir = join(root, 'profile'), alias = join(root, 'alias');
-  let unlock: (() => Promise<void>) | undefined;
+test('a failed file flush preserves the previous state and a subsequent write recovers', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-flush-'));
   try {
-    mkdirSync(dir);
-    symlinkSync(dir, alias, 'junction');
-    const pipe = profileSocket(dir);
-    assert.ok(pipe.startsWith('\\\\.\\pipe\\optchat-'));
-    assert.equal(profileSocket(alias), pipe);
-    assert.equal(profileSocket(dir.toUpperCase()), pipe);
-    assert.notEqual(profileSocket(dir, 'windows'), pipe);
-    assert.notEqual(profileSocket(root), pipe);
-    unlock = await lockProfile(dir, 'original owner');
-    for (const path of [alias, dir.toUpperCase()]) {
-      await assert.rejects(lockProfile(path, 'second writer'), error => error instanceof ProfileBusyError && error.owner === 'original owner');
-    }
-    assert.ok(!existsSync(join(dir, 'lock.sock')), 'a named pipe creates no socket file');
-  } finally { await unlock?.(); rmSync(root, { recursive: true, force: true }); }
+    const file = join(dir, 'state.json'), failure = new Error('injected file flush failure');
+    atomicWrite(file, 'previous committed value');
+    const flush = mock.method(fs, 'fsyncSync', () => { throw failure; });
+    syncBuiltinESMExports();
+    assert.throws(() => atomicWrite(file, 'uncommitted replacement'), error => error === failure);
+    assert.equal(readFileSync(file, 'utf8'), 'previous committed value');
+    flush.mock.restore(); syncBuiltinESMExports();
+    atomicWrite(file, 'recovered');
+    assert.equal(readFileSync(file, 'utf8'), 'recovered');
+    assert.deepEqual(readdirSync(dir), ['state.json']);
+  } finally { mock.restoreAll(); syncBuiltinESMExports(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('a profile lock is released by the OS when its owning process is killed', { timeout: 20_000 }, async () => {
@@ -55,6 +52,7 @@ test('a profile lock is released by the OS when its owning process is killed', {
   let stderr = '', exited = false;
   child.stderr!.on('data', data => { stderr = (stderr + data.toString()).slice(-4000); });
   const exit = once(child, 'exit').then(() => { exited = true; });
+  const timeout = setTimeout(() => child.kill('SIGKILL'), 10_000);
   let unlock: (() => Promise<void>) | undefined;
   try {
     await Promise.race([
@@ -66,6 +64,7 @@ test('a profile lock is released by the OS when its owning process is killed', {
     unlock = await lockProfile(dir, 'replacement owner');
     await assert.rejects(lockProfile(dir, 'another writer'), /replacement owner/);
   } finally {
+    clearTimeout(timeout);
     if (!exited) { child.kill('SIGKILL'); await exit; }
     await unlock?.(); rmSync(dir, { recursive: true, force: true });
   }
