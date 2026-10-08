@@ -1,0 +1,23 @@
+# A real Windows machine for a maintainer's hands-on test: dispatch it, then SSH in with the command from the tmate step's log.
+# Only the dispatching user's GitHub SSH keys can connect. `touch continue` in the session (or the timeout) ends the job.
+name: Windows live
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  live:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm install -g @earendil-works/pi-coding-agent@1.1.0
+      - uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+        env:
+          ANTHROPIC_OAUTH_TOKEN: ${{ secrets.OPTCHAT_TEST_ANTHROPIC_OAUTH_TOKEN }}
