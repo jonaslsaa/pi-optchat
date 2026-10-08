@@ -400,11 +400,12 @@ test('a /skill: command is logged once, as its expansion, and never recovered as
 });
 
 /** Runs a second turn that waits on a summary which never lands: the compactor stalls, or fails with `failure`. Returns the working messages shown. */
-async function waitForSummaries(failure: string | undefined, shown: (working: (string | undefined)[]) => boolean) {
+async function waitForSummaries(failure: string | undefined, shown: (working: (string | undefined)[], asked: string[]) => boolean) {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-wait-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
   const working: (string | undefined)[] = [];
+  const asked: string[] = [];
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
     createProfile('fixture');
@@ -418,6 +419,7 @@ async function waitForSummaries(failure: string | undefined, shown: (working: (s
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context, options) {
         const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+        if (!compression) asked.push(context.messages.map(m => textContent(m.content)).join('\n'));
         const reply = answer(compression ? 'Summary.' : 'Done.'); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
         const stream = createAssistantMessageEventStream();
         if (compression && failure) {
@@ -444,10 +446,10 @@ async function waitForSummaries(failure: string | undefined, shown: (working: (s
     await session.prompt('First question. ' + 'padding '.repeat(400));
     working.length = 0;
     const second = session.prompt('Second question.');
-    for (let i = 0; i < 200 && !shown(working); i++) await new Promise(resolve => setTimeout(resolve, 10));
+    for (let i = 0; i < 200 && !shown(working, asked); i++) await new Promise(resolve => setTimeout(resolve, 10));
     const seen = [...working];
     await session.abort(); await second;
-    return { seen, working };
+    return { seen, working, asked };
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
@@ -462,10 +464,11 @@ test('an aborted wait for summaries clears the working message', async () => {
   assert.equal(working.length, 2);
 });
 
-test('a failing summarizer says why the turn is waiting', async () => {
-  const { seen, working } = await waitForSummaries('No API key for anthropic', w => w.some(m => m?.includes('failing')));
-  assert.deepEqual(seen, ['Waiting for OptChat summaries…', 'Waiting for OptChat summaries… failing: No API key for anthropic (see /optchat model)']);
-  assert.equal(working.at(-1), undefined, 'the message is cleared after the wait is aborted');
+test('a failing summarizer says why the turn is waiting, then the turn goes on without the missing summary', async () => {
+  const { seen, asked } = await waitForSummaries('No API key for anthropic', (_, asked) => asked.length > 1);
+  assert.deepEqual(seen.slice(0, 2), ['Waiting for OptChat summaries…', 'Waiting for OptChat summaries… failing: No API key for anthropic (see /optchat model)']);
+  assert.equal(seen.at(-1), undefined, 'the message is cleared once the wait gives up');
+  assert.match(asked.at(-1)!, /not summarized yet: zoom it\)[\s\S]*Second question\./);
 });
 
 // A 1x1 PNG.
