@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { Entry, Summary } from './memory.ts';
 
@@ -70,9 +70,10 @@ export function appendJson(file: string, value: unknown, size?: number) {
     if (size !== undefined && length !== size) throw otherWriter(file);
     const torn = length > 0 && readSync(fd, last, 0, 1, length - 1) === 1 && last[0] !== 0x0a;
     const data = Buffer.from((torn ? '\n' : '') + JSON.stringify(value) + '\n');
-    // A cut-short write is undone, so the file keeps the size the caller checks against.
+    // A cut-short write is undone, so the file keeps the size the caller checks against. Windows refuses to truncate through an
+    // append handle, so this goes by path; if the undo fails too, the write's own error is still the one thrown.
     try { if (writeSync(fd, data) !== data.length) throw new Error(`Incomplete write: ${file}`); }
-    catch (error) { ftruncateSync(fd, length); throw error; }
+    catch (error) { try { truncateSync(file, length); } catch {} throw error; }
     fsyncSync(fd);
     return fstatSync(fd).size;
   } finally { closeSync(fd); }
