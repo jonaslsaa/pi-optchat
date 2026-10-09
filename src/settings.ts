@@ -23,6 +23,9 @@ export const SETTINGS = {
   summaryAcceptBytes: { kind: 'number', label: 'Summary size tolerance', default: NODE * 1.25, min: NODE, unit: 'bytes',
     description: `The compactor is always asked for ${NODE}-byte lines; a longer line up to this size is kept instead of retried. ${NODE}: strict, as in Victor's recipe. The default saves retries for a little more view space.`,
     applies: 'Applies to the next summary.' },
+  importJobs: { kind: 'number', label: 'Import: summaries at once', default: 8, min: 1, max: 64, unit: '',
+    description: 'Summaries an import builds at once. With N at once, a summary can see up to N−1 lines not summarized yet before it, so higher is faster but a little less accurate (at 8 that costs about 0.8 points per summary, #108). Higher also hits your provider\'s rate limits harder; the compactor retries what is refused. Chat itself always runs 8.',
+    applies: 'Applies to the next import.' },
 } as const;
 
 export type SettingKey = keyof typeof SETTINGS;
@@ -31,9 +34,13 @@ export type NumberKey = { [K in SettingKey]: Settings[K] extends number ? K : ne
 export const SETTING_KEYS = Object.keys(SETTINGS) as SettingKey[];
 export const isNumberKey = (key: SettingKey): key is NumberKey => SETTINGS[key].kind === 'number';
 
-/** Why a value can't be used, or undefined if it can. Numbers are whole and at least their minimum. */
+/** Why a value can't be used, or undefined if it can. Numbers are whole and within their range. */
 export function invalid(key: SettingKey, value: unknown) {
-  if (isNumberKey(key)) { const { label, min } = SETTINGS[key]; return Number.isSafeInteger(value) && Number(value) >= min ? undefined : `${label} must be a whole number of ${min} or more.`; }
+  if (isNumberKey(key)) {
+    const { label, min, max = Infinity }: { label: string; min: number; max?: number } = SETTINGS[key];
+    return Number.isSafeInteger(value) && Number(value) >= min && Number(value) <= max ? undefined
+      : `${label} must be a whole number ${max === Infinity ? `of ${min} or more` : `from ${min} to ${max}`}.`;
+  }
   return typeof value === 'boolean' ? undefined : `${SETTINGS[key].label} must be true or false.`;
 }
 

@@ -5,6 +5,7 @@ import { Memory, bytes, isEntry, type Entry, type Compressor } from '../memory.t
 import { atomicWrite } from '../memory.ts';
 import { record } from '../cache.ts';
 import { copyKey, type ImportedEntry } from './sources.ts';
+import { DEFAULT_SETTINGS } from '../settings.ts';
 
 export type ImportMode = 'append' | 'rebuild';
 export interface ImportJob {
@@ -94,7 +95,7 @@ export function discardImport(dir: string) {
   rmSync(pendingFile(dir)); rmSync(generationPath(dir, job.target), { recursive: true, force: true });
 }
 export interface ImportProgress { messages: number; total: number; summaries: number; error?: string }
-export async function runImport(dir: string, compress: Compressor, signal: AbortSignal,
+export async function runImport(dir: string, compress: Compressor, signal: AbortSignal, jobs = DEFAULT_SETTINGS.importJobs,
   progress: (state: ImportProgress) => void = () => {}): Promise<ImportJob> {
   const job = pendingImport(dir); if (!job) throw new Error('No pending import.');
   const path = generationPath(dir, job.target);
@@ -105,14 +106,14 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
   const plan: unknown[] = readFileSync(join(path, STAGED), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
   // Every line must parse, and the plan must be whole and in order, so a damaged plan can't drop messages silently.
   if (!plan.every(isEntry) || plan.length !== job.total || plan.some((e, i) => e.i !== i)) throw new Error('Import staging data is invalid; original memory remains intact.');
-  const memory = new Memory(path, compress, () => {});
+  const memory = new Memory(path, compress, () => {}, undefined, jobs);
   const report = () => progress({ messages: memory.root.length - memory.pending, total: plan.length, summaries: memory.tree.size, error: memory.lastError });
   const timer = setInterval(report, 500);
   try {
     if (memory.root.length > plan.length || memory.root.some((e, i) => e.text !== plan[i].text)) throw new Error('Import staging data does not match its log; original memory remains intact.');
     report();
     // Recipe §10: imported messages are compressed like any other. Each is logged once its node can start, as a burst of live
-    // messages is, so up to 8 summaries run at once. Unlike a turn, an import waits through failures (its progress shows the error).
+    // messages is, so up to `jobs` summaries run at once (the "Import: summaries at once" setting). Unlike a turn, an import waits through failures (its progress shows the error).
     for (const e of plan.slice(memory.root.length)) { await memory.settle(signal, 'ahead'); memory.append(e.kind, e.text, e.date, e.receipt, e.origin); }
     await memory.settle(signal, 'tree'); signal.throwIfAborted();
     // Close all writers before the single atomic pointer swap. The previous generation stays intact.

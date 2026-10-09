@@ -153,7 +153,7 @@ export function settingsPage(theme: Theme, o: Options, close: () => void, redraw
       }, () => done()) };
     return { ...base, currentValue: value(key, config[key]), values: [value(key, true), value(key, false)] };
   });
-  const list = new SettingsList([...models, ...settings], 10, {
+  const list = new SettingsList([...models, ...settings], models.length + settings.length, {
     label: (text, selected) => selected ? theme.fg('accent', text) : text,
     value: (text, selected) => selected ? theme.fg('accent', text) : theme.fg('muted', text),
     description: text => theme.fg('dim', text), cursor: theme.fg('accent', '→ '), hint: text => theme.fg('dim', text),

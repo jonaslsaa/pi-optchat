@@ -1,10 +1,9 @@
 import { clampThinkingLevel, type Api, type AssistantMessage, type Message, type Model } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
-import { COMPACT } from './prompts.ts';
-import { bytes, NODE, start, type Compressor, type Part } from './memory.ts';
+import { COMPACT, compaction, IMPORT_GUIDANCE, tooLong } from './prompts.ts';
+import { bytes, NODE, type Compressor } from './memory.ts';
 import { cachePayload, splitView } from './cache.ts';
-import { IMPORT_GUIDANCE } from './import/guidance.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
@@ -13,16 +12,6 @@ export const reasoningFor = (model: Model<Api>, level: ThinkingLevel) => {
   const thinking = clampThinkingLevel(model, level);
   return thinking === 'off' ? undefined : thinking;
 };
-/** Models can't count bytes, so the task shows the limit as a ruler; a real sample line got its content copied (recipe §4). */
-const RULER = '-'.repeat(NODE);
-const label = (part: Part) => `${start(part)}+${2 ** part.l}`;
-/** The recipe's compaction task, verbatim. */
-export function task({ source, part }: { source: string; part: Part }) {
-  if (!part.l) return `Compaction: compress message ${part.i} into one line of at most 512 bytes\n(about 70 words), the length of this ruler:\n${RULER}\n<input>\n${source}\n</input>`;
-  const a = { l: part.l - 1, i: 2 * part.i }, b = { l: part.l - 1, i: 2 * part.i + 1 };
-  return `Compaction: merge lines ${label(a)} and ${label(b)}, adjacent, into one line of at most\n512 bytes (about 70 words), the length of this ruler:\n${RULER}\n`
-    + `<chat> may hold their messages, ${start(part)} to ${start(part) + 2 ** part.l - 1}, in more detail: take details\nof them from there too.\n<input>\n${source}\n</input>`;
-}
 const WARM_MS = 4 * 60_000; // Anthropic's short cache lives 5 minutes from its last use.
 
 /** Parallel calls can't read a cache entry that isn't written yet, so one call primes a cold prefix and the rest wait until it answers.
@@ -61,7 +50,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const model = registry.find(selected.provider, selected.model);
     if (!model) throw new Error(`Compactor model unavailable: ${selected.provider}/${selected.model}. Use /optchat model.`);
     const thinking = reasoningFor(model, selected.thinking);
-    const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}${task(input)}`;
+    const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}${compaction(input)}`;
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
@@ -90,7 +79,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       if (bytes(line) <= accepted() && bytes(line) < bytes(input.source)) break;
       messages.push(reply);
       const cut = Buffer.from(line).subarray(0, NODE).toString('utf8').replace(/\uFFFD$/, '');
-      messages.push({ role: 'user', content: `Too long: your line is ${bytes(line)} bytes, over the 512-byte limit. Write\nthe whole line again for the same <input>, cutting just enough of the\nleast valuable items to fit before this cut:\n${cut}| ← LIMIT`, timestamp: Date.now() });
+      messages.push({ role: 'user', content: tooLong(bytes(line), cut), timestamp: Date.now() });
     }
     return tries.reduce((a, b) => bytes(a) <= bytes(b) ? a : b);
   };

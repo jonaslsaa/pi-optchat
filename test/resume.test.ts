@@ -311,3 +311,114 @@ test('a tell that loses the race with the child finishing is refused, not report
     assert.equal(children.history.records.get(id)?.guidance[0].state, 'undelivered');
   } finally { await cleanup(children); }
 });
+
+test('subagents cut off by Pi closing or crashing are resumed at the next start, and the main agent is told once', async () => {
+  const { dir, releases, reports, warnings, make, cleanup } = await setup('optchat-resume-restart-');
+  const first = make('first-session');
+  const later: Children[] = [];
+  try {
+    const [held] = await first.spawn([{ task: 'hold on' }], dir);
+    const [crashed] = await first.spawn([{ task: 'crashed' }], dir);
+    await until(() => releases.has('hold on') && first.history.records.get(crashed)?.state === 'completed' && !first.live(crashed));
+    // As if Pi had died while this one was still working.
+    first.history.save({ ...first.history.records.get(crashed)!, state: 'running', ended: undefined });
+    reports.length = 0;
+    await first.close();
+    assert.equal(reports.length, 0, 'a run Pi cut off does not report its abort');
+    assert.equal(first.history.records.get(held)?.state, 'interrupted');
+
+    later.push(make('second-session'));
+    await later[0].resumeCutOff();
+    assert.equal(reports[0], `Pi restarted while subagents were working. Resumed ${held}, ${crashed} from where they left off; reports arrive as usual.`);
+    await until(() => !later[0].active);
+    for (const id of [held, crashed]) {
+      assert.match(users(later[0], id).at(-1) ?? '', /^Pi restarted while you were working\. Your last tool call may have been cut off; check its effect before redoing it\. Continue your task\.$/);
+      assert.equal(later[0].history.records.get(id)?.state, 'completed');
+      assert.ok(reports.some(r => r.startsWith(`[${id}] `)), 'the resumed run reports as usual');
+    }
+    const told = reports.length;
+    later.push(make('third-session'));
+    await later[1].resumeCutOff();
+    assert.equal(reports.length, told, 'nothing left to resume, nothing to say');
+    assert.deepEqual(warnings, []);
+  } finally { await cleanup(first, ...later); }
+});
+
+test('runs stopped or paused by the user, finished runs and older interrupted ones are not resumed at the next start', async () => {
+  const { dir, releases, reports, make, cleanup } = await setup('optchat-resume-restart-skip-');
+  const first = make('first-session');
+  let later: Children | undefined;
+  try {
+    const [stopped, paused, done, old] = await first.spawn([{ task: 'hold stop' }, { task: 'hold pause' }, { task: 'done' }, { task: 'old' }], dir);
+    await until(() => releases.has('hold stop') && releases.has('hold pause') && !first.live(done) && !first.live(old));
+    await first.stop(stopped);
+    assert.equal(await first.interrupt(paused), 'paused');
+    await until(() => first.history.records.get(stopped)?.state === 'stopped' && first.history.records.get(paused)?.state === 'paused');
+    // Interrupted before Pi resumed cut-off runs.
+    first.history.save({ ...first.history.records.get(old)!, state: 'interrupted' });
+    await first.close();
+    const before = reports.length;
+
+    later = make('second-session');
+    await later.resumeCutOff();
+    assert.equal(reports.length, before);
+    assert.deepEqual(later.ids, []);
+    assert.deepEqual([stopped, paused, done, old].map(id => later!.history.records.get(id)?.state), ['stopped', 'stopped', 'completed', 'interrupted']);
+  } finally { await cleanup(first, ...(later ? [later] : [])); }
+});
+
+test('a cut-off child is named to its resumed parent, or to the main agent when its parent was not cut off', async () => {
+  const { dir, releases, reports, make, cleanup } = await setup('optchat-resume-restart-nested-');
+  const first = make('first-session');
+  let later: Children | undefined;
+  try {
+    const [boss, idle] = await first.spawn([{ task: 'boss' }, { task: 'boss idle' }], dir);
+    await until(() => releases.has('boss') && releases.has('boss idle'));
+    const [worker] = await first.spawn([{ task: 'hold worker' }], dir, undefined, boss);
+    const [stray] = await first.spawn([{ task: 'hold stray' }], dir, undefined, idle);
+    await until(() => releases.has('hold worker') && releases.has('hold stray'));
+    assert.equal(await first.interrupt(idle), 'paused'); // Waiting for the user: not resumed, but its working child was cut off.
+    await until(() => first.history.records.get(idle)?.state === 'paused');
+    reports.length = 0;
+    await first.close();
+
+    later = make('second-session');
+    await later.resumeCutOff();
+    assert.equal(reports[0], `Pi restarted while subagents were working. Resumed ${boss} from where it left off; reports arrive as usual.\nAlso cut off, but not resumed because their parent agent is not running: ${stray} (under ${idle}).`);
+    await until(() => !later!.active);
+    assert.match(users(later, boss).at(-1) ?? '', new RegExp(`Your subagents ${worker} were cut off by a Pi restart: tell resumes one`));
+    assert.deepEqual([worker, stray].map(id => later!.history.records.get(id)?.cutOff), [undefined, undefined], 'each was named once');
+    assert.deepEqual(later.ids, []);
+  } finally { await cleanup(first, ...(later ? [later] : [])); }
+});
+
+test('a cut-off run the main agent resumes itself during startup is left alone', async () => {
+  const { dir, releases, reports, hooks, make, cleanup } = await setup('optchat-resume-restart-race-');
+  const first = make('first-session');
+  let later: Children | undefined;
+  try {
+    const [slow, told] = await first.spawn([{ task: 'hold slow' }, { task: 'hold told' }], dir);
+    await until(() => releases.has('hold slow') && releases.has('hold told'));
+    await first.close();
+    reports.length = 0;
+
+    later = make('second-session');
+    // The first resume stalls while it opens; meanwhile the main agent tells the other one, which resumes it.
+    let opening!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { opening = resolve; });
+    hooks.beforeSession = () => { hooks.beforeSession = undefined; opening(); return new Promise<void>(resolve => { release = resolve; }); };
+    const resuming = later.resumeCutOff();
+    await started;
+    await later.tell(told, 'from main');
+    const stale: string[] = [];
+    const save = later.history.save.bind(later.history);
+    later.history.save = run => { if (run.id === told) stale.push(run.state); save(run); };
+    release();
+    await resuming;
+    assert.ok(!stale.includes('interrupted'), 'the live record is not overwritten by the one read at startup');
+    assert.equal(reports[0], `Pi restarted while subagents were working. Resumed ${slow} from where it left off; reports arrive as usual.`);
+    await until(() => !later!.active);
+    assert.equal(users(later, told).at(-1), 'from main');
+    assert.equal(later.history.records.get(told)?.state, 'completed');
+  } finally { await cleanup(first, ...(later ? [later] : [])); }
+});
