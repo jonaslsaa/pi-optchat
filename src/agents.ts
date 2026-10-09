@@ -314,7 +314,10 @@ export class Children {
             // Nothing to hand over: the run waits for its next message instead of ending, and whoever waits on its report hears why.
             if (transition(info, 'paused')) {
               this.save(info);
-              if (!info.connected) await this.toParent(info.parentId, `[${info.id}] Interrupted by the user; it waits for their next message, so no report until then.`)
+              // In a grouped spawn the note takes the run's place, so its siblings' reports are not held until the user comes back; its later report arrives on its own.
+              const note = `[${info.id}] Interrupted by the user; it waits for their next message, so no report until then.`, batch = live.batch;
+              live.batch = undefined;
+              if (!info.connected) await (batch ? this.deliver(info, batch, note) : this.toParent(info.parentId, note))
                 .catch(error => this.warn(`Could not tell the parent about the interrupt: ${String(error)}`));
             }
             continue;
@@ -384,8 +387,10 @@ export class Children {
     // A metadata failure must not suppress delivery of the actual result.
     try { this.save(info); } catch (error) { this.warn(`Could not save run metadata: ${String(error)}`); }
     // A deleted run's transcript is gone.
-    let text = `[${info.id}] ${info.report}${this.deleting.has(info.id) ? '' : `\n\n${fullChat(info.id)}`}`;
-    const batch = live.batch;
+    await this.deliver(info, live.batch, `[${info.id}] ${info.report}${this.deleting.has(info.id) ? '' : `\n\n${fullChat(info.id)}`}`);
+  }
+  /** Sends a run's report to its parent; in a grouped spawn, only once every child of the spawn has one. */
+  private async deliver(info: RunInfo, batch: LiveRun['batch'], text: string) {
     let count: number | undefined;
     if (batch) {
       batch.reports.set(info.id, text);
@@ -395,7 +400,7 @@ export class Children {
     }
     if (info.parentId) {
       const parent = this.running.get(info.parentId);
-      if (parent && parent.info.state !== 'stopping') { parent.pendingReports.push(text); this.changed(); }
+      if (parent && parent.info.state !== 'stopping') { parent.pendingReports.push(text); parent.wake?.(); this.changed(); }
       return;
     }
     if (this.closing) this.memory.append('work', text);
@@ -548,7 +553,8 @@ export class Children {
     }
     if (orphans.length) lines.push(`Also cut off, but not resumed because their parent agent is not running: ${orphans.join(', ')}.`);
     if (!resumed.length && !lines.length) return;
-    await this.report([`Pi restarted while subagents were working.${resumed.length ? ` Resumed ${resumed.join(', ')} from where ${resumed.length > 1 ? 'they' : 'it'} left off; reports arrive as usual.` : ''}`, ...lines].join('\n'));
+    await this.report([`Pi restarted while subagents were working.${resumed.length ? ` Resumed ${resumed.join(', ')} from where ${resumed.length > 1 ? 'they' : 'it'} left off; ${this.settings.groupReports
+      ? 'grouped reports do not survive a restart, so each one reports on its own.' : 'reports arrive as usual.'}` : ''}`, ...lines].join('\n'));
   }
   async finish(id: string, reason: FinishReason) {
     const live = this.running.get(id);
