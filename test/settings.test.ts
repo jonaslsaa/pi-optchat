@@ -11,10 +11,9 @@ import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { createProfile, defaults, loadConfig, profilePath, saveConfig, type ProfileConfig } from '../src/profiles.ts';
 import { settingsPage } from '../src/settings-page.ts';
-import { COMPACT } from '../src/prompts.ts';
+import { COMPACT, SEARCH_DOC } from '../src/prompts.ts';
 import { REPORT_TYPE, textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
-import { SEARCH_DOC } from '../src/tools.ts';
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 const model = { provider: 'fixture', model: 'fixture', thinking: 'off' } as const;

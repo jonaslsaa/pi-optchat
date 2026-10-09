@@ -6,8 +6,8 @@ import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsMana
 import * as sdk from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import { SUBAGENT, VIEW_DOC } from './prompts.ts';
-import { allowSearch, memoryTools, SEARCH_DOC, searchTool } from './tools.ts';
+import { allowSearch, CONNECTED, cutOffChildren, delegation, NO_DELEGATION, NOT_CONNECTED, RESTARTED, SEARCH_DOC, STEERABLE, SUBAGENT, VIEW_DOC } from './prompts.ts';
+import { memoryTools, searchTool } from './tools.ts';
 import { type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cachePayload } from './cache.ts';
@@ -55,8 +55,6 @@ export const taskDirectory = (cwd: string, path = '.', windows = process.platfor
   resolve(cwd, path.replace(windows ? /^~(?=$|[\\/])/ : /^~(?=$|\/)/, homedir()));
 export const CWD_DOC = 'Project directory the subagent works in (~ allowed); its AGENTS.md files load from there. Defaults to your current directory.';
 const isOptchat = (path: string) => packageName(path) === 'pi-optchat';
-/** Pi hands steering to a run only between tool calls, so one long command keeps the parent and the user from reaching it. */
-export const STEERABLE = 'Never block in a single command for more than about 60 seconds. To wait for something, poll in short separate tool calls (for example one `sleep 30` per call), so messages from your parent or the user can reach you between calls.';
 
 // Pi's CLI adds its built-in extensions (MCP, codemode, tool search) to its own session; SDK sessions such as
 // subagents must add them. Pi versions that do not export a factory simply do not get that extension.
@@ -70,7 +68,6 @@ export const builtinExtensions = (names: Iterable<string>): InlineExtension[] =>
   const create = Object.hasOwn(BUILTINS, name) ? (sdk as unknown as Record<string, unknown>)[BUILTINS[name]] : undefined;
   return typeof create === 'function' ? [{ name, factory: create(), replaceable: true, builtin: true }] : [];
 });
-const RESTARTED = 'Pi restarted while you were working. Your last tool call may have been cut off; check its effect before redoing it. Continue your task.';
 export class Children {
   private readonly running = new Map<string, LiveRun>();
   readonly history: RunHistory;
@@ -218,9 +215,7 @@ export class Children {
     thinking?: ModelChoice['thinking']; sessionManager: SessionManager }) {
     const { id, directory, depth, parentId, connected } = o;
     const { subagentLevels, maxAgents, memorySearch } = this.settings, delegates = depth < subagentLevels;
-    const delegation = delegates ? `You may delegate parts of your assigned task with spawn when useful. Child reports arrive automatically after your current run ends; the harness keeps you alive to receive them. Never poll, sleep, or wait in a tool for children. Finish your current work and return; you will be prompted with their results. The profile allows ${maxAgents} active agents total.` : 'You are at the maximum delegation depth. Complete your task with your own tools.';
-    const instructions = [this.instructions(), delegation, STEERABLE, connected ? 'You are speaking directly with the user in a connected window. Continue this conversation across requests. Use tell_parent for questions or findings the main agent needs now. A handoff will be generated when the user completes or disconnects the window.'
-      : 'Use tell_parent only when your parent needs something now (a blocking question, an important early finding, or when asked to). Your final answer is delivered automatically; do not repeat it with tell_parent.'].filter(Boolean).join('\n\n');
+    const instructions = [this.instructions(), delegates ? delegation(maxAgents) : NO_DELEGATION, STEERABLE, connected ? CONNECTED : NOT_CONNECTED].filter(Boolean).join('\n\n');
     // The user's settings list their installed packages; a copy in memory keeps the child from writing them back.
     const settingsManager = SettingsManager.inMemory({ ...SettingsManager.create(directory, getAgentDir()).getSettings(), compaction: { enabled: false }, cacheWarming: 'off' });
     const loader = new DefaultResourceLoader({ cwd: directory, agentDir: getAgentDir(), settingsManager,
@@ -502,7 +497,7 @@ export class Children {
       // The finished record stays untouched (and resumable) unless the new one is saved.
       const { ended: _ended, cutOff: _cutOff, ...rest } = run;
       const cut = [...this.history.records.values()].filter(r => r.parentId === id && r.cutOff).map(r => r.id);
-      const prompt = cut.length ? `${text}\n\nYour subagents ${cut.join(', ')} were cut off by a Pi restart: tell resumes one if you still need its result.` : text;
+      const prompt = cutOffChildren(text, cut);
       const info: RunInfo = { ...rest, state: 'running', started: Date.now(), parentSession: this.options.parentSession ?? run.parentSession,
         guidance: [...run.guidance, { text: prompt, date: Date.now(), state: 'queued', from: 'manager' }] };
       try { this.save(info); } catch (error) { this.history.records.set(id, run); await this.shutdown(session); this.dispose(session); throw error; }
