@@ -331,7 +331,8 @@ export class Children {
           continue;
         }
         const last = session.messages.findLast(m => m.role === 'assistant');
-        if (!paused && last?.role === 'assistant' && (last.stopReason === 'error' || last.stopReason === 'aborted')) break;
+        // An error ends the turn, not the run: children still at work report to it and it answers them, as the main agent does.
+        if (!paused && last?.role === 'assistant' && (last.stopReason === 'error' || last.stopReason === 'aborted') && !live.pendingReports.length && !this.directChildren(info.id).length) break;
         if (live.pendingGuidance.length) {
           transition(info, 'running'); this.save(info);
           await session.prompt(live.pendingGuidance.shift()!);
