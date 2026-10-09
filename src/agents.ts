@@ -613,8 +613,8 @@ export class Children {
   async remove(id: string) {
     if (!this.history.records.has(id)) throw new Error(`No subagent ${id}.`);
     if (this.deleting.has(id)) throw new Error(`${id} is already being deleted.`);
-    // A live run reports its own deletion; a finished one has nothing left to say, so memory is told here.
-    const reports = this.running.has(id);
+    // A run that is live while being deleted reports its own deletion, even one a tell was resuming; a finished one has nothing left to say, so memory is told here.
+    let reports = false;
     const runs = () => [id, ...this.history.descendants(id).map(run => run.id)], marked = new Set<string>();
     // An overlapping delete of a descendant keeps its own marks, so neither delete clears the other's.
     const mark = () => { for (const run of runs()) if (!this.deleting.has(run)) { marked.add(run); this.deleting.add(run); } };
@@ -625,6 +625,7 @@ export class Children {
         await Promise.allSettled(this.launches);
         const live = runs().flatMap(run => this.running.get(run) ?? []);
         if (!live.length) break;
+        if (live.some(run => run.info.id === id)) reports = true;
         mark();
         await Promise.allSettled(live.map(run => this.stop(run.info.id)));
         await Promise.allSettled(live.map(run => run.completion));

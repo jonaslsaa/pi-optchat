@@ -615,6 +615,17 @@ test('deleting a running agent stops it and the agents it started, delivers its 
     assert.ok(finished.every(file => !existsSync(file)));
     assert.equal(reports.length, 2, 'a finished run is deleted without another report');
     assert.deepEqual(deleted(), [`[${done}] deleted by the user`], 'so memory hears of it right away, without a turn');
+
+    // A tell that is still resuming a finished run when it is deleted makes it live again, so its own report says so.
+    const [again] = await children.spawn([{ task: 'again' }], dir);
+    await until(() => asked.length === 4);
+    await children.stop(again);
+    await until(() => !children.active);
+    const resumed = children.tell(again, 'One more thing.');
+    await children.remove(again);
+    await resumed.catch(() => {});
+    assert.match(reports.at(-1) ?? '', new RegExp(`^\\[${again}\\] Deleted by the user while it was working`));
+    assert.deepEqual(deleted(), [`[${done}] deleted by the user`], 'not logged a second time');
     assert.equal(new RunHistory(join(dir, 'profile')).records.size, 0, 'nothing comes back at the next start');
   } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
 });
