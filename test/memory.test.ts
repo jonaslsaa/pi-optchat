@@ -1,6 +1,8 @@
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, appendFileSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Memory, cap, CAP, start, end, bytes, mostDue, type Compression, type Part } from '../src/memory.ts';
@@ -656,6 +658,20 @@ test('an append ends an unterminated last line, in every file, and counts the by
     assert.equal(size, readFileSync(file).length);
     assert.equal(appendJson(file, { n: 3 }, size), readFileSync(file).length);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an append cut short leaves the file as it was, so the next append is not refused', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-short-')), file = join(dir, 'log.jsonl');
+  const write = fs.writeSync;
+  try {
+    const size = appendJson(file, { n: 1 });
+    mock.method(fs, 'writeSync', (fd: number, data: Buffer) => write(fd, data, 0, 3));
+    syncBuiltinESMExports();
+    assert.throws(() => appendJson(file, { n: 2 }, size), /Incomplete write/);
+    mock.restoreAll(); syncBuiltinESMExports();
+    assert.equal(readFileSync(file, 'utf8'), '{"n":1}\n');
+    assert.equal(appendJson(file, { n: 3 }, size), readFileSync(file).length);
+  } finally { mock.restoreAll(); syncBuiltinESMExports(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('a torn tail that Memory loaded is repaired by its next append without tripping the write guard', async () => {
