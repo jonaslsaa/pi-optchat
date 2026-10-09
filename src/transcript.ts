@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { getCurrentSystemMessage, type SystemMessage, type UserMessage } from '@earendil-works/pi-ai';
-import { CAP, cap, isView, type Memory } from './memory.ts';
+import { CAP, cap, flat, isView, type Memory } from './memory.ts';
+import { AT_WORK } from './prompts.ts';
 import { record } from './cache.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
 import { imageRef, isImage } from './images.ts';
@@ -146,9 +147,23 @@ export function runTranscript(messages: readonly AgentMessage[]) {
     ...message.stopReason === 'error' || message.stopReason === 'aborted' ? [`echo|Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`] : []];
   }).join('\n');
 }
-/** Keep one completed exchange plus the current run; all other history comes from the view. */
+
+/** The status line naming running agents by id and the first words of their task; none while nothing runs. */
+export function atWork(runs: readonly { id: string; task: string }[]) {
+  if (!runs.length) return undefined;
+  return AT_WORK + runs.map(({ id, task }) => {
+    const words = flat(task).replaceAll('"', "'").split(/\s+/).filter(Boolean), start = words.slice(0, 6).join(' ');
+    // Six words, but never more than 60 characters: a task can be one long word.
+    const preview = [...start].slice(0, 60).join('');
+    return `${id} "${preview}${words.length > 6 || preview.length < start.length ? '…' : ''}"`;
+  }).join(', ') + '.';
+}
+
+/** Keep one completed exchange plus the current run; all other history comes from the view.
+ * `status` goes last, after everything cached, so it never moves the cached prefix (see cachePayload). It comes with new input only
+ * (the user, a report, a restart note): a call that follows a tool result is the same turn, which already had it. */
 export function buildContext(canonical: AgentMessage[], run: AgentMessage[], view: string, prompt: string,
-  previous: readonly AgentMessage[] = []): AgentMessage[] {
+  previous: readonly AgentMessage[] = [], status?: string): AgentMessage[] {
   const system = getCurrentSystemMessage(canonical);
   const head: SystemMessage = { role: 'system', content: prompt, toolsAdded: system?.toolsAdded, timestamp: 0 };
   if (!run.some(m => m.role === 'user')) throw new Error('OptChat has no current user message; refusing to send historical context.');
@@ -158,5 +173,5 @@ export function buildContext(canonical: AgentMessage[], run: AgentMessage[], vie
     injected = true;
     return { ...message, content: [{ type: 'text' as const, text: view }, ...(typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content)] };
   });
-  return [head, ...messages];
+  return [head, ...messages, ...status && messages.at(-1)?.role !== 'toolResult' ? [{ role: 'user' as const, content: [{ type: 'text' as const, text: status }], timestamp: 0 }] : []];
 }

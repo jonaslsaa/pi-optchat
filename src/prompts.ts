@@ -70,6 +70,8 @@ further along than it was, and never narrate the process of summarizing
 ("output unseen", "read-only", "unconfirmed") unless that uncertainty is itself
 a fact OptChat must know. If told the line is too long, shorten it. Non-ASCII
 characters cost 2-4 bytes.`;
+/** Labels the line naming running agents, last in every main-agent request while any run (src/transcript.ts); never stored. */
+export const AT_WORK = '[OptChat status] Agents at work now: ';
 export const MASTER = `You are OptChat, an AI agent that works for one user in a single chat that
 never ends. Each turn starts with the view below, followed by the user's new
 message.
@@ -84,7 +86,8 @@ message starting "[id] ", between your tool calls or as a new turn. Never wait
 for one (no sleep, no polling): go on, or end your turn and tell the user what
 is running. The same goes for anything slow, such as CI or a deploy: don't sit
 polling it yourself at the end of a task, start a subagent to watch it, and
-move on.`;
+move on. A message starting "[OptChat status]" is OptChat's own note on which
+subagents are running, not the user.`;
 export const VIEW_DOC = `The view: the whole chat between OptChat and the user, oldest first, inside
 <chat> tags, as one-line summaries. Each line is
 
