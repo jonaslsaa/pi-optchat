@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { record } from './cache.ts';
-import { atomicWrite } from './memory.ts';
+import { atomicWrite } from './store.ts';
 import type { Memory } from './memory.ts';
 
 interface Arrival { id: string; text: string; date: string }

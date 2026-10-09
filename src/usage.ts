@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { AssistantMessage, Usage } from '@earendil-works/pi-ai';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { record } from './cache.ts';
-import { appendJson } from './memory.ts';
+import { appendJson } from './store.ts';
 
 export type UsageRole = 'main' | 'subagent' | 'compactor' | 'import';
 export const ranges = ['This session', 'Last hour', 'Today', 'Last 7 days', 'All time'] as const;

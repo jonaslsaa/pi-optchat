@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { atomicWrite } from './memory.ts';
+import { atomicWrite } from './store.ts';
 import { record } from './cache.ts';
 import { textContent } from './transcript.ts';
 

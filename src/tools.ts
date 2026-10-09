@@ -51,7 +51,7 @@ export function memoryTools(memory: () => Memory, runs?: (id: string) => readonl
         }
         const m = memory(), text = m.zoom(Number(id), n, offset, limit), page = result(text);
         // A message's images come back with its text, as read returns a PNG; summaries stay text.
-        return n === 1 ? { ...page, content: [...page.content, ...loadImages(m.directory, text)] } : page;
+        return n === 1 ? { ...page, content: [...page.content, ...await loadImages(m.store, text)] } : page;
       } },
     { name: 'date', label: 'Memory date', description: 'The date and time of message id.',
       parameters: Type.Object({ id: Type.Integer({ minimum: 0 }) }),

@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { ModelChoice } from './compactor.ts';
 import { record } from './cache.ts';
-import { atomicWrite } from './memory.ts';
+import { atomicWrite, type Store } from './store.ts';
 import { DEFAULT_SETTINGS, readSettings, type Settings } from './settings.ts';
 
 export const isWindows = process.platform === 'win32';
@@ -126,4 +126,19 @@ export async function lockProfile(dir: string, description: string) {
   const unlock = () => new Promise<void>(resolve => server.close(() => resolve()));
   if (!isWindows) { try { chmodSync(socketPath, 0o600); } catch (error) { await unlock(); throw error; } }
   return unlock;
+}
+
+/** How often a held lease is renewed; a store lets one lapse after about 30 seconds without renewal. */
+export const HEARTBEAT_MS = 10_000;
+/** Holds the profile until the returned function is called: through the store's lease if it has one, else the machine-local lock. */
+export async function holdProfile(store: Pick<Store, 'lock'>, dir: string, profile: string, description: string, warn: (text: string) => void) {
+  const { lock } = store;
+  if (!lock) return lockProfile(dir, description);
+  const owner = await lock.lease(profile, description);
+  if (owner !== undefined) throw new ProfileBusyError(owner);
+  const beat = setInterval(() => {
+    lock.heartbeat().catch((error: unknown) => { warn(`Could not renew the profile lease: ${error instanceof Error ? error.message : String(error)}`); });
+  }, HEARTBEAT_MS);
+  beat.unref();
+  return async () => { clearInterval(beat); await lock.release(); };
 }

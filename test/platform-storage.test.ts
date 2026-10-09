@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { atomicWrite } from '../src/memory.ts';
+import { atomicWrite } from '../src/store.ts';
 import { lockProfile, ProfileBusyError } from '../src/profiles.ts';
 
 test('a failed file flush preserves the previous state and a subsequent write recovers', () => {

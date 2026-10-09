@@ -1,6 +1,5 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync, writeSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { FileStore, storeFor, type Saved, type Store } from './store.ts';
 
 export const NODE = 512;
 export const VIEW = 128_000;
@@ -33,20 +32,6 @@ export function cap(text: string, limit = CAP) {
   const head = text.slice(0, /[\ud800-\udbff]/.test(text[half - 1]) ? half - 1 : half);
   const tail = text.slice(/[\udc00-\udfff]/.test(text[text.length - half]) ? text.length - half + 1 : text.length - half);
   return head + notice(text.length - head.length - tail.length) + tail;
-}
-export function localDay(date = new Date()) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-}
-export function atomicWrite(file: string, text: string | Uint8Array) {
-  mkdirSync(resolve(file, '..'), { recursive: true, mode: 0o700 });
-  const temporary = `${file}.${process.pid}.tmp`;
-  // One read-write handle: Windows refuses fsync on a read-only one, and it cannot open a directory at all, so there the file flush is the whole guarantee.
-  const fd = openSync(temporary, 'w+', 0o600);
-  try { writeFileSync(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
-  renameSync(temporary, file);
-  if (process.platform === 'win32') return;
-  const parent = openSync(resolve(file, '..'), 'r');
-  try { fsyncSync(parent); } finally { closeSync(parent); }
 }
 /** The index of the view's most due pair of sibling lines whose parent is built, or -1 (recipe §3.2). A pair is as due as
  * long ago it ended, in its own line size; equal pairs go oldest first. This is the order of Taelin's rollback push. */
@@ -94,33 +79,6 @@ class Sawtooth {
     return this.parts.length < lines;
   }
 }
-const otherWriter = (file: string) => new Error(`Another process wrote ${file}. Close every other Pi on this profile and restart Pi; nothing was written.`);
-/** With `size`, refuses to append unless the file still has that size. A last line left without its newline is ended first. Returns the new size. */
-export function appendJson(file: string, value: unknown, size?: number) {
-  const fd = openSync(file, 'a+', 0o600);
-  try {
-    const length = fstatSync(fd).size, last = Buffer.alloc(1);
-    if (size !== undefined && length !== size) throw otherWriter(file);
-    const torn = length > 0 && readSync(fd, last, 0, 1, length - 1) === 1 && last[0] !== 0x0a;
-    const data = Buffer.from((torn ? '\n' : '') + JSON.stringify(value) + '\n');
-    if (writeSync(fd, data) !== data.length) throw new Error(`Incomplete write: ${file}`);
-    fsyncSync(fd);
-    return fstatSync(fd).size;
-  } finally { closeSync(fd); }
-}
-function records(dir: string, warn: (s: string) => void): unknown[] {
-  if (!existsSync(dir)) return [];
-  const result: unknown[] = [];
-  for (const name of readdirSync(dir).filter(n => n.endsWith('.jsonl')).sort()) {
-    const file = join(dir, name);
-    for (const [index, line] of readFileSync(file, 'utf8').split('\n').entries()) {
-      if (!line.trim()) continue;
-      try { result.push(JSON.parse(line)); }
-      catch { warn(`Skipped damaged JSON at ${file}:${index + 1}`); }
-    }
-  }
-  return result;
-}
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -146,7 +104,6 @@ export class Memory {
   private readonly busy = new Map<number, Promise<void>>();
   private readonly retryAt = new Map<number, number>();
   private readonly reported = new Set<number>();
-  private readonly lastSeenBytes = new Map<string, number>();
   /** Messages without their node, and merges whose halves are built, oldest first, so the scheduler never scans the tree for work (recipe §4). */
   private readonly unbuilt = new Set<number>();
   private readonly merges = new Map<number, Part>();
@@ -157,21 +114,34 @@ export class Memory {
   private stopped = false;
   private readonly chat: Sawtooth;
   private readonly compaction: Sawtooth;
+  /** Writes a store returned as promises, in order; the first to fail stops further appends, as a failed file write does. */
+  private written: Promise<unknown> = Promise.resolve();
+  private failed?: string;
+  /** Where this memory's local files live: all of it for a FileStore, and the browser page, runs and imports for any store. */
+  readonly directory: string;
+  readonly store: Store;
   lastError?: string;
 
-  /** `jobs`: summaries built at once, and how many unbuilt lines a new message's node waits behind. Chat keeps 8; imports pass the "Import: summaries at once" setting. */
-  constructor(readonly directory: string, private readonly compress: Compressor,
+  /** Opens the memory in `directory` through the store `storeFor` picks, after its load. */
+  static async open(directory: string, compress: Compressor, warn: (s: string) => void = console.error, budget = VIEW, jobs = 8) {
+    const store = storeFor(directory, warn);
+    return new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs);
+  }
+  /** A directory alone opens a FileStore there. `jobs`: summaries built at once, and how many unbuilt lines a new message's node
+   * waits behind. Chat keeps 8; imports pass the "Import: summaries at once" setting. */
+  constructor(source: string | { directory: string; store: Store; saved: Saved }, private readonly compress: Compressor,
     private readonly warn: (s: string) => void = console.error,
     readonly budget = VIEW, private readonly jobs = 8, private readonly retryMs = 10_000) {
     this.chat = new Sawtooth(budget, budget / 2, part => this.node(part));
     this.compaction = new Sawtooth(budget / 4, budget / 8, part => this.node(part));
-    for (const sub of ['main', 'tree']) mkdirSync(join(directory, sub), { recursive: true, mode: 0o700 });
-    const main = join(directory, 'main'), log = records(main, warn);
-    for (const name of readdirSync(main).filter(n => n.endsWith('.jsonl'))) this.lastSeenBytes.set(join(main, name), statSync(join(main, name)).size);
+    let saved: Saved;
+    if (typeof source === 'string') { const store = new FileStore(source, warn); this.directory = source; this.store = store; saved = store.load(); }
+    else ({ directory: this.directory, store: this.store, saved } = source);
+    const log = saved.entries;
     const entries = log.every(isEntry) ? log.sort((a, b) => a.i - b.i) : undefined;
     if (!entries || entries.some((entry, i) => entry.i !== i)) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
     for (const value of entries) this.root.push({ ...value, size: bytes(`${value.kind}: ${value.text}`) });
-    for (const value of records(join(directory, 'tree'), warn)) {
+    for (const value of saved.tree) {
       if (!isSummary(value) || value.l < 0 || value.i < 0 || end(value) > this.root.length)
         throw new Error('Invalid OptChat summary record.');
       this.tree.set(key(value), { ...value, size: lineBytes(value.text) });
@@ -179,34 +149,32 @@ export class Memory {
     for (const node of this.tree.values()) this.queueParent(node);
     for (let i = 0; i < this.root.length; i++) if (!this.node({ l: 0, i })) this.unbuilt.add(i);
     // Refolding the log gives a different view than the live one, and every cache entry would miss, so the view is saved.
-    const loaded = this.load();
+    const loaded = this.load(saved.view);
     for (const part of this.view) this.compaction.push(part);
     this.compaction.fit(loaded, true);
     for (let i = loaded; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
     this.fit(); this.save(); this.schedule();
   }
-  private checkLog(next: string) {
-    const main = dirname(next), names = readdirSync(main).filter(n => n.endsWith('.jsonl'));
-    if (names.length !== this.lastSeenBytes.size || names.some(n => statSync(join(main, n)).size !== this.lastSeenBytes.get(join(main, n)))) throw otherWriter(next);
-  }
   append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string, origin?: Origin) {
     if (this.stopped) throw new Error('Memory is closed.');
+    if (this.failed) throw new Error(`Memory could not be saved: ${this.failed}`);
     const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}) };
-    const file = join(this.directory, 'main', `${localDay()}.jsonl`);
-    if (!this.lastSeenBytes.has(file)) this.checkLog(file);
-    this.lastSeenBytes.set(file, appendJson(file, entry, this.lastSeenBytes.get(file) ?? 0));
+    this.behind(this.store.append(entry));
     this.root.push(entry); this.push(entry.i); if (this.fit()) this.save(); this.schedule();
     return entry;
   }
   node(part: Part) { return this.tree.get(key(part)); }
   private text(part: Part) { return this.node(part)?.text ?? UNBUILT; }
+  private behind(write: Promise<void> | undefined, failed = (error: unknown) => {
+    this.failed ??= error instanceof Error ? error.message : String(error);
+    this.warn(`Memory could not be saved: ${this.failed}`);
+  }) { if (write) this.written = Promise.all([this.written, write.catch(failed)]); }
   /** Takes the saved view if it still tiles the log from the start, and returns how many messages it covers. */
-  private load() {
-    const file = join(this.directory, 'view.json');
-    if (!existsSync(file)) return 0;
-    const rebuild = () => { this.warn(`Rebuilt the memory view: ${file} does not match the log.`); return 0; };
+  private load(view: string | undefined) {
+    if (view === undefined) return 0;
+    const rebuild = () => { this.warn('Rebuilt the memory view: the saved one does not match the log.'); return 0; };
     let saved: unknown;
-    try { saved = JSON.parse(readFileSync(file, 'utf8')); } catch { return rebuild(); }
+    try { saved = JSON.parse(view); } catch { return rebuild(); }
     if (!Array.isArray(saved)) return rebuild();
     const parts: Part[] = [];
     let covered = 0;
@@ -223,8 +191,9 @@ export class Memory {
   /** Saved when it merges: a view that only grew is the saved one plus a line per later message, as `load` replays it.
    * The log stays authoritative, so a failed save only warns. */
   private save() {
-    try { atomicWrite(join(this.directory, 'view.json'), JSON.stringify(this.view.map(p => [p.l, p.i]))); }
-    catch (error) { this.warn(`Could not save the memory view: ${error instanceof Error ? error.message : String(error)}`); }
+    const failed = (error: unknown) => { this.warn(`Could not save the memory view: ${error instanceof Error ? error.message : String(error)}`); };
+    try { this.behind(this.store.saveView(JSON.stringify(this.view.map(p => [p.l, p.i]))), failed); }
+    catch (error) { failed(error); }
   }
   private push(i: number) {
     const part = { l: 0, i };
@@ -304,7 +273,8 @@ export class Memory {
     if (this.stopped) return;
     if (!text) throw new Error('Compactor returned an empty summary.');
     const node = { ...part, text, size: lineBytes(text) };
-    appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), node);
+    const written = this.store.appendNode(node);
+    if (written) await written;
     this.tree.set(key(part), node); this.retryAt.delete(key(part)); this.merges.delete(key(part)); this.queueParent(part);
     if (!part.l) { this.unbuilt.delete(part.i); this.chat.built(part.i); this.compaction.built(part.i); }
     if (!this.retryAt.size) this.lastError = undefined;
@@ -388,6 +358,6 @@ export class Memory {
   }
   async close() {
     this.stopped = true; this.controller.abort(); clearTimeout(this.retryTimer);
-    this.events.emit('change'); await Promise.allSettled(this.busy.values());
+    this.events.emit('change'); await Promise.allSettled(this.busy.values()); await this.written;
   }
 }
