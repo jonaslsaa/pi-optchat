@@ -613,6 +613,8 @@ export class Children {
   async remove(id: string) {
     if (!this.history.records.has(id)) throw new Error(`No subagent ${id}.`);
     if (this.deleting.has(id)) throw new Error(`${id} is already being deleted.`);
+    // A live run reports its own deletion; a finished one has nothing left to say, so memory is told here.
+    const reports = this.running.has(id);
     const runs = () => [id, ...this.history.descendants(id).map(run => run.id)], marked = new Set<string>();
     // An overlapping delete of a descendant keeps its own marks, so neither delete clears the other's.
     const mark = () => { for (const run of runs()) if (!this.deleting.has(run)) { marked.add(run); this.deleting.add(run); } };
@@ -631,6 +633,7 @@ export class Children {
       const records = runs().flatMap(run => this.history.records.get(run) ?? []);
       if (records.some(run => run.connected && !run.handoff?.delivered)) throw new Error(`${id} has a connected conversation whose handoff has not reached the main agent yet, so it was kept.`);
       for (const run of records.reverse()) this.history.remove(run.id); // Children first, so a failure never leaves one without its parent.
+      if (!reports) this.memory.append('work', `[${id}] deleted by the user`);
     } finally { for (const run of marked) this.deleting.delete(run); this.changed(); }
   }
   async close() {
