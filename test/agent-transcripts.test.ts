@@ -17,13 +17,14 @@ const chat: AgentMessage[] = [
   assistant([{ type: 'text', text: 'Running them.' }, { type: 'toolCall', id: 't1', name: 'bash', arguments: { command: 'npm test' } }]),
   { role: 'toolResult', toolCallId: 't1', toolName: 'bash', content: [{ type: 'text', text: 'ok '.repeat(2_000) + 'fail 1' }], isError: false, ...at },
   { role: 'user', content: 'Parent says: fix it.', ...at },
+  { role: 'user', content: '<chat>\npasted by the parent', ...at },
 ];
 
 test('a run transcript is its chat as kind|text lines, without the memory view, tool results cut to head and tail', () => {
   const text = runTranscript(chat);
   assert.ok(text.startsWith('user|Your task:\nRun the tests.\ntalk|Running them.\ntool|bash {"command":"npm test"}\necho|bash: ok ok'));
   assert.ok(!text.includes('a long memory view'));
-  assert.match(text, /characters omitted; head and tail retained[\s\S]*fail 1\nuser\|Parent says: fix it\.$/);
+  assert.match(text, /characters omitted; head and tail retained[\s\S]*fail 1\nuser\|Parent says: fix it\.\nuser\|<chat>\npasted by the parent$/, 'only the task prompt loses its memory view');
   assert.ok(text.length < 1_500);
 });
 

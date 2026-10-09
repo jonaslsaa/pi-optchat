@@ -127,14 +127,17 @@ function latestExchange(branch: readonly SessionEntry[]) {
 /** Ends every subagent report, so the parent knows it can check the report against what the child did. */
 export const fullChat = (id: string) => `Full chat: zoom("${id}")`;
 export const withoutFullChat = (text: string) => text.replace(/\n\nFull chat: zoom\("[\w-]+"\)$/gm, '');
+const TASK = '\n</chat>\n\nYour task:\n';
 /** Tool calls and results in a run transcript keep their head and tail, so a page holds many steps. */
 const STEP = 1_000;
 /** A subagent's chat for zoom, as `kind|text` lines: its task without the memory view, replies, tool calls and results, and what it was told. */
 export function runTranscript(messages: readonly AgentMessage[]) {
+  const task = messages.find(message => message.role === 'user');
   return messages.flatMap(message => {
     if (message.role === 'user') {
-      const text = textContent(message.content, false);
-      return [`user|${isView(text) ? text.slice(text.indexOf('\n</chat>') + '\n</chat>'.length).trimStart() : text}`];
+      // Only the task prompt holds the memory view (src/agents.ts): `${view}\n\nYour task:\n${task}`.
+      const text = textContent(message.content, false), at = text.indexOf(TASK);
+      return [`user|${message === task && isView(text) && at >= 0 ? text.slice(at + '\n</chat>\n\n'.length) : text}`];
     }
     if (message.role === 'toolResult') return [`echo|${cap(`${message.toolName}: ${textContent(message.content, false)}`, STEP)}`];
     if (message.role !== 'assistant') return [];
