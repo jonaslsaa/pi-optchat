@@ -172,7 +172,8 @@ export class Memory {
    * as before; otherwise after the running ones, so writes land in the order Memory makes them. Returns the queued write, settled
    * through `failed`, unless it finished at once. */
   private enqueue(write: () => Promise<void> | undefined, failed: (error: unknown) => void) {
-    const started = this.writing ? this.writing.then(() => this.failed ? undefined : write()) : write();
+    const run = () => this.failed ? undefined : write();
+    const started = this.writing ? this.writing.then(run) : run();
     if (!started) return;
     const settled = started.catch(failed);
     const tail: Promise<void> = settled.catch(() => {}).then(() => { if (this.writing === tail) this.writing = undefined; });
