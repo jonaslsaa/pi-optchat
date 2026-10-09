@@ -11,7 +11,7 @@ import { allowSearch, memoryTools, SEARCH_DOC, searchTool } from './tools.ts';
 import { type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cachePayload } from './cache.ts';
-import { RunHistory, isRunning, transition, sessionMessages, type RunInfo, type RunState, type FinishReason } from './runs.ts';
+import { RunHistory, transition, sessionMessages, type RunInfo, type RunState, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { fullChat, textContent } from './transcript.ts';
 import { Type } from 'typebox';
@@ -114,8 +114,6 @@ export class Children {
     const known = reader ? this.history.descendants(reader).some(run => run.id === id) : this.running.has(id) || this.history.records.has(id);
     return known ? this.messages(id) : undefined;
   }
-  /** Runs at work now: running, waiting for children, or stopping; not paused. */
-  get working() { return [...this.running.values()].filter(live => isRunning(live.info)).map(live => live.info); }
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   private changed() { for (const listener of this.listeners) listener(); }
   private save(info: RunInfo) { this.history.save(info); this.changed(); }

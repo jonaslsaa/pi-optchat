@@ -2,8 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { getCurrentSystemMessage, type SystemMessage, type UserMessage } from '@earendil-works/pi-ai';
-import { CAP, cap, flat, isView, type Memory } from './memory.ts';
-import { AT_WORK } from './prompts.ts';
+import { CAP, cap, isView, type Memory } from './memory.ts';
 import { record } from './cache.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
 import { imageRef, isImage } from './images.ts';
@@ -144,15 +143,9 @@ export function runTranscript(messages: readonly AgentMessage[]) {
     ...message.stopReason === 'error' || message.stopReason === 'aborted' ? [`echo|Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`] : []];
   }).join('\n');
 }
-/** One line naming the running agents by id and the first words of their task. */
-export const atWork = (runs: readonly { id: string; task: string }[]) => AT_WORK + (runs.map(({ id, task }) => {
-  const words = flat(task).replaceAll('"', "'").split(/\s+/).filter(Boolean);
-  return `${id} "${words.slice(0, 6).join(' ')}${words.length > 6 ? '…' : ''}"`;
-}).join(', ') || 'none') + '.';
-
-/** Keep one completed exchange plus the current run; all other history comes from the view. `atWork` goes last, so it never moves the cached prefix. */
+/** Keep one completed exchange plus the current run; all other history comes from the view. */
 export function buildContext(canonical: AgentMessage[], run: AgentMessage[], view: string, prompt: string,
-  previous: readonly AgentMessage[] = [], atWork?: string): AgentMessage[] {
+  previous: readonly AgentMessage[] = []): AgentMessage[] {
   const system = getCurrentSystemMessage(canonical);
   const head: SystemMessage = { role: 'system', content: prompt, toolsAdded: system?.toolsAdded, timestamp: 0 };
   if (!run.some(m => m.role === 'user')) throw new Error('OptChat has no current user message; refusing to send historical context.');
@@ -162,5 +155,5 @@ export function buildContext(canonical: AgentMessage[], run: AgentMessage[], vie
     injected = true;
     return { ...message, content: [{ type: 'text' as const, text: view }, ...(typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content)] };
   });
-  return [head, ...messages, ...atWork ? [{ role: 'user' as const, content: [{ type: 'text' as const, text: atWork }], timestamp: 0 }] : []];
+  return [head, ...messages];
 }

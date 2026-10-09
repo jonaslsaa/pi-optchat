@@ -6,8 +6,7 @@ import { join } from 'node:path';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { Memory, PAGE } from '../src/memory.ts';
 import { memoryTools } from '../src/tools.ts';
-import { atWork, buildContext, runTranscript } from '../src/transcript.ts';
-import { cachePayload } from '../src/cache.ts';
+import { runTranscript } from '../src/transcript.ts';
 import { reportParts } from '../src/report-message.ts';
 
 const at = { timestamp: 0 };
@@ -48,28 +47,6 @@ test('zoom takes a run id: the transcript in pages that say where to go on; an u
     assert.equal(await text({ id: '0', n: 1 }), '0+0|user: hello', 'a message id sent as a string still opens the message');
     assert.equal(await text({ id: 0 }), '0+0|user: hello', 'n defaults to 1');
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
-});
-
-test('the at-work line names running agents by id and first task words, or none, and is sent last, after the cached view', () => {
-  assert.equal(atWork([]), 'Agents at work now: none.');
-  assert.equal(atWork([{ id: 'a1', task: 'Review PR #123 "carefully"\nthen report back to me' }, { id: 'b2', task: 'Fix it' }]),
-    'Agents at work now: a1 "Review PR #123 \'carefully\' then report…", b2 "Fix it".');
-  const view = '<chat>\n' + '0+1|line\n'.repeat(400) + '</chat>';
-  const user: AgentMessage = { role: 'user', content: 'question', ...at };
-  const context = buildContext([user], [user], view, 'prompt', [], atWork([]));
-  assert.deepEqual(context.at(-1), { role: 'user', content: [{ type: 'text', text: 'Agents at work now: none.' }], timestamp: 0 });
-  // As Anthropic receives it: the mark that caches the turn so far sits before the line, so the next call reads it from the cache.
-  const payload = { messages: [
-    { role: 'user', content: [{ type: 'text', text: view }, { type: 'text', text: 'question' }] },
-    { role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'bash', input: {} }] },
-    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'ok', cache_control: { type: 'ephemeral' } }] },
-    { role: 'user', content: [{ type: 'text', text: 'Agents at work now: none.' }] },
-  ] };
-  const output = cachePayload(payload) as typeof payload & { cache_control?: unknown };
-  assert.equal(output.cache_control, undefined);
-  assert.deepEqual(output.messages[2].content[0], { type: 'tool_result', tool_use_id: 't', content: 'ok', cache_control: { type: 'ephemeral' } });
-  assert.ok(!('cache_control' in output.messages[3].content[0]));
-  assert.equal((JSON.stringify(output).match(/cache_control/g) ?? []).length, 4, 'three view marks and the turn: Anthropic\'s limit');
 });
 
 test('the report box leaves out the Full chat trailer', () => {

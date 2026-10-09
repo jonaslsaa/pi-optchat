@@ -11,7 +11,6 @@ import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profi
 import { asUser, buildContext, PREVIOUS_EXCHANGE, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
-import { isAtWork } from '../src/cache.ts';
 
 const user = (content: UserMessage['content']): UserMessage => ({ role: 'user', content, timestamp: 1 });
 const answer = (text: string, stopReason: AssistantMessage['stopReason'] = 'stop'): AssistantMessage => ({
@@ -120,7 +119,6 @@ test('real Pi lifecycle retains one exchange across tool calls and resume, witho
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context) {
-        context = { ...context, messages: context.messages.filter(m => !isAtWork(m)) }; // OptChat's last line
         const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
         const snapshot = structuredClone(context);
         snapshot.messages = snapshot.messages.filter(m => m.role !== 'system');
@@ -255,7 +253,6 @@ test('another extension\'s shown custom message starts a turn and stays in memor
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context) {
-        context = { ...context, messages: context.messages.filter(m => !isAtWork(m)) }; // OptChat's last line
         const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
         if (!compression) captured.push(context.messages.filter(m => m.role !== 'system'));
         const reply = answer(compression ? 'Summary.' : `Answer to: ${textContent(context.messages.at(-1)?.content).split('</chat>').at(-1)?.trim()}`);
@@ -325,7 +322,6 @@ test('main agent keeps Pi\'s AGENTS.md files and skills, with profile instructio
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context) {
-        context = { ...context, messages: context.messages.filter(m => !isAtWork(m)) }; // OptChat's last line
         const system = textContent(context.messages.find(m => m.role === 'system')?.content);
         if (system !== COMPACT) systems.push(system);
         const reply = answer(system === COMPACT ? 'Summary.' : 'Done.');
@@ -422,7 +418,6 @@ async function waitForSummaries(failure: string | undefined, shown: (working: (s
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context, options) {
-        context = { ...context, messages: context.messages.filter(m => !isAtWork(m)) }; // OptChat's last line
         const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
         if (!compression) asked.push(context.messages.map(m => textContent(m.content)).join('\n'));
         const reply = answer(compression ? 'Summary.' : 'Done.'); reply.api = model.api; reply.provider = model.provider; reply.model = model.id;

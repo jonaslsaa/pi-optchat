@@ -1,5 +1,4 @@
 import { isView } from './memory.ts';
-import { AT_WORK } from './prompts.ts';
 
 export function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -20,15 +19,6 @@ export function splitView(text: string) {
  * earlier entry, so the marks 20 and 40 blocks back still find the last call's entry after a turn of tool calls adds up to
  * 60 blocks (240 lines). With the end of the request, that is Anthropic's limit of 4 marks. */
 const MARKS = [0, 20, 40];
-
-/** The at-work line's own message, in Pi's context and in Anthropic's payload alike. */
-export const isAtWork = (message: unknown) => record(message) && message.role === 'user' && Array.isArray(message.content) && message.content.length === 1
-  && record(message.content[0]) && typeof message.content[0].text === 'string' && message.content[0].text.startsWith(AT_WORK);
-function lastBlock(message: Record<string, unknown>) {
-  if (typeof message.content === 'string') message.content = [{ type: 'text', text: message.content }];
-  const block: unknown = Array.isArray(message.content) ? message.content.at(-1) : undefined;
-  return record(block) ? block : undefined;
-}
 
 /** Anthropic: marks on the view (see MARKS) plus automatic end-of-request caching, so the next call finds the last one's entry
  * and pays only for the lines after it. */
@@ -56,10 +46,6 @@ export function cachePayload(payload: unknown): unknown {
     delete message.cache_control;
     if (Array.isArray(message.content)) for (const item of message.content) if (record(item) && !view.has(item)) delete item.cache_control;
   }
-  // The at-work line changes between calls, so the turn's mark goes on the block before it rather than at the end of the request.
-  const [before, last] = messages.slice(-2);
-  const turn = isAtWork(last) && record(before) && before.role === 'user' ? lastBlock(before) : undefined;
-  if (turn) turn.cache_control = { type: 'ephemeral' };
-  else payload.cache_control = { type: 'ephemeral' };
+  payload.cache_control = { type: 'ephemeral' };
   return payload;
 }
