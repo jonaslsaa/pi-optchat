@@ -212,7 +212,7 @@ Each profile folder is a local Git repository, committed after each turn and on 
 
 To delete a profile, delete its folder. Your original Pi sessions are kept in Pi's normal session directory.
 
-Memory reaches disk through one seam, `Store` in `src/store.ts`: the log, summary nodes, saved view and images, which is what would travel between machines. Runs, recovery journals, imports and their pointer, usage, settings and `AGENTS.md` stay local files. `FileStore` (the layout above) is the only store today; another, such as Postgres, would implement the same few operations, and its lease (take, heartbeat, release) is optional: without one, OptChat keeps its machine-local profile lock.
+Memory reaches disk through one seam, `Store` in `src/store.ts`: the log, summary nodes, saved view and images, which is what would travel between machines. Runs, recovery journals, imports and their pointer, usage, settings and `AGENTS.md` stay local files. `FileStore` (the layout above) is the only store today; another, such as Postgres, would implement the same few operations, and its lease (take, heartbeat, release) is optional: without one, OptChat keeps its machine-local profile lock. Import records (`imports/*.json`, the staging generations and the `active-memory.json` pointer) are per machine, so a second machine with the same `~/.claude` or Codex history on disk may offer those sessions for import again.
 
 ## Windows
 

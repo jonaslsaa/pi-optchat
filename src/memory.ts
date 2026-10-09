@@ -114,8 +114,8 @@ export class Memory {
   private stopped = false;
   private readonly chat: Sawtooth;
   private readonly compaction: Sawtooth;
-  /** Writes a store returned as promises, in order; the first to fail stops further appends, as a failed file write does. */
-  private written: Promise<unknown> = Promise.resolve();
+  /** The last store write still running, if any. Once an append fails, later writes are skipped and appends throw, as after a failed file write. */
+  private writing?: Promise<void>;
   private failed?: string;
   /** Where this memory's local files live: all of it for a FileStore, and the browser page, runs and imports for any store. */
   readonly directory: string;
@@ -159,16 +159,26 @@ export class Memory {
     if (this.stopped) throw new Error('Memory is closed.');
     if (this.failed) throw new Error(`Memory could not be saved: ${this.failed}`);
     const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}) };
-    this.behind(this.store.append(entry));
+    void this.enqueue(() => this.store.append(entry), error => {
+      this.failed ??= error instanceof Error ? error.message : String(error);
+      this.warn(`Memory could not be saved: ${this.failed}`);
+    });
     this.root.push(entry); this.push(entry.i); if (this.fit()) this.save(); this.schedule();
     return entry;
   }
   node(part: Part) { return this.tree.get(key(part)); }
   private text(part: Part) { return this.node(part)?.text ?? UNBUILT; }
-  private behind(write: Promise<void> | undefined, failed = (error: unknown) => {
-    this.failed ??= error instanceof Error ? error.message : String(error);
-    this.warn(`Memory could not be saved: ${this.failed}`);
-  }) { if (write) this.written = Promise.all([this.written, write.catch(failed)]); }
+  /** Runs a store write at once when none is running, so a store that finishes its writes as it returns (FileStore) throws here
+   * as before; otherwise after the running ones, so writes land in the order Memory makes them. Returns the queued write, settled
+   * through `failed`, unless it finished at once. */
+  private enqueue(write: () => Promise<void> | undefined, failed: (error: unknown) => void) {
+    const started = this.writing ? this.writing.then(() => this.failed ? undefined : write()) : write();
+    if (!started) return;
+    const settled = started.catch(failed);
+    const tail: Promise<void> = settled.catch(() => {}).then(() => { if (this.writing === tail) this.writing = undefined; });
+    this.writing = tail;
+    return settled;
+  }
   /** Takes the saved view if it still tiles the log from the start, and returns how many messages it covers. */
   private load(view: string | undefined) {
     if (view === undefined) return 0;
@@ -192,7 +202,7 @@ export class Memory {
    * The log stays authoritative, so a failed save only warns. */
   private save() {
     const failed = (error: unknown) => { this.warn(`Could not save the memory view: ${error instanceof Error ? error.message : String(error)}`); };
-    try { this.behind(this.store.saveView(JSON.stringify(this.view.map(p => [p.l, p.i]))), failed); }
+    try { void this.enqueue(() => this.store.saveView(JSON.stringify(this.view.map(p => [p.l, p.i]))), failed); }
     catch (error) { failed(error); }
   }
   private push(i: number) {
@@ -273,7 +283,8 @@ export class Memory {
     if (this.stopped) return;
     if (!text) throw new Error('Compactor returned an empty summary.');
     const node = { ...part, text, size: lineBytes(text) };
-    const written = this.store.appendNode(node);
+    // A failed node write fails the build, which is retried.
+    const written = this.enqueue(() => this.store.appendNode(node), error => { throw error; });
     if (written) await written;
     this.tree.set(key(part), node); this.retryAt.delete(key(part)); this.merges.delete(key(part)); this.queueParent(part);
     if (!part.l) { this.unbuilt.delete(part.i); this.chat.built(part.i); this.compaction.built(part.i); }
@@ -358,6 +369,6 @@ export class Memory {
   }
   async close() {
     this.stopped = true; this.controller.abort(); clearTimeout(this.retryTimer);
-    this.events.emit('change'); await Promise.allSettled(this.busy.values()); await this.written;
+    this.events.emit('change'); await Promise.allSettled(this.busy.values()); await this.writing;
   }
 }

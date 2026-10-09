@@ -89,23 +89,40 @@ test('a store with a lease holds the profile instead of the local lock, renews i
   } finally { mock.timers.reset(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('a store that writes behind: appends return before it lands them, and once one fails nothing more is appended', async () => {
+/** A store that writes behind, each write landing sooner than the one before it, unless it was started while `fail` was set. */
+function behind() {
   const landed: string[] = [];
-  let fail = false;
-  const later = (text: string, failing = fail) => new Promise<void>((resolve, reject) => setTimeout(() => failing ? reject(new Error('offline')) : (landed.push(text), resolve()), 5));
+  let fail = false, delay = 20;
+  const later = (text: string) => {
+    const failing = fail, ms = Math.max(1, delay -= 3);
+    return new Promise<void>((resolve, reject) => setTimeout(() => failing ? reject(new Error('offline')) : (landed.push(text), resolve()), ms));
+  };
   const store: Store = {
     load: async (): Promise<Saved> => ({ entries: [], tree: [] }),
     append: e => later(e.text), appendNode: n => later(`node ${n.i}`), saveView: () => later('view'),
     putImage: () => later('image'), image: async () => undefined,
   };
-  const warnings: string[] = [];
+  return { store, landed, failing: (on: boolean) => { fail = on; } };
+}
+
+test('a store that writes behind gets its writes one at a time, in the order Memory made them', async () => {
+  const { store, landed } = behind();
+  const memory = new Memory({ directory: temp(), store, saved: await store.load() }, async () => 'unused', () => {});
+  for (const text of ['one', 'two', 'three']) memory.append('user', text);
+  assert.equal(landed.length, 0, 'appends return before their writes land');
+  await memory.settle(undefined, 'tree'); await memory.close();
+  assert.deepEqual(landed.filter(text => !text.startsWith('node') && text !== 'view'), ['one', 'two', 'three']);
+  assert.ok(landed.indexOf('node 0') > landed.indexOf('one'), 'a node lands after its message');
+});
+
+test('once a write-behind append fails, nothing more is appended', async () => {
+  const { store, landed, failing } = behind(), warnings: string[] = [];
   const memory = new Memory({ directory: temp(), store, saved: await store.load() }, async () => 'unused', text => warnings.push(text));
-  memory.append('user', 'hello');
-  assert.equal(landed.length, 0, 'append returns before the write lands');
-  fail = true; memory.append('user', 'lost');
-  await new Promise(resolve => setTimeout(resolve, 20));
-  assert.ok(landed.includes('hello'));
+  failing(true); memory.append('user', 'lost');
+  memory.append('user', 'queued behind it');
+  await new Promise(resolve => setTimeout(resolve, 60));
   assert.match(warnings.join('\n'), /Memory could not be saved: offline/);
+  assert.equal(landed.includes('queued behind it'), false, 'a write queued behind a failed append is skipped');
   assert.throws(() => memory.append('user', 'more'), /Memory could not be saved: offline/);
-  fail = false; await memory.close();
+  failing(false); await memory.close();
 });

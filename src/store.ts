@@ -20,7 +20,9 @@ export interface Lease {
   /** Takes the profile for `holder` (who and where, shown to anyone refused), or returns the current holder.
    * A lease not renewed for about 30 seconds may be taken by someone else. */
   lease(profile: string, holder: string): Promise<string | undefined>;
-  /** Renews the lease. OptChat calls it every 10 seconds while it holds the profile. */
+  /** Renews the lease. OptChat calls it every 10 seconds while it holds the profile and only warns when it fails, so fencing is
+   * the store's job: once its lease may have lapsed, it must refuse writes (for example with a fencing token checked on each one),
+   * since a paused process cannot be trusted to stop itself in time. */
   heartbeat(): Promise<void>;
   release(): Promise<void>;
 }
