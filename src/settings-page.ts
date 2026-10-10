@@ -11,7 +11,7 @@ const ROLES: Record<Role, { label: string; description: string; applies: string 
   subagent: { label: 'Subagent model', description: 'Runs every subagent. Shortcut: /optchat agents model.', applies: 'Applies to subagents started after this.' },
 };
 const modelName = (choice: ModelChoice) => `${choice.provider}/${choice.model}`;
-const showModel = (choice: ModelChoice) => `${modelName(choice)} · ${choice.thinking}`;
+export const showModel = (choice: ModelChoice) => `${modelName(choice)} · ${choice.thinking}`;
 /** The value column: the model, then whether it is the default (shown short, without its provider). */
 const modelValue = (theme: Theme, role: Role, choice: ModelChoice) => `${showModel(choice)}${theme.fg('dim', showModel(choice) === showModel(defaults[role])
   ? '  default' : `  default ${defaults[role].model} · ${defaults[role].thinking}`)}`;
@@ -114,9 +114,9 @@ function update(o: Options, patch: Partial<ProfileConfig>) {
   return undefined;
 }
 /** Bordered, titled like Pi's own dialogs. */
-function frame(theme: Theme, title: string, profile: string, body: Component[]) {
+export function frame(theme: Theme, title: string, profile: string | undefined, body: Component[]) {
   const page = new Container();
-  for (const child of [new DynamicBorder(s => theme.fg('border', s)), new Text(`${theme.bold(theme.fg('accent', title))}${theme.fg('muted', ` · ${profile}`)}`, 1, 0),
+  for (const child of [new DynamicBorder(s => theme.fg('border', s)), new Text(`${theme.bold(theme.fg('accent', title))}${profile ? theme.fg('muted', ` · ${profile}`) : ''}`, 1, 0),
     ...body, new DynamicBorder(s => theme.fg('border', s))]) page.addChild(child);
   return page;
 }

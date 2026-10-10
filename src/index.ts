@@ -31,6 +31,7 @@ import { openConnectedWindow, registerConnectedRenderer } from './connected-wind
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
 import { showModelPicker, showSettings } from './settings-page.ts';
+import { showMenu } from './menu.ts';
 
 const binding = 'optchat.profile';
 const CONNECT_MODES = ['auto', 'join', 'off'] as const;
@@ -483,8 +484,8 @@ export default function optchat(pi: ExtensionAPI) {
     let action = args.trim();
     if (!action) {
       const a = active;
-      const info = a ? `${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending\nCompactor: ${a.config.compactor.model} (${a.config.compactor.thinking})\nAgents: ${a.config.subagent.model} (${a.config.subagent.thinking})\n${a.memory.lastError ?? ''}` : 'No active profile';
-      action = await ctx.ui.select(`${brand}\n${info}`, ['profile', 'settings', 'model', 'agents', 'usage', 'activity', 'instructions', 'browse', 'import']) ?? '';
+      action = await showMenu(ctx, brand, a && { profile: a.name, messages: a.memory.root.length, pending: a.memory.pending,
+        compactor: a.config.compactor, agents: a.config.subagent, error: a.memory.lastError }) ?? '';
     }
     if (action === 'import') {
       const a = required();
