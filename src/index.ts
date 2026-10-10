@@ -48,6 +48,15 @@ const promptFor = (prompt: string, { previousExchange, memorySearch }: ProfileCo
   allowSearch(toggle(toggle(prompt, CONTINUITY, previousExchange, VIEW_DOC), SEARCH_DOC, memorySearch, previousExchange ? VIEW_DOC + CONTINUITY : VIEW_DOC), memorySearch);
 interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
+/** OptChat's own version, read from the package.json beside src/ (in the checkout and the npm package alike); none if unreadable. */
+export const version = ((): string | undefined => {
+  try {
+    const data: unknown = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    return data && typeof data === 'object' && 'version' in data && typeof data.version === 'string' ? data.version : undefined;
+  } catch { return undefined; }
+})();
+const brand = version ? `OptChat v${version}` : 'OptChat';
+
 export default function optchat(pi: ExtensionAPI) {
   let active: Active | undefined;
   let remote: Awaited<ReturnType<typeof openConnectedWindow>> | undefined;
@@ -209,7 +218,7 @@ export default function optchat(pi: ExtensionAPI) {
       closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport);
       untitle = children.subscribe(() => showTitle(ctx)); showTitle(ctx);
       status(ctx);
-      ctx.ui.notify(`OptChat · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
+      ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
       const queuedReports = [...reports];
       if (!pendingImport(dir)) {
         const recover = (work: Promise<void>, what: string) => work.catch(error => ctx.ui.notify(`${what}: ${errorText(error)}`, 'error'));
@@ -475,7 +484,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (!action) {
       const a = active;
       const info = a ? `${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending\nCompactor: ${a.config.compactor.model} (${a.config.compactor.thinking})\nAgents: ${a.config.subagent.model} (${a.config.subagent.thinking})\n${a.memory.lastError ?? ''}` : 'No active profile';
-      action = await ctx.ui.select(`OptChat\n${info}`, ['profile', 'settings', 'model', 'agents', 'usage', 'activity', 'instructions', 'browse', 'import']) ?? '';
+      action = await ctx.ui.select(`${brand}\n${info}`, ['profile', 'settings', 'model', 'agents', 'usage', 'activity', 'instructions', 'browse', 'import']) ?? '';
     }
     if (action === 'import') {
       const a = required();
