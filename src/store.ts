@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { Entry, Summary } from './memory.ts';
 
@@ -61,7 +61,8 @@ export function atomicWrite(file: string, text: string | Uint8Array) {
   try { fsyncSync(parent); } finally { closeSync(parent); }
 }
 const otherWriter = (file: string) => new Error(`Another process wrote ${file}. Close every other Pi on this profile and restart Pi; nothing was written.`);
-/** With `size`, refuses to append unless the file still has that size. A last line left without its newline is ended first. Returns the new size. */
+/** With `size`, refuses to append unless the file still has that size. A last line left without its newline is ended first. A write
+ * cut short is truncated away before the error is thrown. Returns the new size. */
 export function appendJson(file: string, value: unknown, size?: number) {
   const fd = openSync(file, 'a+', 0o600);
   try {
@@ -69,7 +70,10 @@ export function appendJson(file: string, value: unknown, size?: number) {
     if (size !== undefined && length !== size) throw otherWriter(file);
     const torn = length > 0 && readSync(fd, last, 0, 1, length - 1) === 1 && last[0] !== 0x0a;
     const data = Buffer.from((torn ? '\n' : '') + JSON.stringify(value) + '\n');
-    if (writeSync(fd, data) !== data.length) throw new Error(`Incomplete write: ${file}`);
+    // A cut-short write is undone, so the file keeps the size the caller checks against. Windows refuses to truncate through an
+    // append handle, so this goes by path; if the undo fails too, the write's own error is still the one thrown.
+    try { if (writeSync(fd, data) !== data.length) throw new Error(`Incomplete write: ${file}`); }
+    catch (error) { try { truncateSync(file, length); } catch {} throw error; }
     fsyncSync(fd);
     return fstatSync(fd).size;
   } finally { closeSync(fd); }
