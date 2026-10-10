@@ -16,8 +16,8 @@ let sentReasoning: string | undefined;
 let sentStep = '';
 let sentRetry = '';
 /** A fake model whose first reply is `first` bytes long and whose retries fit. */
-async function attempts(first: number, { source = 'user: ' + 'a long message '.repeat(70), merge = false, accepted, first: text = 'x', firstEnd }:
-  { source?: string; merge?: boolean; accepted?: number; first?: string; firstEnd?: 'length' | 'toolUse' } = {}) {
+async function attempts(first: number, { source = 'user: ' + 'a long message '.repeat(70), merge = false, accepted, first: text = 'x', firstEnd, ends = 1 }:
+  { source?: string; merge?: boolean; accepted?: number; first?: string; firstEnd?: 'length' | 'toolUse'; ends?: number } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-size-'));
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
   let calls = 0;
@@ -32,7 +32,7 @@ async function attempts(first: number, { source = 'user: ' + 'a long message '.r
       const last = context.messages.at(-1);
       sentRetry = context.messages.length > 1 && last?.role === 'user' && typeof last.content === 'string' ? last.content : '';
       const stream = createAssistantMessageEventStream();
-      const end = calls ? 'stop' : firstEnd ?? 'stop';
+      const end = calls < ends ? firstEnd ?? 'stop' : 'stop';
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: calls++ ? 'x'.repeat(400) : text.repeat(first) },
         ...end === 'toolUse' ? [{ type: 'toolCall' as const, id: 'call-1', name: 'zoom', arguments: { id: 0 } }] : []], api: model.api,
         provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: end, usage: emptyUsage() };
@@ -56,6 +56,7 @@ test('a summary up to 640 bytes is kept; one over 640 is retried', async () => {
 test('a reply cut off at the token limit, or one that calls a tool, is no summary: it is asked again', async () => {
   assert.deepEqual(await attempts(100, { firstEnd: 'length' }), { calls: 2, bytes: 400 }, 'a short line cut off by stopReason length');
   assert.deepEqual(await attempts(100, { firstEnd: 'toolUse' }), { calls: 2, bytes: 400 }, 'a short line beside a tool call');
+  await assert.rejects(attempts(100, { firstEnd: 'length', ends: 5 }), /^Error: Compactor returned no whole line in 5 tries\.$/);
 });
 
 test('the profile\'s summary size tolerance decides when a line is retried', async () => {
