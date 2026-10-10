@@ -51,7 +51,8 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     if (!model) throw new Error(`Compactor model unavailable: ${selected.provider}/${selected.model}. Use /optchat model.`);
     const thinking = reasoningFor(model, selected.thinking);
     const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}${compaction(input)}`;
-    const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: step }], timestamp: Date.now() }];
+    // OpenAI joins text blocks with nothing between them, so the task starts its own paragraph after the view.
+    const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: `\n\n${step}` }], timestamp: Date.now() }];
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
     const tries: string[] = [];
@@ -71,6 +72,8 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       } finally { warmed(false); }
       onUsage(reply);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
+      // A reply cut off at the token limit, or one that calls a tool, is no summary: ask again.
+      if (reply.stopReason === 'length' || reply.content.some(c => c.type === 'toolCall')) continue;
       // The compactions' view shows each line under its id+n| head, which a line can copy.
       const line = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim().replace(/^\d+\+\d+\|\s*/, '');
       if (!line) throw new Error('Compactor returned no text.');
@@ -81,6 +84,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       const cut = Buffer.from(line).subarray(0, NODE).toString('utf8').replace(/\uFFFD$/, '');
       messages.push({ role: 'user', content: tooLong(bytes(line), cut), timestamp: Date.now() });
     }
+    if (!tries.length) throw new Error('Compactor returned no whole line in 5 tries.');
     return tries.reduce((a, b) => bytes(a) <= bytes(b) ? a : b);
   };
 }

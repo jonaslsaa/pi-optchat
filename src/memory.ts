@@ -334,7 +334,7 @@ export class Memory {
     if (n === 1) {
       const { kind, text } = this.root[id], page = Math.min(limit ?? PAGE, PAGE);
       if (!Number.isSafeInteger(page) || page < 1) throw new Error('limit must be a positive integer.');
-      if (offset === undefined && text.length <= page) return `${id}+0|${kind}: ${text}`;
+      if (offset === undefined && text.length <= page) return `${id}+1|${kind}: ${text}`;
       if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0 || offset >= Math.max(1, text.length)))
         throw new Error(`Message ${id} has ${text.length} characters; offset must be 0 to ${Math.max(0, text.length - 1)}.`);
       // Never split a surrogate pair: a page starts on its first half and ends after its second.
@@ -343,7 +343,7 @@ export class Memory {
       // A one-unit page on a pair takes the whole pair, so the next offset always moves forward.
       if (to < text.length && /[\ud800-\udbff]/.test(text[to - 1])) to += to - 1 === from ? 1 : -1;
       const hint = text.length <= PAGE ? `\n[note: this message is only ${text.length.toLocaleString('en-US')} characters and fits in one zoom; offset/limit are for messages over ${PAGE.toLocaleString('en-US')}]` : '';
-      return `${id}+0|${kind}: ${text.slice(from, to)}\n[showing characters ${from}-${to} of ${text.length}${to < text.length ? `; next page: offset ${to}` : ''}]${hint}`;
+      return `${id}+1|${kind}: ${text.slice(from, to)}\n[showing characters ${from}-${to} of ${text.length}${to < text.length ? `; next page: offset ${to}` : ''}]${hint}`;
     }
     if (offset !== undefined) throw new Error('offset and limit page one message: use them with n = 1.');
     const l = Math.log2(n) - 1, i = 2 * id / n;

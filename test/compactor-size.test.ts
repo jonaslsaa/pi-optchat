@@ -16,7 +16,8 @@ let sentReasoning: string | undefined;
 let sentStep = '';
 let sentRetry = '';
 /** A fake model whose first reply is `first` bytes long and whose retries fit. */
-async function attempts(first: number, { source = 'user: ' + 'a long message '.repeat(70), merge = false, accepted, first: text = 'x' }: { source?: string; merge?: boolean; accepted?: number; first?: string } = {}) {
+async function attempts(first: number, { source = 'user: ' + 'a long message '.repeat(70), merge = false, accepted, first: text = 'x', firstEnd }:
+  { source?: string; merge?: boolean; accepted?: number; first?: string; firstEnd?: 'length' | 'toolUse' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-size-'));
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
   let calls = 0;
@@ -31,9 +32,11 @@ async function attempts(first: number, { source = 'user: ' + 'a long message '.r
       const last = context.messages.at(-1);
       sentRetry = context.messages.length > 1 && last?.role === 'user' && typeof last.content === 'string' ? last.content : '';
       const stream = createAssistantMessageEventStream();
-      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: calls++ ? 'x'.repeat(400) : text.repeat(first) }], api: model.api,
-        provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
-      queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
+      const end = calls ? 'stop' : firstEnd ?? 'stop';
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: calls++ ? 'x'.repeat(400) : text.repeat(first) },
+        ...end === 'toolUse' ? [{ type: 'toolCall' as const, id: 'call-1', name: 'zoom', arguments: { id: 0 } }] : []], api: model.api,
+        provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: end, usage: emptyUsage() };
+      queueMicrotask(() => { stream.push({ type: 'done', reason: end, message }); stream.end(); });
       return stream;
     },
   });
@@ -48,6 +51,11 @@ async function attempts(first: number, { source = 'user: ' + 'a long message '.r
 test('a summary up to 640 bytes is kept; one over 640 is retried', async () => {
   assert.deepEqual(await attempts(640), { calls: 1, bytes: 640 });
   assert.deepEqual(await attempts(641), { calls: 2, bytes: 400 });
+});
+
+test('a reply cut off at the token limit, or one that calls a tool, is no summary: it is asked again', async () => {
+  assert.deepEqual(await attempts(100, { firstEnd: 'length' }), { calls: 2, bytes: 400 }, 'a short line cut off by stopReason length');
+  assert.deepEqual(await attempts(100, { firstEnd: 'toolUse' }), { calls: 2, bytes: 400 }, 'a short line beside a tool call');
 });
 
 test('the profile\'s summary size tolerance decides when a line is retried', async () => {
@@ -78,6 +86,7 @@ test('the task is the recipe\'s, with a 512-dash ruler for the size, and a merge
 test('a line over the limit is sent back with the recipe\'s "Too long" cut, and an id+n| head copied from the view is dropped', async () => {
   const source = 'user: ' + 'a long message '.repeat(70);
   assert.deepEqual(await attempts(700, { source }), { calls: 2, bytes: 400 });
+  assert.ok(sentStep.startsWith('\n\nCompaction:'), 'the task starts its own paragraph: OpenAI joins text blocks with nothing between them');
   assert.ok(sentStep.endsWith(`<input>\n${source}\n</input>`));
   assert.equal(sentRetry, `Too long: your line is 700 bytes, over the 512-byte limit. Write\nthe whole line again for the same <input>, cutting just enough of the\nleast valuable items to fit before this cut:\n${'x'.repeat(NODE)}| ← LIMIT`);
   assert.deepEqual(await attempts(1, { first: '12+4|user: kept' }), { calls: 1, bytes: 'user: kept'.length });

@@ -42,7 +42,7 @@ test('an image is kept once, unchanged when small, and zoom(id, 1) returns it on
   memory.append('user', 'x'.repeat(PAGE) + textContent([small]));
   const [zoom] = memoryTools(() => memory);
   const whole = await zoom.execute('call', { id: 0, n: 1 });
-  assert.match(whole.content[0].type === 'text' ? whole.content[0].text : '', /^0\+0\|user: look\n\[image [0-9a-f]{16}\]\n\[image [0-9a-f]{16}\]$/);
+  assert.match(whole.content[0].type === 'text' ? whole.content[0].text : '', /^0\+1\|user: look\n\[image [0-9a-f]{16}\]\n\[image [0-9a-f]{16}\]$/);
   assert.deepEqual(whole.content.slice(1), [small]);
   assert.equal((await zoom.execute('call', { id: 1, n: 1 })).content.length, 1, 'the first page ends before the reference');
   assert.deepEqual((await zoom.execute('call', { id: 1, n: 1, offset: PAGE })).content.slice(1), [small]);

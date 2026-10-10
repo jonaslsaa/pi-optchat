@@ -14,7 +14,7 @@ test('search finds original messages newest first, pages backwards, and never re
     memory.append('user', `${'filler '.repeat(100)}then the Banner moved, then the\nfinal line`);
     for (let i = 1; i <= 24; i++) memory.append(i % 2 ? 'user' : 'talk', `note ${i} about the banner`);
     memory.append('tool', 'zoom {"id":3,"n":1}');
-    memory.append('echo', 'zoom: 3+0|user: note 3 about the banner');
+    memory.append('echo', 'zoom: 3+1|user: note 3 about the banner');
     memory.append('tool', 'search {"text":"banner"}');
     await memory.settle(undefined, 'tree');
     assert.ok([...memory.tree.values()].some(s => s.text.includes('Lisbon')));

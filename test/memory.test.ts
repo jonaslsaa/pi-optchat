@@ -423,6 +423,8 @@ test('next turn excludes old conversation; current tool loop and reasoning remai
   const projected = buildContext([system, old, current, assistant], [current, assistant], '<chat>\n0+1|old summary\n</chat>', 'new system');
   assert.ok(!JSON.stringify(projected).includes('OLD FULL CONVERSATION'));
   assert.equal(projected[2], assistant);
+  assert.deepEqual(projected[1].role === 'user' && projected[1].content, [{ type: 'text', text: '<chat>\n0+1|old summary\n</chat>' }, { type: 'text', text: '\n\nnew question' }],
+    'the user\'s words start their own paragraph, since OpenAI joins text blocks with nothing between them');
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')); const memory = new Memory(dir, async () => 'summary');
   try { logMessage(memory, assistant); assert.equal(memory.root.length, 1); assert.equal(memory.root[0].text, 'visible reply'); }
   finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }

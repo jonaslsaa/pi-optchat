@@ -171,7 +171,9 @@ export function buildContext(canonical: AgentMessage[], run: AgentMessage[], vie
   const messages = [...previous, ...run].filter(m => m.role !== 'system').map(message => {
     if (message.role !== 'user' || injected) return message;
     injected = true;
-    return { ...message, content: [{ type: 'text' as const, text: view }, ...(typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content)] };
+    // OpenAI joins text blocks with nothing between them, so the user's words start their own paragraph after the view.
+    const [first, ...rest] = typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content;
+    return { ...message, content: [{ type: 'text' as const, text: view }, ...first?.type === 'text' ? [{ ...first, text: `\n\n${first.text}` }] : first ? [first] : [], ...rest] };
   });
   return [head, ...messages, ...status && messages.at(-1)?.role !== 'toolResult' ? [{ role: 'user' as const, content: [{ type: 'text' as const, text: status }], timestamp: 0 }] : []];
 }
