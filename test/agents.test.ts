@@ -729,6 +729,40 @@ test('with grouped reports, deleting one child of a spawn still lets its sibling
   } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('with grouped reports, a child the user pauses lets its siblings report together, and reports on its own later', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-pause-group-'));
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports, { settings: () => ({ ...nested(), groupReports: true }) });
+  try {
+    const [a, b] = /^Started: (.+?)\./.exec(await children.start([{ task: 'a' }, { task: 'b' }], dir))![1].split(', ');
+    await until(() => asked.length === 2);
+    assert.equal(await children.interrupt(a), 'paused');
+    await until(() => children.history.records.get(a)?.state === 'paused');
+    await children.tell(b, 'Wrap up.', 'user');
+    assert.equal(await children.interrupt(b), 'continued');
+    await until(() => reports.length > 0);
+    assert.deepEqual(reports, [`[${a}] Interrupted by the user; it waits for their next message, so no report until then.\n\n[${b}] Now doing: Interrupted by the user:\n\nWrap up.`],
+      'the paused child\'s note takes its place in the batch, so its sibling\'s report is not held');
+    await children.tell(a, 'Carry on.', 'user');
+    await until(() => !children.active);
+    assert.deepEqual(reports.slice(1), [`[${a}] Now doing: Carry on.`], 'resumed by the user, it reports on its own');
+
+    // Under a parent subagent, a pause that completes the batch wakes the waiting parent with it.
+    const [boss] = await children.spawn([{ task: 'boss' }], dir);
+    await until(() => asked.length === 5);
+    const [x, y] = await children.spawn([{ task: 'x' }, { task: 'y' }], dir, undefined, boss);
+    await until(() => asked.length === 7);
+    await children.tell(boss, 'Wait for them.', 'user');
+    assert.equal(await children.interrupt(boss), 'continued');
+    await children.tell(y, 'Wrap up.', 'user');
+    assert.equal(await children.interrupt(y), 'continued');
+    await until(() => children.history.records.get(y)?.state === 'completed' && children.history.records.get(boss)?.state === 'waiting');
+    assert.equal(await children.interrupt(x), 'paused');
+    await until(() => asked.some(typed => typed.at(-1)?.startsWith(`[${x}] Interrupted by the user`)));
+    assert.match(asked.at(-1)!.at(-1)!, new RegExp(`^\\[${x}\\] Interrupted by the user.*\\n\\n\\[${y}\\] Now doing: `, 's'));
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('a connected run whose handoff has not been delivered is kept', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-delete-handoff-'));
   const { children } = await busyChildren(dir, []);
