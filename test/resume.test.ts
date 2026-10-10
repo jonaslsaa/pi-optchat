@@ -7,6 +7,7 @@ import { createAssistantMessageEventStream, type AssistantMessage } from '@earen
 import { createAgentSession, ModelRegistry, ModelRuntime, type AgentSession } from '@earendil-works/pi-coding-agent';
 import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
+import type { Settings } from '../src/settings.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent, withoutFullChat } from '../src/transcript.ts';
 
@@ -61,8 +62,8 @@ async function setup(prefix: string) {
   });
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const reports: string[] = [], warnings: string[] = [];
-  const make = (parentSession: string) => new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
-    async text => { reports.push(withoutFullChat(text)); }, text => warnings.push(text), dir, { settings: nested, parentSession, createSession: async options => {
+  const make = (parentSession: string, settings: () => Partial<Settings> = nested) => new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+    async text => { reports.push(withoutFullChat(text)); }, text => warnings.push(text), dir, { settings, parentSession, createSession: async options => {
       await hooks.beforeSession?.();
       const created = await createAgentSession({ ...options, modelRuntime: runtime });
       hooks.opened?.(created.session);
@@ -342,6 +343,25 @@ test('subagents cut off by Pi closing or crashing are resumed at the next start,
     assert.equal(reports.length, told, 'nothing left to resume, nothing to say');
     assert.deepEqual(warnings, []);
   } finally { await cleanup(first, ...later); }
+});
+
+test('with grouped reports, the main agent is told that resumed subagents now report on their own', async () => {
+  const { dir, releases, reports, make, cleanup } = await setup('optchat-resume-restart-group-');
+  const grouped = () => ({ ...nested(), groupReports: true });
+  const first = make('first-session', grouped);
+  let later: Children | undefined;
+  try {
+    const [held, done] = /^Started: (.+?)\./.exec(await first.start([{ task: 'hold on' }, { task: 'done' }], dir))![1].split(', ');
+    await until(() => releases.has('hold on') && first.history.records.get(done)?.state === 'completed');
+    await first.close();
+    assert.deepEqual(reports, [], 'the finished report was held for its sibling');
+
+    later = make('second-session', grouped);
+    await later.resumeCutOff();
+    assert.equal(reports[0], `Pi restarted while subagents were working. Resumed ${held} from where it left off; grouped reports do not survive a restart, so each one reports on its own.`);
+    await until(() => !later!.active);
+    assert.match(reports[1], new RegExp(`^\\[${held}\\] `), 'the resumed run reports alone');
+  } finally { await cleanup(first, ...(later ? [later] : [])); }
 });
 
 test('runs stopped or paused by the user, finished runs and older interrupted ones are not resumed at the next start', async () => {

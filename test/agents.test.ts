@@ -196,6 +196,52 @@ test('one spawn\'s reports arrive together once its last child finishes, also to
   } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a subagent whose turn ends in an error still waits for its children and reads their reports', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-errored-parent-'));
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const reports: string[] = [], releases = new Map<string, () => void>();
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple(model, context, options) {
+      const stream = createAssistantMessageEventStream();
+      const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
+      const last = context.messages.at(-1), first = !context.messages.some(m => m.role === 'assistant');
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: first ? `${task} done` : `${task} heard: ${textContent(last && 'content' in last ? last.content : '')}` }],
+        api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+      void (async () => {
+        if (first) await new Promise<void>(resolve => {
+          releases.set(task, resolve); options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+          if (options?.signal?.aborted) resolve();
+        });
+        if (options?.signal?.aborted) { message.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: message }); }
+        else if (first && task === 'boss') { message.stopReason = 'error'; message.errorMessage = 'invalid request (400)'; stream.push({ type: 'error', reason: 'error', error: message }); }
+        else stream.push({ type: 'done', reason: 'stop', message });
+        stream.end();
+      })();
+      return stream;
+    },
+  });
+  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+    async text => { reports.push(withoutFullChat(text)); }, () => {}, dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  const state = (id: string) => children.history.records.get(id)?.state;
+  try {
+    const [boss] = await children.spawn([{ task: 'boss' }], dir);
+    const [worker] = await children.spawn([{ task: 'worker' }], dir, undefined, boss);
+    await until(() => releases.has('boss') && releases.has('worker'));
+    releases.get('boss')!();
+    await until(() => state(boss) !== 'running');
+    await new Promise(r => setTimeout(r, 50));
+    assert.equal(state(worker), 'running', 'the error ends the parent\'s turn, not its child');
+    assert.deepEqual(reports, []);
+    releases.get('worker')!();
+    await until(() => !children.active);
+    assert.equal(state(boss), 'completed');
+    assert.deepEqual(reports, [`[${boss}] boss heard: [${worker}] worker done`], 'the parent reads its child\'s report and answers it');
+  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('children get the main agent\'s extensions, AGENTS.md files and skills, but never another copy of OptChat', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-extensions-'));
   const agentDir = process.env.PI_CODING_AGENT_DIR ?? '';
@@ -680,6 +726,40 @@ test('with grouped reports, deleting one child of a spawn still lets its sibling
     await until(() => !children.active);
     assert.equal(reports.length, 1);
     assert.match(reports[0], new RegExp(`^\\[${a}\\] .*\\n\\n\\[${b}\\] `, 's'), 'the deleted child\'s stop report is in the batch');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('with grouped reports, a child the user pauses lets its siblings report together, and reports on its own later', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-pause-group-'));
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports, { settings: () => ({ ...nested(), groupReports: true }) });
+  try {
+    const [a, b] = /^Started: (.+?)\./.exec(await children.start([{ task: 'a' }, { task: 'b' }], dir))![1].split(', ');
+    await until(() => asked.length === 2);
+    assert.equal(await children.interrupt(a), 'paused');
+    await until(() => children.history.records.get(a)?.state === 'paused');
+    await children.tell(b, 'Wrap up.', 'user');
+    assert.equal(await children.interrupt(b), 'continued');
+    await until(() => reports.length > 0);
+    assert.deepEqual(reports, [`[${a}] Interrupted by the user; it waits for their next message, so no report until then.\n\n[${b}] Now doing: Interrupted by the user:\n\nWrap up.`],
+      'the paused child\'s note takes its place in the batch, so its sibling\'s report is not held');
+    await children.tell(a, 'Carry on.', 'user');
+    await until(() => !children.active);
+    assert.deepEqual(reports.slice(1), [`[${a}] Now doing: Carry on.`], 'resumed by the user, it reports on its own');
+
+    // Under a parent subagent, a pause that completes the batch wakes the waiting parent with it.
+    const [boss] = await children.spawn([{ task: 'boss' }], dir);
+    await until(() => asked.length === 5);
+    const [x, y] = await children.spawn([{ task: 'x' }, { task: 'y' }], dir, undefined, boss);
+    await until(() => asked.length === 7);
+    await children.tell(boss, 'Wait for them.', 'user');
+    assert.equal(await children.interrupt(boss), 'continued');
+    await children.tell(y, 'Wrap up.', 'user');
+    assert.equal(await children.interrupt(y), 'continued');
+    await until(() => children.history.records.get(y)?.state === 'completed' && children.history.records.get(boss)?.state === 'waiting');
+    assert.equal(await children.interrupt(x), 'paused');
+    await until(() => asked.some(typed => typed.at(-1)?.startsWith(`[${x}] Interrupted by the user`)));
+    assert.match(asked.at(-1)!.at(-1)!, new RegExp(`^\\[${x}\\] Interrupted by the user.*\\n\\n\\[${y}\\] Now doing: `, 's'));
   } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
