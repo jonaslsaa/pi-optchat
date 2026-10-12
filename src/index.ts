@@ -10,10 +10,10 @@ import { Memory } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
 import { createCompressor } from './compactor.ts';
 import { createProfile, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
-import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, MASTER, SEARCH_DOC, VIEW_DOC } from './prompts.ts';
+import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, MASTER, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC } from './prompts.ts';
 import { cachePayload, record } from './cache.ts';
 import { saveImages } from './images.ts';
-import { asUser, boundedMessage, atWork, buildContext, logMessage, previousExchange, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
+import { asUser, boundedMessage, atWork, buildContext, lastStep, logMessage, messageChars, previousExchange, refreshedRun, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, turnBudget, typedText } from './transcript.ts';
 import { registerReportRenderer, type ReportDetails } from './report-message.ts';
 import { memoryTools, result, searchTool } from './tools.ts';
 import { Children, CWD_DOC, loadedBuiltins } from './agents.ts';
@@ -69,6 +69,8 @@ export default function optchat(pi: ExtensionAPI) {
   let run: AgentMessage[] = [];
   let previous: AgentMessage[] = [];
   let logged = 0;
+  /** After a mid-turn refresh (#146), the run is sent from here on, after its task; 0 sends it whole. */
+  let keep = 0;
   let view: string | undefined;
   let prompt = '';
   let runStarted = false;
@@ -170,7 +172,7 @@ export default function optchat(pi: ExtensionAPI) {
       await checkpoint(old.dir);
     } finally {
       await old.memory.close(); await old.unlock(); active = undefined;
-      run = []; previous = []; logged = 0; view = undefined; runStarted = false; receipts.clear(); prompt = ''; idle = () => true;
+      run = []; previous = []; logged = 0; keep = 0; view = undefined; runStarted = false; receipts.clear(); prompt = ''; idle = () => true;
       untitle?.(); untitle = undefined; title.clear(); working = false;
     }
   };
@@ -367,7 +369,7 @@ export default function optchat(pi: ExtensionAPI) {
     return { action: 'continue' };
   });
   const startRun = (ctx: ExtensionContext) => {
-    flush(); run = []; logged = 0; view = undefined; runStarted = true;
+    flush(); run = []; logged = 0; keep = 0; view = undefined; runStarted = true;
     const config = active?.config;
     previous = config?.previousExchange ? previousExchange(ctx.sessionManager.getBranch(), config.previousExchangeKB * 1000) : [];
     pi.appendEntry(RUN_BOUNDARY, { state: 'start' });
@@ -449,8 +451,18 @@ export default function optchat(pi: ExtensionAPI) {
       // A prompt without our preamble (a report run started while Pi was idle) keeps the last one we built.
       const current = ctx.getSystemPrompt();
       if (current.startsWith(MASTER.slice(0, 40))) prompt = current;
+      // A turn past its budget moves its steps into the view, keeping the task and the last tool call whole (#146).
+      const budget = turnBudget(ctx.model?.contextWindow), cut = lastStep(run);
+      const size = budget && cut > keep ? run.slice(keep).reduce((sum, m) => sum + messageChars(m), 0) : 0;
+      if (budget && size > budget) {
+        const began = Date.now();
+        ctx.ui.setWorkingMessage(`OptChat: moving this turn's ${Math.round(size / 4000)}k tokens into memory…`);
+        try { flush(); await a.memory.settle(ctx.signal); } finally { ctx.ui.setWorkingMessage(); }
+        view = a.memory.render(); keep = cut;
+        ctx.ui.notify(`OptChat moved ${Math.round(size / 4000)}k tokens of this turn into memory (${((Date.now() - began) / 1000).toFixed(1)}s).`, 'info');
+      }
       // Built on every call, unlike the view, so it is never out of date; it goes last, after everything cached.
-      return { messages: buildContext(event.messages, run, view, promptFor(prompt, a.config), previous, atWork(a.children.working)) };
+      return { messages: buildContext(event.messages, refreshedRun(run, keep, TURN_REFRESHED), view, promptFor(prompt, a.config), previous, atWork(a.children.working)) };
     } catch (error) {
       // Pi catches extension errors. Explicitly abort so it cannot fall back to old context.
       ctx.abort();

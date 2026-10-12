@@ -177,3 +177,28 @@ export function buildContext(canonical: AgentMessage[], run: AgentMessage[], vie
   });
   return [head, ...messages, ...status && messages.at(-1)?.role !== 'toolResult' ? [{ role: 'user' as const, content: [{ type: 'text' as const, text: status }], timestamp: 0 }] : []];
 }
+
+/** Characters a message adds to a request: its text, thinking and tool-call arguments. Images and framing are left out. */
+export function messageChars(message: AgentMessage) {
+  if (!('content' in message)) return 0;
+  const { content } = message;
+  if (typeof content === 'string') return content.length;
+  return content.reduce((sum, block) => sum + (block.type === 'text' ? block.text.length : block.type === 'thinking' ? block.thinking.length
+    : block.type === 'toolCall' ? JSON.stringify(block.arguments).length : 0), 0);
+}
+/** The mid-turn refresh budget (#146) in characters, at ~4 characters a token: `OPTCHAT_TURN_BUDGET` of the model's window. Off when unset or 0. */
+export function turnBudget(contextWindow: number | undefined, fraction = Number(process.env.OPTCHAT_TURN_BUDGET)) {
+  return contextWindow && fraction > 0 ? Math.floor(contextWindow * fraction * 4) : undefined;
+}
+/** Where a refresh would cut the run: the last model reply, so its tool calls and their results stay whole. 0 when there is none after the task. */
+export function lastStep(run: readonly AgentMessage[]) {
+  const task = run.findIndex(m => m.role === 'user'), step = run.findLastIndex(m => m.role === 'assistant');
+  return step > task && task >= 0 ? step : 0;
+}
+/** The run as sent after a mid-turn refresh at `keep`: the task verbatim, then the run from `keep` on. Everything between is in the view. */
+export function refreshedRun(run: readonly AgentMessage[], keep: number, note: string): AgentMessage[] {
+  const task = run.find(m => m.role === 'user');
+  if (!keep || !task) return [...run];
+  const content = typeof task.content === 'string' ? [{ type: 'text' as const, text: task.content }] : task.content;
+  return [{ ...task, content: [...content, { type: 'text' as const, text: `\n\n${note}` }] }, ...run.slice(keep)];
+}
