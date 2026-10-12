@@ -550,9 +550,18 @@ export default function optchat(pi: ExtensionAPI) {
       if (failure) throw failure;
       return;
     }
+    const named = /^profile\s+(\S+)$/.exec(action)?.[1];
+    if (ctx.mode !== 'tui' && (named || action === 'profile')) {
+      // RPC and SDK hosts (Pi Web) have no picker and may not support ctx.newSession(), so a still-empty session binds in place.
+      const first = `Run /optchat profile ${named ?? '<name>'} as the first message of a new session, or start Pi with --optchat-profile <name>.`;
+      if (!named || active || remote || joined || ctx.sessionManager.getEntries().some(e => e.type === 'message' || e.type === 'custom_message')) throw new Error(first);
+      // As with a requested profile: one that fails to open blocks prompts instead of running without memory.
+      try { await openProfile(named, ctx); } catch (error) { fault = errorText(error); throw error; }
+      pi.appendEntry(binding, { name: named });
+      return;
+    }
     if (action === 'profile') {
       if (!ctx.isIdle() || active?.children.active) throw new Error('Finish or stop active work before switching profiles.');
-      if (ctx.mode !== 'tui') throw new Error('/optchat profile requires interactive Pi. Start headless runs with --optchat-profile <name>.');
       const selected = await chooseProfile(ctx);
       if (!selected || selected === active?.name) return;
       await ctx.newSession({ setup: async manager => { manager.appendCustomEntry(binding, { name: selected }); } });

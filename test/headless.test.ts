@@ -54,7 +54,8 @@ async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?:
   if (options.flag) session.extensionRunner.setFlagValue('optchat-profile', options.flag);
   if (options.connect) session.extensionRunner.setFlagValue('optchat-connect', options.connect);
   // RPC hosts have a real UI, but a dialog there can hang the host (pi-acp), so any select fails the test.
-  const uiContext: ExtensionUIContext = { ...session.extensionRunner.getUIContext(),
+  const notes: string[] = [];
+  const uiContext: ExtensionUIContext = { ...session.extensionRunner.getUIContext(), notify: message => { notes.push(message); },
     select: async () => { throw new Error('a headless session must not ask for a profile'); } };
   await session.bindExtensions({ uiContext, mode, onError: error => { errors.push(error.error); } });
   const ask = async (text: string) => {
@@ -64,7 +65,7 @@ async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?:
   };
   const bindings = () => manager.getEntries().flatMap(e => e.type === 'custom' && e.customType === 'optchat.profile' ? [e.data] : []);
   const close = async () => { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); };
-  return { ask, bindings, close, errors, sent };
+  return { ask, bindings, close, errors, notes, sent };
 }
 
 test('a headless run without a binding or --optchat-profile is plain Pi: it answers, and no profile is picked or created', async () => {
@@ -88,6 +89,21 @@ test('--optchat-profile still opens that profile headlessly', async () => {
     assert.deepEqual(pi.errors, []);
     assert.deepEqual(pi.bindings(), [{ name: 'work' }]);
     assert.match(pi.sent[0], /You are OptChat/);
+  } finally { await pi.close(); }
+});
+
+test('in an RPC host (Pi Web), /optchat profile <name> as the first message binds that session in place', async () => {
+  // No commandContextActions are bound, so ctx.newSession() throws, as Pi Web's does.
+  const pi = await headless('rpc');
+  try {
+    await pi.ask('/optchat profile work');
+    assert.deepEqual(pi.bindings(), [{ name: 'work' }]);
+    assert.match(await pi.ask('Say OK') ?? '', /^OK to: <chat>[^]*Say OK$/, 'the next prompt runs with the OptChat view');
+    assert.match(pi.sent[0], /You are OptChat/);
+    await pi.ask('/optchat profile personal');
+    assert.deepEqual(pi.bindings(), [{ name: 'work' }], 'a session with messages keeps its profile');
+    assert.match(pi.notes.at(-1) ?? '', /^Run \/optchat profile personal as the first message of a new session/);
+    assert.deepEqual(pi.errors, []);
   } finally { await pi.close(); }
 });
 
