@@ -108,6 +108,22 @@ test('in an RPC host (Pi Web), /optchat profile <name> as the first message bind
   } finally { await pi.close(); }
 });
 
+test('in an RPC host, /optchat profile <name> that cannot open saves no binding and blocks prompts instead of running without memory', async () => {
+  const unlock = await lockProfile(profilePath('work'), 'work · PID 1 · elsewhere');
+  try {
+    for (const [why, name, error] of [['typo', 'wrok', /does not exist/], ['busy', 'work', /Profile already running/]] as const) {
+      const pi = await headless('rpc');
+      try {
+        await pi.ask(`/optchat profile ${name}`);
+        assert.match(pi.notes.at(-1) ?? '', error, `${why}: the command says why`);
+        assert.equal(await pi.ask('Say OK'), undefined, `${why}: the prompt is not answered`);
+        assert.equal(pi.sent.length, 0, `${why}: nothing reaches the model`);
+        assert.deepEqual(pi.bindings(), [], `${why}: no binding is saved`);
+      } finally { await pi.close(); }
+    }
+  } finally { await unlock(); }
+});
+
 test('a requested profile that cannot open fails visibly and does not run without memory', async () => {
   const unlock = await lockProfile(profilePath('work'), 'work · PID 1 · elsewhere');
   try {
