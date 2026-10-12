@@ -172,10 +172,11 @@ test('one spawn\'s reports arrive together once its last child finishes, also to
     await until(() => state(a) === 'completed' && state(stopped) === 'stopped');
     await new Promise(r => setTimeout(r, 50));
     assert.deepEqual(reports, [], 'nothing is delivered while a sibling still runs');
-    assert.deepEqual(held.at(-1), [`[${a}] a done`, `[${stopped}] stopped done`], 'finished reports are journaled at once, so a crash cannot lose them');
+    const stopReport = `[${stopped}] Stopped by the user. They ended it on purpose, so it did not fail: do not redo or delegate this task again unless they ask. Its chat is kept, so tell resumes it where it stopped.\n\nIts last message before the stop:\nstopped done`;
+    assert.deepEqual(held.at(-1), [`[${a}] a done`, stopReport], 'finished reports are journaled at once, so a crash cannot lose them');
     releases.get('b')!();
     await until(() => !children.active);
-    assert.deepEqual(reports, [`[${a}] a done\n\n[${b}] b done\n\n[${stopped}] stopped done`], 'one message, in spawn order');
+    assert.deepEqual(reports, [`[${a}] a done\n\n[${b}] b done\n\n${stopReport}`], 'one message, in spawn order');
     assert.deepEqual(counts, [3]);
     assert.deepEqual(held.at(-1), [], 'delivered, the held reports leave the journal');
     const journaled = held.length;
@@ -581,6 +582,73 @@ test('a message sent while an interrupt is still settling is not lost; a stop du
     await until(() => children.history.records.get(stopped)?.state === 'stopped');
     assert.ok(!asked.flat().some(text => text.startsWith('Interrupted by the user:')), 'no turn starts after the stop');
     assert.equal(children.history.records.get(stopped)?.guidance[0].state, 'undelivered');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a stopped agent\'s report says who stopped it and that tell resumes it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-stop-report-'));
+  const reports: string[] = [];
+  const { children, asked, memory } = await busyChildren(dir, reports);
+  const report = (id: string) => reports.findLast(r => r.startsWith(`[${id}]`));
+  try {
+    const [busy, idle] = await children.spawn([{ task: 'busy' }, { task: 'idle' }], dir);
+    const [boss] = await children.spawn([{ task: 'boss' }], dir);
+    const [worker] = await children.spawn([{ task: 'worker' }], dir, undefined, boss);
+    await until(() => asked.length === 4);
+    await children.stop(busy);
+    await until(() => report(busy) !== undefined);
+    assert.match(report(busy)!, new RegExp(`^\\[${busy}\\] Stopped by the user\\. .*do not redo or delegate this task again unless they ask\\. .*tell resumes it`), 'Ctrl+X reads as the user\'s choice, not a failure');
+    assert.match(await children.tell(busy, 'Carry on.'), /resumed it/);
+    await until(() => report(busy) === `[${busy}] Now doing: Carry on.`);
+
+    await children.stop(boss);
+    await until(() => report(boss) !== undefined && children.history.records.get(worker)?.state === 'stopped');
+    assert.match(report(boss)!, /Stopped by the user\./);
+    assert.match(children.history.records.get(worker)?.report ?? '', /^Stopped because the agent that started it stopped or ended\./, 'a descendant records why it stopped');
+
+    assert.equal(await children.interrupt(idle), 'paused');
+    await until(() => children.history.records.get(idle)?.state === 'paused');
+    await children.close();
+    const closed = memory.root.filter(e => e.kind === 'work' && e.text.startsWith(`[${idle}]`)).map(e => withoutFullChat(e.text));
+    assert.equal(closed.length, 1);
+    assert.match(closed[0], /^\[\w+\] Stopped because Pi closed or reloaded while it waited for the user\. It is not resumed on its own; .*tell resumes it/, 'a paused run Pi stops on close says so, since it is not resumed on its own');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a child still at work when its parent\'s run throws is stopped, and its report says its parent ended', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-stop-parent-'));
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports);
+  try {
+    const [boss] = await children.spawn([{ task: 'boss' }], dir);
+    const [worker] = await children.spawn([{ task: 'worker' }], dir, undefined, boss);
+    await until(() => asked.length === 2);
+    children.live(boss)!.session.prompt = async () => { throw new Error('boom'); };
+    await children.tell(boss, 'Go on.', 'user');
+    assert.equal(await children.interrupt(boss), 'continued');
+    await until(() => !children.active);
+    assert.equal(children.history.records.get(boss)?.state, 'failed');
+    assert.equal(children.history.records.get(worker)?.state, 'stopped');
+    assert.match(children.history.records.get(worker)?.report ?? '', /^Stopped because the agent that started it stopped or ended\./, 'not taken for a user stop');
+  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a run stopped while its next request throws still reports its last message under the stop text', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-stop-throw-'));
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports);
+  try {
+    const [id] = await children.spawn([{ task: 'busy' }], dir);
+    await until(() => asked.length === 1);
+    const session = children.live(id)!.session;
+    let before: string | undefined;
+    session.prompt = async () => { before = session.getLastAssistantText(); await children.stop(id); throw new Error('boom'); };
+    await children.tell(id, 'Go on.', 'user');
+    assert.equal(await children.interrupt(id), 'continued');
+    await until(() => !children.active);
+    assert.equal(children.history.records.get(id)?.state, 'stopped');
+    assert.ok(before);
+    assert.equal(reports.at(-1), `[${id}] Stopped by the user. They ended it on purpose, so it did not fail: do not redo or delegate this task again unless they ask. Its chat is kept, so tell resumes it where it stopped.\n\nIts last message before the stop:\n${before}`);
   } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
