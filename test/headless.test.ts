@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionFactory, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, lastProfile, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig } from '../src/profiles.ts';
 import { textContent } from '../src/transcript.ts';
@@ -26,7 +26,7 @@ for (const name of ['work', 'personal']) {
 rememberProfile('personal');
 
 /** A headless Pi (print or RPC) whose model answers "OK to: <prompt>" and records what each call was sent. */
-async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?: string; connect?: string; agent?: string; hold?: Promise<void> } = {}) {
+async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?: string; connect?: string; agent?: string; hold?: Promise<void>; later?: ExtensionFactory } = {}) {
   const dir = mkdtempSync(join(root, 's-'));
   const sent: string[] = [], errors: string[] = [];
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
@@ -46,7 +46,7 @@ async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?:
   });
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
   const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
-    noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat, ...options.later ? [options.later] : []] });
   await loader.reload();
   const manager = SessionManager.create(dir, join(dir, 'sessions'));
   if (options.bound) manager.appendCustomEntry('optchat.profile', { name: options.bound });
@@ -122,6 +122,16 @@ test('in an RPC host, /optchat profile <name> that cannot open saves no binding 
       } finally { await pi.close(); }
     }
   } finally { await unlock(); }
+});
+
+test('the model gets the system prompt Pi has now, with sections extensions loaded after OptChat add (Pi\'s built-in MCP)', async () => {
+  const later: ExtensionFactory = pi => { pi.on('before_agent_start', event => { event.systemPromptOptions.sections.x = 'SECTION-FROM-LATER-EXTENSION'; }); };
+  const pi = await headless('print', { flag: 'work', later });
+  try {
+    await pi.ask('Say OK');
+    assert.match(pi.sent[0], /You are OptChat/);
+    assert.match(pi.sent[0], /SECTION-FROM-LATER-EXTENSION/);
+  } finally { await pi.close(); }
 });
 
 test('a requested profile that cannot open fails visibly and does not run without memory', async () => {

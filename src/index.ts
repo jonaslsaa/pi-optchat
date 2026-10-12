@@ -445,6 +445,10 @@ export default function optchat(pi: ExtensionAPI) {
         view = a.memory.render(); // Capture old history before logging the new input.
         flush();
       }
+      // Extensions that run after ours (Pi's built-in MCP adds <mcp_servers>) still change the prompt; send what Pi has now.
+      // A prompt without our preamble (a report run started while Pi was idle) keeps the last one we built.
+      const current = ctx.getSystemPrompt();
+      if (current.startsWith(MASTER.slice(0, 40))) prompt = current;
       // Built on every call, unlike the view, so it is never out of date; it goes last, after everything cached.
       return { messages: buildContext(event.messages, run, view, promptFor(prompt, a.config), previous, atWork(a.children.working)) };
     } catch (error) {
