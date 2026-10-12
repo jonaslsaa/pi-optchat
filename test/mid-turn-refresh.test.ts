@@ -8,7 +8,7 @@ import { createAssistantMessageEventStream, type AssistantMessage, type Context 
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
-import { buildContext, refreshBudget, refreshedRun, refreshFraction, refreshPoint, textContent } from '../src/transcript.ts';
+import { buildContext, messageChars, refreshBudget, refreshedRun, refreshFraction, refreshPoint, textContent } from '../src/transcript.ts';
 import { parsePercent } from '../src/settings-page.ts';
 import { invalid } from '../src/settings.ts';
 import { subagentCompaction } from '../src/agents.ts';
@@ -42,6 +42,7 @@ test('a last step too big to keep under half the budget waits for a smaller one 
   const run: AgentMessage[] = [{ role: 'user', content: 'task', timestamp: 1 }, ...step('a', 'x'.repeat(600)), ...step('b', 'x'.repeat(600))];
   assert.equal(refreshPoint(run, 0, 1000), undefined);
   assert.equal(refreshPoint([...run, ...step('c', 'small')], 0, 1000)?.cut, 5);
+  assert.equal(messageChars({ role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image', data: '', mimeType: 'image/png' }], timestamp: 1 }), 4_802, 'images count as Pi estimates them');
 });
 
 test('subagents use Pi compaction at about the refresh threshold on top of the view, or Pi\'s default when it is off', () => {
@@ -92,7 +93,7 @@ test('a turn past its threshold is sent as the refreshed view, its task verbatim
     assert.equal(session.getLastAssistantText(), 'Done.');
     assert.deepEqual(captured.map(c => c.messages.map(m => m.role).join(' ')), [
       'user', 'user assistant toolResult', 'user assistant toolResult assistant toolResult', 'user assistant toolResult assistant toolResult assistant toolResult',
-      // Over budget: the view now holds the first three steps, and the request only the fourth.
+      // Over the threshold: the view now has the turn so far as lines, and the request only the task and the fourth step verbatim.
       'user assistant toolResult', 'user assistant toolResult assistant toolResult', 'user assistant toolResult assistant toolResult assistant toolResult',
       'user assistant toolResult assistant toolResult assistant toolResult assistant toolResult',
       // Over again, counted from the last refresh.

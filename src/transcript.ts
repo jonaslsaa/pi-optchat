@@ -178,13 +178,15 @@ export function buildContext(canonical: AgentMessage[], run: AgentMessage[], vie
   return [head, ...messages, ...status && messages.at(-1)?.role !== 'toolResult' ? [{ role: 'user' as const, content: [{ type: 'text' as const, text: status }], timestamp: 0 }] : []];
 }
 
-/** Characters a message adds to a request: its text, thinking and tool-call arguments. Images and framing are left out. */
+/** Pi's own estimate for an image when it decides to compact: 4,800 characters, about 1,200 tokens. */
+const IMAGE_CHARS = 4_800;
+/** Characters a message adds to a request: its text, thinking, tool-call arguments and images, as Pi estimates them. Framing is left out. */
 export function messageChars(message: AgentMessage) {
   if (!('content' in message)) return 0;
   const { content } = message;
   if (typeof content === 'string') return content.length;
   return content.reduce((sum, block) => sum + (block.type === 'text' ? block.text.length : block.type === 'thinking' ? block.thinking.length
-    : block.type === 'toolCall' ? JSON.stringify(block.arguments).length : 0), 0);
+    : block.type === 'toolCall' ? JSON.stringify(block.arguments).length : block.type === 'image' ? IMAGE_CHARS : 0), 0);
 }
 /** The share of the model's window the current turn's verbatim messages may fill before they move into memory (#146): the
  * profile's Turn refresh threshold, unless `OPTCHAT_REFRESH_AT` gives one (0 turns it off). */
