@@ -12,8 +12,9 @@ export interface Origin { source: 'claude' | 'claude-memory' | 'codex' | 'pi' | 
 export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin }
 export interface Part { l: number; i: number }
 export interface Summary extends Part { text: string; size: number }
-/** `part` is the node to build: a message's leaf, or the merge of its two halves. */
-export interface Compression { context: string; source: string; part: Part; historical?: boolean }
+/** `part` is the node to build: a message's leaf, or the merge of its two halves. `call` is the tool call a tool result's leaf
+ * answers, raw, since its own line is often not built yet (#153). */
+export interface Compression { context: string; source: string; part: Part; historical?: boolean; call?: { i: number; text: string } }
 export type Compressor = (input: Compression, signal: AbortSignal) => Promise<string>;
 const key = ({ l, i }: Part) => l * 2 ** 40 + i;
 const UNBUILT = '(not summarized yet: zoom it)';
@@ -279,8 +280,10 @@ export class Memory {
     const source = part.l === 0 ? `${this.root[part.i].kind}: ${this.root[part.i].text}`
       : [0, 1].map(offset => this.text({ l: part.l - 1, i: 2 * part.i + offset })).join('\n');
     const mergeSource = part.l > 0 ? [0, 1].map(offset => flat(this.text({ l: part.l - 1, i: 2 * part.i + offset }))).join('\n') : source;
+    const call = part.l === 0 ? this.callOf(part.i) : undefined;
     const text = bytes(source) <= NODE ? source : (await this.compress({ context: this.compactionView(part), source: mergeSource, part,
-      historical: this.root.slice(start(part), end(part)).some(entry => !!entry.origin) }, this.controller.signal)).trim();
+      historical: this.root.slice(start(part), end(part)).some(entry => !!entry.origin),
+      ...(call ? { call: { i: call.i, text: cap(`tool: ${call.text}`, 4000) } } : {}) }, this.controller.signal)).trim();
     if (this.stopped) return;
     if (!text) throw new Error('Compactor returned an empty summary.');
     const node = { ...part, text, size: lineBytes(text) };
@@ -291,6 +294,17 @@ export class Memory {
     if (!part.l) { this.unbuilt.delete(part.i); this.chat.built(part.i); this.compaction.built(part.i); }
     if (!this.retryAt.size) this.lastError = undefined;
     if (this.fit()) this.save();
+  }
+  /** The tool call a result answers: a run of calls is followed by their results in the same order. A result that doesn't
+   * start with the call's tool name (an `Agent error`, an odd import) has none. */
+  private callOf(i: number) {
+    if (this.root[i].kind !== 'echo') return;
+    let results = i;
+    while (this.root[results - 1]?.kind === 'echo') results--;
+    let calls = results;
+    while (this.root[calls - 1]?.kind === 'tool') calls--;
+    const call = calls + i - results < results ? this.root[calls + i - results] : undefined;
+    return call && this.root[i].text.startsWith(`${call.text.split(' ', 1)[0]}:`) ? call : undefined;
   }
   /** The compactions' view up to the node. A line still being built shows as a placeholder instead of ending the view: an A/B on
    * real turns (#101) found that cutting there also hid the built lines after it, such as an echo's own tool call. */

@@ -11,6 +11,7 @@ import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload } from '../src/cache.ts';
 import { logMessage, buildContext, boundedMessage } from '../src/transcript.ts';
 import { Inbox } from '../src/inbox.ts';
+import { compaction } from '../src/prompts.ts';
 import type { ToolResultMessage } from '@earendil-works/pi-ai';
 import type { AssistantMessage, SystemMessage, UserMessage } from '@earendil-works/pi-ai';
 
@@ -745,5 +746,30 @@ test('view size counts the flattened text that render emits, for new and reloade
     await memory.close();
     memory = new Memory(dir, async () => 'x');
     assert.equal(memory.size, measured(memory), 'loaded from the tree');
+  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a tool result's summary sees the raw call it answers, paired in order through parallel calls", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
+  const calls: Compression[] = [];
+  const memory = new Memory(dir, async input => { calls.push(input); return 'summary'; }, () => {});
+  const long = (s: string) => `${s} ${'x'.repeat(600)}`;
+  try {
+    memory.append('user', long('please read two files'));
+    memory.append('tool', long('read {"path":"a.ts"}'));
+    memory.append('tool', long('bash {"command":"ls"}'));
+    memory.append('echo', long('read: contents of a'));
+    memory.append('echo', long('bash: listing'));
+    memory.append('tool', long('edit {"path":"b.ts"}'));
+    memory.append('echo', long('Agent error: overloaded'));
+    await memory.settle(AbortSignal.timeout(5000), 'tree');
+    const leaf = (i: number) => calls.find(c => c.part.l === 0 && c.part.i === i)!;
+    assert.deepEqual([0, 1, 2, 5].map(i => leaf(i).call), [undefined, undefined, undefined, undefined]);
+    assert.equal(leaf(6).call, undefined);
+    assert.deepEqual([leaf(3).call?.i, leaf(4).call?.i], [1, 2]);
+    const task = compaction(leaf(4));
+    assert.match(task, /message 4 answers \(message 2,[^]*<call>\ntool: bash \{"command":"ls"\}[^]*<\/call>\n<input>\necho: bash: listing/);
+    assert.doesNotMatch(compaction(leaf(1)), /<call>/);
+    assert.doesNotMatch(leaf(4).context, /tool: bash/);
   } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
 });

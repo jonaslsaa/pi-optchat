@@ -166,11 +166,17 @@ export const cutOffChildren = (text: string, ids: string[]) => ids.length ? `${t
 // ruler; a real sample line once got its content copied, so it is dashes.
 const RULER = '-'.repeat(NODE);
 const label = (part: Part) => `${start(part)}+${2 ** part.l}`;
-export function compaction({ source, part }: { source: string; part: Part }) {
+// A tool result's leaf also gets the raw call it answers, as context like <chat> (#153 A/B: recall 3.88 → 4.22).
+const callBlock = (i: number, call?: { i: number; text: string }) => call ? `<call> is the tool call that message ${i} answers (message ${call.i}, which has its own line): context, like <chat>.
+<call>
+${call.text}
+</call>
+` : '';
+export function compaction({ source, part, call }: { source: string; part: Part; call?: { i: number; text: string } }) {
   if (!part.l) return `Compaction: compress message ${part.i} into one line of at most 512 bytes
 (about 70 words), the length of this ruler:
 ${RULER}
-<input>
+${callBlock(part.i, call)}<input>
 ${source}
 </input>`;
   const a = { l: part.l - 1, i: 2 * part.i }, b = { l: part.l - 1, i: 2 * part.i + 1 };
