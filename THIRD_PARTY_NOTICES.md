@@ -8,8 +8,9 @@ The OptChat memory design and the prompt strings in `src/prompts.ts`
 https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449
 
 That upstream text is credited to Victor Taelin and is not relicensed by this
-repository's MIT grant for original implementation code. The complete recipe
-is linked upstream. This project is an independent Pi extension.
+repository's MIT grant for original implementation code. The supplied v2 recipe
+is bundled unmodified in [docs/optchat.v2.md](docs/optchat.v2.md). This project is
+an independent Pi extension.
 
 ## Pi
 
