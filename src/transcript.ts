@@ -129,21 +129,20 @@ function latestExchange(branch: readonly SessionEntry[]) {
 export const fullChat = (id: string) => `Full chat: zoom("${id}")`;
 export const withoutFullChat = (text: string) => text.replace(/\n\nFull chat: zoom\("[\w-]+"\)$/gm, '');
 const TASK = '\n</chat>\n\nYour task:\n';
-/** Tool calls and results in a run transcript keep their head and tail, so a page holds many steps. */
-const STEP = 1_000;
-/** A subagent's chat for zoom, as `kind|text` lines: its task without the memory view, replies, tool calls and results, and what it was told. */
+/** Faithful retained text for named zoom. Paging bounds each response; this projection never clips individual steps.
+ * Images and thoughts are omitted; numeric memory zoom provides the separate image retrieval route. */
 export function runTranscript(messages: readonly AgentMessage[]) {
-  const task = messages.find(message => message.role === 'user');
-  return messages.flatMap(message => {
+  const visible = messages.map(asUser), task = messages.find(message => message.role === 'user');
+  return visible.flatMap(message => {
     if (message.role === 'user') {
       // Only the task prompt holds the memory view (src/agents.ts): `${view}\n\nYour task:\n${task}`.
       const text = textContent(message.content, false), at = text.indexOf(TASK);
       return [`user|${message === task && isView(text) && at >= 0 ? text.slice(at + '\n</chat>\n\n'.length) : text}`];
     }
-    if (message.role === 'toolResult') return [`echo|${cap(`${message.toolName}: ${textContent(message.content, false)}`, STEP)}`];
+    if (message.role === 'toolResult') return [`echo|${message.toolName}: ${textContent(message.content, false)}`];
     if (message.role !== 'assistant') return [];
     return [...message.content.flatMap(block => block.type === 'text' && block.text.trim() ? [`talk|${block.text}`]
-      : block.type === 'toolCall' ? [`tool|${cap(`${block.name} ${JSON.stringify(block.arguments)}`, STEP)}`] : []),
+      : block.type === 'toolCall' ? [`tool|${block.name} ${JSON.stringify(block.arguments)}`] : []),
     ...message.stopReason === 'error' || message.stopReason === 'aborted' ? [`echo|Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`] : []];
   }).join('\n');
 }

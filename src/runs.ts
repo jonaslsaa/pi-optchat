@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { SessionManager } from '@earendil-works/pi-coding-agent';
+import { SessionManager, type SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { atomicWrite } from './store.ts';
 import { record } from './cache.ts';
@@ -55,8 +55,13 @@ function isRun(value: unknown): value is RunInfo {
     && Array.isArray(value.guidance) && value.guidance.every(g => record(g) && typeof g.text === 'string' && typeof g.date === 'number' && ['queued', 'delivered', 'undelivered'].includes(String(g.state)) && (g.from === undefined || g.from === 'user' || g.from === 'manager'));
 }
 export const CUT_OFF = 'Pi closed before this agent finished. Its partial transcript is retained.';
+/** Canonical retained entries, including shown custom messages; compaction summaries are projections, not originals. */
+export function retainedMessages(entries: readonly SessionEntry[]): AgentMessage[] {
+  return entries.flatMap((e): AgentMessage[] => e.type === 'message' ? [e.message] : e.type === 'custom_message'
+    ? [{ role: 'custom', customType: e.customType, content: e.content, display: e.display, details: e.details, timestamp: Date.parse(e.timestamp) }] : []);
+}
 export function sessionMessages(file: string): AgentMessage[] {
-  return SessionManager.open(file).getEntries().flatMap(e => e.type === 'message' ? [e.message] : []);
+  return retainedMessages(SessionManager.open(file).getEntries());
 }
 
 /** Metadata sits beside the SDK's canonical child transcripts, inside this profile. */

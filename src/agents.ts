@@ -11,7 +11,7 @@ import { memoryTools, searchTool } from './tools.ts';
 import { VIEW, type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cachePayload } from './cache.ts';
-import { CUT_OFF, RunHistory, isRunning, transition, sessionMessages, type RunInfo, type RunState, type FinishReason } from './runs.ts';
+import { CUT_OFF, RunHistory, isRunning, transition, sessionMessages, retainedMessages, type RunInfo, type RunState, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { fullChat, refreshFraction, textContent } from './transcript.ts';
 import { Type } from 'typebox';
@@ -21,6 +21,9 @@ import { DEFAULT_SETTINGS, type Settings } from './settings.ts';
 
 export interface LiveRun {
   session: AgentSession; info: RunInfo; updated: number; streaming?: AgentMessage;
+  /** Canonical-entry boundary when streaming began, plus the latest message_end awaiting SDK persistence. */
+  streamingAfter?: string | null;
+  ending?: { after: string | null; message: AgentMessage };
   tools: Map<string, { name: string; args: unknown; output?: unknown; started: number }>;
   pendingReports: string[]; pendingGuidance: string[]; wake?: () => void; completion?: Promise<void>;
   /** Set by the user's interrupt: the queued guidance the run continues with once its current step is aborted; with none, it pauses. */
@@ -122,7 +125,19 @@ export class Children {
   }
   messages(id: string): AgentMessage[] {
     const live = this.running.get(id);
-    if (live) return [...live.session.messages, ...(live.streaming ? [live.streaming] : [])];
+    if (live) {
+      const entries = live.session.sessionManager.getEntries(), messages = retainedMessages(entries);
+      const tails = [...live.ending ? [live.ending] : [], ...live.streaming ? [{ message: live.streaming, after: live.streamingAfter ?? null }] : []];
+      for (const tail of tails) {
+        const boundary = tail.after === null ? -1 : entries.findIndex(entry => entry.id === tail.after);
+        // SDK listeners run before appendMessage. Once the corresponding entry lands, the canonical message wins,
+        // even if the streaming draft was a shorter version. A later identical reply has a different entry boundary.
+        const persisted = entries.slice(boundary + 1).some(entry => entry.type === 'message' && entry.message.role === tail.message.role
+          || entry.type === 'custom_message' && tail.message.role === 'custom');
+        if (!persisted) messages.push(tail.message);
+      }
+      return messages;
+    }
     const file = this.history.records.get(id)?.sessionFile;
     return file ? sessionMessages(file) : [];
   }
@@ -139,9 +154,13 @@ export class Children {
   private observe(live: LiveRun, event: AgentSessionEvent) {
     try {
       live.updated = Date.now();
+      if (event.type === 'message_start' && event.message.role === 'assistant')
+        live.streamingAfter = live.session.sessionManager.getEntries().at(-1)?.id ?? null;
       if (event.type === 'message_update') live.streaming = event.message;
       if (event.type === 'message_end') {
+        live.ending = { after: live.streamingAfter ?? live.session.sessionManager.getEntries().at(-1)?.id ?? null, message: event.message };
         live.streaming = undefined;
+        live.streamingAfter = undefined;
       }
       if (event.type === 'turn_end' || event.type === 'agent_settled') this.options.usage?.backfill(live.session.sessionManager.getEntries(), live.info.parentSession, 'subagent', live.info.id);
       if (event.type === 'message_start' && event.message.role === 'user') {

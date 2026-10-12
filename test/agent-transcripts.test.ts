@@ -4,8 +4,8 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { Memory, PAGE } from '../src/memory.ts';
-import { memoryTools } from '../src/tools.ts';
+import { Memory, PAGE, CAP } from '../src/memory.ts';
+import { memoryTools, runPage } from '../src/tools.ts';
 import { runTranscript } from '../src/transcript.ts';
 import { reportParts } from '../src/report-message.ts';
 import { removeDir } from './support.ts';
@@ -21,12 +21,42 @@ const chat: AgentMessage[] = [
   { role: 'user', content: '<chat>\npasted by the parent', ...at },
 ];
 
-test('a run transcript is its chat as kind|text lines, without the memory view, tool results cut to head and tail', () => {
+test('a run transcript keeps retained tool evidence whole and strips only the initial memory view', () => {
   const text = runTranscript(chat);
   assert.ok(text.startsWith('user|Your task:\nRun the tests.\ntalk|Running them.\ntool|bash {"command":"npm test"}\necho|bash: ok ok'));
   assert.ok(!text.includes('a long memory view'));
-  assert.match(text, /characters omitted; head and tail retained[\s\S]*fail 1\nuser\|Parent says: fix it\.\nuser\|<chat>\npasted by the parent$/, 'only the task prompt loses its memory view');
-  assert.ok(text.length < 1_500);
+  assert.ok(text.includes('echo|bash: ' + 'ok '.repeat(2_000) + 'fail 1'));
+  assert.match(text, /fail 1\nuser\|Parent says: fix it\.\nuser\|<chat>\npasted by the parent$/, 'only the task prompt loses its memory view');
+  assert.doesNotMatch(text, /characters omitted/);
+  const withNotice = runTranscript([{ role: 'custom', customType: 'notice', content: 'Shown before task', display: true, ...at }, ...chat]);
+  assert.ok(withNotice.startsWith('user|[notice] Shown before task\nuser|Your task:'));
+  assert.ok(!withNotice.includes('a long memory view'));
+});
+
+test('all pages reconstruct long arguments and results exactly, preserving Unicode and excluding thoughts and images', () => {
+  const args = 'a'.repeat(PAGE - 25) + '😀ARGUMENT_MIDDLE' + '字'.repeat(35_000), output = 'echo '.repeat(8000) + 'RESULT_MIDDLE😀' + 'tail'.repeat(9000);
+  const messages: AgentMessage[] = [
+    assistant([{ type: 'thinking', thinking: 'PRIVATE_THOUGHTS' }, { type: 'toolCall', id: 't', name: 'read', arguments: { source: args } }]),
+    { role: 'toolResult', toolCallId: 't', toolName: 'read', isError: false, content: [{ type: 'text', text: output }, { type: 'image', data: 'PRIVATE_IMAGE_DATA', mimeType: 'image/png' }], ...at },
+  ];
+  const source = runTranscript(messages);
+  assert.equal(source, `tool|read ${JSON.stringify({ source: args })}\necho|read: ${output}`);
+  let reconstructed = '', offset = 0;
+  while (offset < source.length) {
+    const page = runPage(source, offset, 1_000_000);
+    assert.ok(page.length <= CAP);
+    assert.ok(page.isWellFormed());
+    const match = /^([\s\S]*)\n\[characters (\d+)-(\d+) of (\d+)(?:; go on with offset (\d+))?\]$/.exec(page)!;
+    assert.equal(Number(match[2]), offset);
+    reconstructed += match[1]; offset = Number(match[3]);
+    assert.equal(match[5] === undefined, offset === source.length);
+  }
+  assert.equal(reconstructed, source);
+  assert.match(reconstructed, /ARGUMENT_MIDDLE/); assert.match(reconstructed, /RESULT_MIDDLE/);
+  assert.doesNotMatch(reconstructed, /PRIVATE_/);
+  assert.equal(runPage('😀a', 0, 1), '😀\n[characters 0-2 of 3; go on with offset 2]');
+  assert.throws(() => runPage(source, -1), /offset/);
+  assert.throws(() => runPage(source, 0, 0), /limit/);
 });
 
 test('zoom takes a run id: the transcript in pages that say where to go on; an unknown run says so', async () => {
