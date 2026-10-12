@@ -186,14 +186,31 @@ export function messageChars(message: AgentMessage) {
   return content.reduce((sum, block) => sum + (block.type === 'text' ? block.text.length : block.type === 'thinking' ? block.thinking.length
     : block.type === 'toolCall' ? JSON.stringify(block.arguments).length : 0), 0);
 }
-/** The mid-turn refresh budget (#146) in characters, at ~4 characters a token: `OPTCHAT_TURN_BUDGET` of the model's window. Off when unset or 0. */
-export function turnBudget(contextWindow: number | undefined, fraction = Number(process.env.OPTCHAT_TURN_BUDGET)) {
+/** The share of the model's window the current turn's verbatim messages may fill before they move into memory (#146): the
+ * profile's Turn refresh threshold, unless `OPTCHAT_REFRESH_AT` gives one (0 turns it off). */
+export function refreshFraction(setting: number, env = process.env.OPTCHAT_REFRESH_AT) {
+  const override = env?.trim() ? Number(env) : NaN;
+  return Number.isFinite(override) ? override : setting;
+}
+/** That share in characters, at ~4 characters a token; none when off or the window is unknown. */
+export function refreshBudget(contextWindow: number | undefined, fraction: number) {
   return contextWindow && fraction > 0 ? Math.floor(contextWindow * fraction * 4) : undefined;
 }
+const chars = (messages: readonly AgentMessage[]) => messages.reduce((sum, m) => sum + messageChars(m), 0);
 /** Where a refresh would cut the run: the last model reply, so its tool calls and their results stay whole. 0 when there is none after the task. */
 export function lastStep(run: readonly AgentMessage[]) {
   const task = run.findIndex(m => m.role === 'user'), step = run.findLastIndex(m => m.role === 'assistant');
   return step > task && task >= 0 ? step : 0;
+}
+/** The run's new `keep` and the size it moves into the view, when what is sent since the last refresh passes the budget.
+ * What stays verbatim (the task and the last step) must fit in half the budget: a bigger last step, such as many parallel
+ * reads, would otherwise pass the budget again on the next call and refresh every call. It waits for a smaller step instead. */
+export function refreshPoint(run: readonly AgentMessage[], keep: number, budget: number | undefined) {
+  const cut = lastStep(run), task = run.find(m => m.role === 'user');
+  if (!budget || cut <= keep) return undefined;
+  const size = chars(run.slice(keep));
+  if (size <= budget || (task ? messageChars(task) : 0) + chars(run.slice(cut)) > budget / 2) return undefined;
+  return { cut, size };
 }
 /** The run as sent after a mid-turn refresh at `keep`: the task verbatim, then the run from `keep` on. Everything between is in the view. */
 export function refreshedRun(run: readonly AgentMessage[], keep: number, note: string): AgentMessage[] {

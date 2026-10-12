@@ -8,12 +8,12 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import { allowSearch, CONNECTED, cutOffChildren, delegation, NO_DELEGATION, NOT_CONNECTED, RESTARTED, SEARCH_DOC, STEERABLE, SUBAGENT, VIEW_DOC } from './prompts.ts';
 import { memoryTools, searchTool } from './tools.ts';
-import { type Memory } from './memory.ts';
+import { VIEW, type Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cachePayload } from './cache.ts';
 import { CUT_OFF, RunHistory, isRunning, transition, sessionMessages, type RunInfo, type RunState, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
-import { fullChat, textContent } from './transcript.ts';
+import { fullChat, refreshFraction, textContent } from './transcript.ts';
 import { Type } from 'typebox';
 import { result } from './tools.ts';
 import type { HandoffEvidence } from './handoff.ts';
@@ -79,6 +79,14 @@ export const builtinExtensions = (names: Iterable<string>): InlineExtension[] =>
   const create = Object.hasOwn(BUILTINS, name) ? (sdk as unknown as Record<string, unknown>)[BUILTINS[name]] : undefined;
   return typeof create === 'function' ? [{ name, factory: create(), replaceable: true, builtin: true }] : [];
 });
+/** Subagent transcripts are never summarized into the memory tree, so the mid-turn view refresh can't cover them; we rely on
+ * Pi's built-in compaction instead, set to start at about the main agent's Turn refresh threshold: that share of the window on top of the
+ * view in the task. If subagent quality drops after compaction, look into giving subagents their own summary tree (same refresh
+ * as the main agent) or a hybrid: Pi compaction plus a zoomable summarized transcript. With the threshold off, Pi's default applies. */
+export function subagentCompaction(contextWindow: number, fraction: number) {
+  if (!(fraction > 0)) return { enabled: true };
+  return { enabled: true, reserveTokens: Math.max(16_384, Math.round(contextWindow * (1 - fraction) - VIEW / 4)) };
+}
 export class Children {
   private readonly running = new Map<string, LiveRun>();
   readonly history: RunHistory;
@@ -235,7 +243,8 @@ export class Children {
     const { subagentLevels, maxAgents, memorySearch } = this.settings, delegates = depth < subagentLevels;
     const instructions = [this.instructions(), delegates ? delegation(maxAgents) : NO_DELEGATION, STEERABLE, connected ? CONNECTED : NOT_CONNECTED].filter(Boolean).join('\n\n');
     // The user's settings list their installed packages; a copy in memory keeps the child from writing them back.
-    const settingsManager = SettingsManager.inMemory({ ...SettingsManager.create(directory, getAgentDir()).getSettings(), compaction: { enabled: false }, cacheWarming: 'off' });
+    const settingsManager = SettingsManager.inMemory({ ...SettingsManager.create(directory, getAgentDir()).getSettings(),
+      compaction: subagentCompaction(o.model.contextWindow, refreshFraction(this.settings.refreshAt)), cacheWarming: 'off' });
     const loader = new DefaultResourceLoader({ cwd: directory, agentDir: getAgentDir(), settingsManager,
       noPromptTemplates: true,
       extensionsOverride: base => ({ ...base, extensions: base.extensions.filter(e => !isOptchat(e.resolvedPath)) }),

@@ -1,7 +1,7 @@
 import { Container, fuzzyFilter, getKeybindings, Input, SelectList, SettingsList, Spacer, Text, type Component, type SelectItem, type SettingItem } from '@earendil-works/pi-tui';
 import { DynamicBorder, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
 import { defaults, THINKING, type ProfileConfig } from './profiles.ts';
-import { invalid, isNumberKey, SETTING_KEYS, SETTINGS, type NumberKey, type SettingKey } from './settings.ts';
+import { invalid, isNumberKey, percent, SETTING_KEYS, SETTINGS, type NumberKey, type SettingKey } from './settings.ts';
 import type { ModelChoice } from './compactor.ts';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 
@@ -17,7 +17,7 @@ const modelValue = (theme: Theme, role: Role, choice: ModelChoice) => `${showMod
   ? '  default' : `  default ${defaults[role].model} · ${defaults[role].thinking}`)}`;
 const show = (key: SettingKey, value: number | boolean) => {
   const spec = SETTINGS[key];
-  return typeof value === 'boolean' ? value ? 'on' : 'off' : spec.kind === 'number' && spec.unit ? `${value} ${spec.unit}` : String(value);
+  return typeof value === 'boolean' ? value ? 'on' : 'off' : spec.kind === 'percent' ? percent(value) : spec.kind === 'number' && spec.unit ? `${value} ${spec.unit}` : String(value);
 };
 
 interface Options {
@@ -40,6 +40,13 @@ const listTheme = (theme: Theme) => ({ selectedPrefix: (t: string) => theme.fg('
   noMatch: () => theme.fg('muted', '  No matching models. Pi lists the models you are logged in to.') });
 
 /** Whole numbers only: typing replaces the value, Enter saves it, a bad value stays on screen with the reason. */
+/** "30", "30%" and "0.3" all mean 30%: a number from 1 up, or with a percent sign, is a percentage. */
+export function parsePercent(text: string) {
+  const match = /^\s*(\d+(?:\.\d+)?)\s*(%?)\s*$/.exec(text);
+  if (!match) return NaN;
+  const n = Number(match[1]);
+  return match[2] || n >= 1 ? n / 100 : n;
+}
 class NumberStep extends Container {
   private readonly input: Input;
   private readonly error = new Text('', 0, 0);
@@ -47,15 +54,15 @@ class NumberStep extends Container {
     super();
     const spec = SETTINGS[key];
     // Empty with the current value as placeholder: typing starts a new value, Enter alone keeps the old one.
-    this.input = new Input({ placeholder: String(current), placeholderStyle: text => theme.fg('dim', text) }); this.input.focused = true;
+    this.input = new Input({ placeholder: spec.kind === 'percent' ? percent(current) : String(current), placeholderStyle: text => theme.fg('dim', text) }); this.input.focused = true;
     this.input.onEscape = cancel;
     this.input.onSubmit = text => {
       if (!text.trim()) return cancel();
-      const value = /^\s*\d+\s*$/.test(text) ? Number(text) : NaN;
+      const value = spec.kind === 'percent' ? parsePercent(text) : /^\s*\d+\s*$/.test(text) ? Number(text) : NaN;
       const problem = invalid(key, value) ?? submit(value);
       if (problem) this.error.setText(theme.fg('error', problem));
     };
-    this.addChild(step(theme, `${spec.label}${spec.unit ? ` (${spec.unit})` : ''}`, `${spec.description} Default ${show(key, spec.default)}.`,
+    this.addChild(step(theme, `${spec.label}${'unit' in spec && spec.unit ? ` (${spec.unit})` : ''}`, `${spec.description} Default ${show(key, spec.default)}.`,
       this.input, 'Type a number · Enter to save · Esc to go back', [this.error]));
   }
   handleInput(data: string) { this.input.handleInput(data); }

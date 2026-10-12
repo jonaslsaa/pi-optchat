@@ -86,9 +86,10 @@ Compression and subagents make extra model requests with your provider credentia
 | Previous exchange limit | 16 KB | A larger last exchange is left out. |
 | Memory search | off | Gives the agent, and subagents started or resumed after the change, a `search` tool over your original messages (see below). Off is the recipe: zoom and date only. Applies from the next turn. |
 | Summary size tolerance | 640 bytes | The compactor is always asked for 512-byte lines; a longer line up to this size is kept instead of retried. 512 is the recipe's strict rule. |
+| Turn refresh threshold | 30% | Once the current turn's verbatim messages pass this share of the model's context window, they move into memory and the turn goes on with a fresh window (see Good to know). Type 30, 30% or 0.3. 0% is off, as in the recipe. Applies from the next call. |
 | Import: summaries at once | 8 | Summaries an import builds at once, 1 to 64. With N at once, a summary can see up to N−1 lines not summarized yet before it, so higher is faster but a little less accurate (at 8 that costs about 0.8 points per summary, #108). Higher also hits your provider's rate limits harder (the compactor retries what is refused). Chat always runs 8. Applies to the next import. |
 
-Numbers must be whole numbers of at least 1 (512 for the summary size tolerance, at most 64 for Import: summaries at once). Missing keys in an older `config.json` take their defaults.
+Numbers must be whole numbers of at least 1 (512 for the summary size tolerance, at most 64 for Import: summaries at once); Turn refresh threshold is a percentage from 0% to 90%. Missing keys in an older `config.json` take their defaults.
 
 **Upgrading from 0.6.x:** subagent levels used to be fixed at 3 and now default to 1, so subagents no longer start their own subagents until you set Subagent levels to 2 or 3.
 
@@ -250,7 +251,7 @@ The same install and commands work on Windows, and the offline tests run there t
 - **Use worktrees** when parallel agents edit the same repository; they share the filesystem.
 - **Instructions**: the main agent and subagents get Pi's usual global and repository `AGENTS.md` files and your skills, followed by the profile's `AGENTS.md`, which comes last and wins. OptChat replaces only Pi's opening prompt. Prompt templates work in the main session only.
 - **Images** you paste, or a tool returns, are kept in the profile's memory folder under `images/` (once each, shrunk to 2,048 px on the long side and about 1.5 MB with Pi's own resizer; smaller ones stay as they are). The log names each as `[image <hash>]`, and `zoom(id, 1)` returns a message's images with its text, so the agent can look again in a later turn. Summaries stay text. Imported conversations keep a text placeholder.
-- **Pi's auto-compaction is off.** A single very long run can still hit the model's context limit; stop it and continue in a new turn.
+- **Long turns** (#146): Pi's auto-compaction is off for the main agent, since memory replaces it. Instead, once the current turn's verbatim messages pass the Turn refresh threshold (30% of the model's window by default), they are flushed to memory, the view is rebuilt, and only the task message plus the last tool call and its result stay verbatim; the earlier steps are the view's last lines, a zoom away. In an A/B on a 200K model, turns that otherwise gave up around 100K tokens kept going and covered the whole task. `OPTCHAT_REFRESH_AT` (a fraction, e.g. `0.3`; `0` is off) overrides the setting. Subagent transcripts aren't in the summary tree, so subagents use Pi's own compaction instead, starting at about the same point.
 - **Restarts**: unsent inputs are recovered into memory, and pending subagent reports are delivered. Interrupted subagents are not restarted.
 - **Prompt-template inputs** can be saved twice: expanded, and later in their original form as an unanswered input, because Pi expands them after the input journal records them. Skill commands (`/skill:name`) are matched back to their journaled input and don't have this problem. Plain text chat is unaffected.
 

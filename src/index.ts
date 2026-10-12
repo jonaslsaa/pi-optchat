@@ -13,7 +13,7 @@ import { createProfile, holdProfile, instructions, isWindows, lastProfile, listP
 import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, MASTER, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC } from './prompts.ts';
 import { cachePayload, record } from './cache.ts';
 import { saveImages } from './images.ts';
-import { asUser, boundedMessage, atWork, buildContext, lastStep, logMessage, messageChars, previousExchange, refreshedRun, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, turnBudget, typedText } from './transcript.ts';
+import { asUser, boundedMessage, atWork, buildContext, logMessage, previousExchange, refreshedRun, refreshBudget, refreshFraction, refreshPoint, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer, type ReportDetails } from './report-message.ts';
 import { memoryTools, result, searchTool } from './tools.ts';
 import { Children, CWD_DOC, loadedBuiltins } from './agents.ts';
@@ -452,10 +452,9 @@ export default function optchat(pi: ExtensionAPI) {
       const current = ctx.getSystemPrompt();
       if (current.startsWith(MASTER.slice(0, 40))) prompt = current;
       // A turn past its budget moves its steps into the view, keeping the task and the last tool call whole (#146).
-      const budget = turnBudget(ctx.model?.contextWindow), cut = lastStep(run);
-      const size = budget && cut > keep ? run.slice(keep).reduce((sum, m) => sum + messageChars(m), 0) : 0;
-      if (budget && size > budget) {
-        const began = Date.now();
+      const refresh = refreshPoint(run, keep, refreshBudget(ctx.model?.contextWindow, refreshFraction(a.config.refreshAt)));
+      if (refresh) {
+        const { cut, size } = refresh, began = Date.now();
         ctx.ui.setWorkingMessage(`OptChat: moving this turn's ${Math.round(size / 4000)}k tokens into memory…`);
         try { flush(); await a.memory.settle(ctx.signal); } finally { ctx.ui.setWorkingMessage(); }
         view = a.memory.render(); keep = cut;
