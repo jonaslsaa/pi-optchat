@@ -420,8 +420,8 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
       add('export:selected-branch', 'note', `Selected ChatGPT branch in the ${snapshot} export snapshot ends at message ${String(c.exported?.current_node)}. Other branches are alternatives.`, snapshot);
     }
   } else {
-    let pending: ImportedEntry[] = [];
-    const finish = () => { entries.push(...pending); pending = []; };
+    let pending: ImportedEntry[] = [], queued: ImportedEntry[] = [];
+    const finish = () => { entries.push(...pending, ...queued); pending = []; queued = []; };
     const assistant = (parts: { id: string; content: string }[], date: string, final: boolean) => {
       pending = parts.flatMap(part => {
         const entry = imported(c, part.id, 'talk', part.content, date);
@@ -440,19 +440,20 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
         // A message typed while Claude works is logged as an attachment and sent with the next request. Only a prompt without
         // isMeta from a human or no origin passes both of Claude Code's checks for a user's message (its display filter and X4t);
         // the rest are task and agent notifications.
-        const queued = c.source === 'claude' && v.type === 'attachment' ? v.attachment : undefined;
-        if (record(queued) && queued.type === 'queued_command' && queued.commandMode === 'prompt' && queued.isMeta !== true
-          && (queued.origin === undefined || record(queued.origin) && queued.origin.kind === 'human')) {
-          const typed = text(queued.prompt);
-          add(string(v.uuid) ?? `line:${line}`, 'user', claudeCommand(typed) ?? typed, date, typed);
+        const q = c.source === 'claude' && v.type === 'attachment' ? v.attachment : undefined;
+        if (record(q) && q.type === 'queued_command' && q.commandMode === 'prompt' && q.isMeta !== true
+          && (q.origin === undefined || record(q.origin) && q.origin.kind === 'human')) {
+          const typed = text(q.prompt), entry = imported(c, string(v.uuid) ?? `line:${line}`, 'user', claudeCommand(typed) ?? typed, date, typed);
+          if (entry) queued.push(entry);
         }
         if (c.source === 'claude' && ['user', 'assistant'].includes(String(v.type)) && record(v.message)) {
           const m = v.message, id = string(v.uuid) ?? `line:${line}`;
           // Claude Code 2.1 writes the marker as a one-block text array, older versions as a string.
-          if (m.role === 'user' && /^\[Request interrupted by user(?: for tool use)?\]$/.test(text(m.content))) { pending = []; continue; }
+          if (m.role === 'user' && /^\[Request interrupted by user(?: for tool use)?\]$/.test(text(m.content))) { pending = []; queued = []; continue; }
           const blocks = Array.isArray(m.content) ? m.content : [];
           const toolActivity = blocks.some(b => record(b) && (['tool_use', 'server_tool_use', 'tool_result'].includes(String(b.type)) || String(b.type).endsWith('_tool_result')));
           if (toolActivity) pending = [];
+          if (m.role === 'assistant') { entries.push(...queued); queued = []; }
           const parts = typeof m.content === 'string' ? [{ id, content: m.content }] : blocks.flatMap((b, index) => {
             if (!record(b)) return [];
             if (['text', 'image', 'image_url', 'document'].includes(String(b.type))) {
