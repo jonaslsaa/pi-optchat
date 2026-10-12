@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAssistantMessageEventStream, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
@@ -14,6 +14,7 @@ import { settingsPage } from '../src/settings-page.ts';
 import { COMPACT, SEARCH_DOC } from '../src/prompts.ts';
 import { REPORT_TYPE, textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
+import { removeDir } from './support.ts';
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 const model = { provider: 'fixture', model: 'fixture', thinking: 'off' } as const;
@@ -64,7 +65,7 @@ test('a config.json from before settings existed loads with the defaults, and se
       writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...changed, [key]: value }));
       assert.throws(() => loadConfig(dir), /Invalid profile config/, `${key}: ${value}`);
     }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });
 
 test('by default only the main agent starts subagents: a child gets no spawn or tell, nor search', async () => {
@@ -76,7 +77,7 @@ test('by default only the main agent starts subagents: a child gets no spawn or 
     const tools = c.live(child)?.session.getActiveToolNames() ?? [];
     assert.ok(tools.includes('zoom') && !tools.includes('spawn') && !tools.includes('tell') && !tools.includes('search'));
     await assert.rejects(c.spawn([{ task: 'nested' }], dir, undefined, child), /allows 1 level of subagents/);
-  } finally { await close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await close(); removeDir(dir); }
 });
 
 test('with Memory search on, a subagent gets the search tool and its prompt line', async () => {
@@ -89,7 +90,7 @@ test('with Memory search on, a subagent gets the search tool and its prompt line
     assert.ok(session.getActiveToolNames().includes('search'));
     assert.ok(session.systemPrompt.includes(SEARCH_DOC.trim()));
     assert.match(session.systemPrompt, /zoom and search are your only\s+allowed mechanisms/);
-  } finally { await close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await close(); removeDir(dir); }
 });
 
 test('subagent levels and max active agents come from the profile, read at each spawn', async () => {
@@ -107,7 +108,7 @@ test('subagent levels and max active agents come from the profile, read at each 
     await c.spawn([{ task: 'hold a' }, { task: 'hold b' }], dir);
     assert.equal(c.ids.length, 4);
     await until(() => releases.size === 4);
-  } finally { await close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await close(); removeDir(dir); }
 });
 
 test('a raised max active agents also applies to a subagent that was already running', async () => {
@@ -141,7 +142,7 @@ test('a raised max active agents also applies to a subagent that was already run
     go();
     await until(() => !c.active);
     assert.equal([...c.history.records.values()].filter(r => r.parentId === child).length, 3, 'the child started a batch of 3, allowed by the new limit');
-  } finally { await c.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await c.close(); await memory.close(); removeDir(dir); }
 });
 
 test('the previous exchange can be turned off, and its size limit is the profile\'s', async () => {
@@ -188,7 +189,7 @@ test('the previous exchange can be turned off, and its size limit is the profile
   } finally {
     await close();
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });
 
@@ -209,7 +210,7 @@ test('the settings page saves a valid number and explains an invalid one', () =>
     assert.equal(config.subagentLevels, 3);
     assert.equal(JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')).subagentLevels, 3);
     assert.match(page.render(100).join('\n'), /Subagent levels\s+3  default 1[\s\S]*Saved subagent levels 3/);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });
 
 test('turning Previous exchange off also reaches a turn that a subagent report starts while idle', async () => {
@@ -253,7 +254,7 @@ test('turning Previous exchange off also reaches a turn that a subagent report s
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });
 
@@ -301,7 +302,7 @@ test('Memory search turned on and off in /optchat settings adds and removes the 
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });
 
@@ -318,7 +319,7 @@ test('the thinking step offers only levels the model takes, so Sonnet 5.5 has no
     assert.doesNotMatch(step, /^\W*(off|minimal)\s*$/m);
     page.handleInput('\x1b[A'); page.handleInput('\r'); // up from the current "medium" to "low"
     assert.deepEqual(config.compactor, { provider: 'anthropic', model: 'claude-sonnet-5-5', thinking: 'low' });
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });
 
 test('/optchat model and /optchat agents model pick from a searchable list that scrolls, so the last model is reachable', async () => {
@@ -362,6 +363,6 @@ test('/optchat model and /optchat agents model pick from a searchable list that 
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });

@@ -1,11 +1,12 @@
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Memory, type Entry, type Summary } from '../src/memory.ts';
 import { FileStore, localDay, type Lease, type Saved, type Store } from '../src/store.ts';
 import { holdProfile, HEARTBEAT_MS, isWindows, ProfileBusyError, profileSocket } from '../src/profiles.ts';
+import { removeDir } from './support.ts';
 
 const entry = (i: number, text: string): Entry => ({ i, kind: 'user', text, size: 0, date: '2026-10-09T12:00:00.000Z' });
 const node = (i: number, text: string): Summary => ({ l: 0, i, text, size: 0 });
@@ -25,7 +26,7 @@ function contract(name: string, open: (dir: string, warn: (s: string) => void) =
       assert.deepEqual(saved.entries, ['one', 'two', 'three'].map((text, i) => entry(i, text)));
       assert.deepEqual(saved.tree, [node(0, 'first summary')]);
       assert.equal(saved.view, '[[0,0],[0,1]]');
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally { removeDir(dir); }
   });
   test(`${name}: a store refuses to append after another one appended`, async () => {
     const dir = temp();
@@ -35,7 +36,7 @@ function contract(name: string, open: (dir: string, warn: (s: string) => void) =
       await a.append(entry(0, 'from a'));
       await assert.rejects(async () => b.append(entry(0, 'from b')), /nothing was written/);
       assert.deepEqual((await open(dir, () => {}).load()).entries, [entry(0, 'from a')]);
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally { removeDir(dir); }
   });
   test(`${name}: images come back as they were put, and an unknown one is missing`, async () => {
     const dir = temp();
@@ -47,7 +48,7 @@ function contract(name: string, open: (dir: string, warn: (s: string) => void) =
       assert.equal(kept?.mimeType, 'image/png');
       assert.deepEqual(Uint8Array.from(kept?.data ?? []), data);
       assert.equal(await store.image('fedcba9876543210'), undefined);
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally { removeDir(dir); }
   });
 }
 contract('FileStore', (dir, warn) => new FileStore(dir, warn));
@@ -63,7 +64,7 @@ test('FileStore: a line torn by a crash is skipped with a warning, and the next 
     assert.match(warnings.join('\n'), /Skipped damaged JSON at .*:2/);
     reopened.append(entry(1, 'after the crash'));
     assert.deepEqual(new FileStore(dir, () => {}).load().entries, [entry(0, 'kept'), entry(1, 'after the crash')]);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });
 
 test('a store with a lease holds the profile instead of the local lock, renews it, and frees it on release', async () => {
@@ -86,7 +87,7 @@ test('a store with a lease holds the profile instead of the local lock, renews i
     mock.timers.tick(HEARTBEAT_MS * 3);
     assert.equal(beats, 3, 'no renewals after release');
     await (await holdProfile(machine(), dir, 'work', 'desktop', () => {}))();
-  } finally { mock.timers.reset(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { mock.timers.reset(); removeDir(dir); }
 });
 
 /** A store that writes behind, each write landing sooner than the one before it, unless it was started while `fail` was set. */

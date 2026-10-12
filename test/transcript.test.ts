@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -11,6 +11,7 @@ import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profi
 import { asUser, buildContext, PREVIOUS_EXCHANGE, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
+import { removeDir } from './support.ts';
 
 const user = (content: UserMessage['content']): UserMessage => ({ role: 'user', content, timestamp: 1 });
 const answer = (text: string, stopReason: AssistantMessage['stopReason'] = 'stop'): AssistantMessage => ({
@@ -219,7 +220,7 @@ test('real Pi lifecycle retains one exchange across tool calls and resume, witho
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });
 
@@ -295,7 +296,7 @@ test('another extension\'s shown custom message starts a turn and stays in memor
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });
 
@@ -347,7 +348,7 @@ test('main agent keeps Pi\'s AGENTS.md files and skills, with profile instructio
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });
 
@@ -395,7 +396,7 @@ test('a /skill: command is logged once, as its expansion, and never recovered as
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });
 
@@ -453,7 +454,7 @@ async function waitForSummaries(failure: string | undefined, shown: (working: (s
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 }
 
@@ -529,7 +530,7 @@ test('inputs with images are claimed too, including /skill: commands and Pi\'s i
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });
 
@@ -591,6 +592,6 @@ test('an input queued during a run and handed back by Esc is logged once, as sen
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });

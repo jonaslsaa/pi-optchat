@@ -9,6 +9,7 @@ import { builtinExtensions, Children, loadedBuiltins } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
+import { removeDir } from './support.ts';
 
 /** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
 const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
@@ -46,7 +47,7 @@ test('the main session reports which built-in extensions it loaded, so settings 
     assert.deepEqual(await mainBuiltins(dir, { extensions: ['-builtin:mcp'] }), ['codemode', 'tool-search'], 'a built-in switched off in settings stays off');
     assert.deepEqual(await mainBuiltins(dir, {}, [pi => pi.registerCommand('mcp', { description: 'other MCP', handler: async () => {} })]), ['codemode', 'tool-search'],
       'a third-party extension that registers /mcp replaces the built-in MCP extension');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });
 
 test('subagents at every depth get the main session\'s built-in extensions and can call MCP tools', async () => {
@@ -104,7 +105,7 @@ test('subagents at every depth get the main session\'s built-in extensions and c
     assert.deepEqual(servers(), [], 'no MCP server process starts');
     await off.close();
     assert.deepEqual(warnings, []);
-  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
+  } finally { await memory.close(); removeDir(dir); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
 });
 
 test('a batch that fails mid-launch closes the MCP connections of the children it rolls back', async () => {
@@ -133,7 +134,7 @@ test('a batch that fails mid-launch closes the MCP connections of the children i
     await until(() => readFileSync(log, 'utf8').includes('exit'));
     assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n').map(line => line.split(' ')[0]), ['start', 'exit']);
     await until(() => exited(log));
-  } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
+  } finally { await children.close(); await memory.close(); removeDir(dir); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
 });
 
 test('a child whose extensions fail to start still closes its MCP connections', async () => {
@@ -160,5 +161,5 @@ test('a child whose extensions fail to start still closes its MCP connections', 
     assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n').map(line => line.split(' ')[0]), ['start', 'exit']);
     await until(() => exited(log));
     assert.equal(children.active, false, 'the failed child holds no agent slot');
-  } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
+  } finally { await children.close(); await memory.close(); removeDir(dir); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
 });

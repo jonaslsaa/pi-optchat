@@ -5,6 +5,7 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { removeDir } from './support.ts';
 
 test('a test process leaves nothing in the temp dir: not a forgotten dir, not one rewritten after its removal, not a worker thread\'s', () => {
   const temp = mkdtempSync(join(tmpdir(), 'optchat-support-'));
@@ -26,5 +27,5 @@ test('a test process leaves nothing in the temp dir: not a forgotten dir, not on
     execFileSync(process.execPath, ['--import', 'tsx', '--import', new URL('./support.ts', import.meta.url).href, '-e', script],
       { cwd: fileURLToPath(new URL('..', import.meta.url)), env: { ...process.env, TMPDIR: temp, TEMP: temp, TMP: temp } });
     assert.deepEqual(readdirSync(temp).filter(name => name.startsWith('optchat-')), []);
-  } finally { rmSync(temp, { recursive: true, force: true }); }
+  } finally { removeDir(temp); }
 });

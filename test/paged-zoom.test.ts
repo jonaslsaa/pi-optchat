@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Memory, CAP, PAGE } from '../src/memory.ts';
+import { removeDir } from './support.ts';
 
 test('zoom pages a long message without splitting characters, and leaves short ones whole', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-large-'));
@@ -27,7 +28,7 @@ test('zoom pages a long message without splitting characters, and leaves short o
     assert.match(memory.zoom(1, 1, PAGE, 1), /^1\+1\|user: \u{1F600}\n\[showing characters 24999-25001 of 65001; next page: offset 25001\]$/u);
     assert.throws(() => memory.zoom(1, 1, long.length), /offset must be 0 to 65000/);
     assert.throws(() => memory.zoom(0, 2, 0), /n = 1/);
-  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await memory.close(); removeDir(dir); }
 });
 
 test('paging a message that fits in one zoom still works, but says so', async () => {
@@ -37,5 +38,5 @@ test('paging a message that fits in one zoom still works, but says so', async ()
     memory.append('user', 'x'.repeat(3_120));
     assert.equal(memory.zoom(0, 1, 100, 10), `0+1|user: ${'x'.repeat(10)}\n[showing characters 100-110 of 3120; next page: offset 110]\n`
       + '[note: this message is only 3,120 characters and fits in one zoom; offset/limit are for messages over 25,000]');
-  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await memory.close(); removeDir(dir); }
 });

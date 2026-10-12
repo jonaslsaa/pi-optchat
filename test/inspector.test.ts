@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ModelRegistry, ModelRuntime, type ExtensionContext } from '@earendil-works/pi-coding-agent';
@@ -11,6 +11,7 @@ import { fit, Inspector, short, type InspectorAction } from '../src/inspector.ts
 import { UsageLedger } from '../src/usage.ts';
 import { RunHistory } from '../src/runs.ts';
 import { mountNavigation } from '../src/navigation.ts';
+import { removeDir } from './support.ts';
 
 // Children load installed extensions from Pi's agent dir; keep tests away from the user's real one.
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
@@ -56,7 +57,7 @@ test('inspector reaches old runs, opens the selected agent, shows usage, resizes
     assert.ok(narrow.length <= Math.floor(rows * 0.9));
     assert.ok(narrow.every(line => visibleWidth(line) <= 40));
     controller.abort(); usagePage.handleInput('\x1b'); assert.equal(actions.length, 2);
-  } finally { inspector.dispose(); usagePage.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { inspector.dispose(); usagePage.dispose(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
 test('d twice deletes the selected agent and the agents it started; any other key cancels the first press', async () => {
@@ -95,7 +96,7 @@ test('d twice deletes the selected agent and the agents it started; any other ke
     assert.match(selected(), /Task gone-child/);
     await until(() => !children.history.records.has('gone'));
     assert.match(selected(), /Task newest/);
-  } finally { inspector.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { inspector.dispose(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
 test('Tab cycles Agents, Usage and Activity; Activity is a memory gauge with an agent count', async () => {
@@ -122,7 +123,7 @@ test('Tab cycles Agents, Usage and Activity; Activity is a memory gauge with an 
     children.history.records.set('paused', { id: 'paused', task: 'wait', cwd: dir, model: 'test', thinking: 'high', parentSession: 'parent', depth: 1, started: Date.now(), state: 'paused', guidance: [] });
     assert.equal(page().at(-1), 'Agents · 1 running · 1 interrupted', 'an interrupted agent is neither running nor finished');
     inspector.handleInput('\t'); assert.equal(title(), 'OptChat · personal · Agents');
-  } finally { inspector.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { inspector.dispose(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
 test('the Activity bar item shows a dot only while summaries or agents are at work', async () => {
@@ -143,7 +144,7 @@ test('the Activity bar item shows a dot only while summaries or agents are at wo
     assert.doesNotMatch(bar(), /●/, 'an agent waiting for the user is not at work');
     children.history.records.get('run')!.state = 'running';
     assert.match(bar(), /● Activity/);
-  } finally { unmount(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { unmount(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
 test('unfinished persisted runs recover as interrupted with undelivered guidance', () => {
@@ -155,7 +156,7 @@ test('unfinished persisted runs recover as interrupted with undelivered guidance
     const restored = new RunHistory(dir).records.get('interrupted');
     assert.equal(restored?.state, 'interrupted');
     assert.equal(restored?.guidance[0].state, 'undelivered');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });
 
 test('agent titles shorten at a word boundary with an ellipsis', () => {

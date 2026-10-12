@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Memory } from '../src/memory.ts';
 import { SEARCH_PAGE, searchPage } from '../src/tools.ts';
+import { removeDir } from './support.ts';
 
 test('search finds original messages newest first, pages backwards, and never returns summaries or copies of memory', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'oc-search-'));
@@ -32,7 +33,7 @@ test('search finds original messages newest first, pages backwards, and never re
     assert.match(rest[5], /^0 · .* · user: …[a-z ]{40,} then the Banner moved, then the final line$/, 'a long message is cut around its match');
     assert.equal(searchPage(memory, 'banner', 0), 'No older messages contain "banner".');
     assert.match(searchPage(memory, 'the\nfinal line', 1), /\n0 · .* · user: …[\w ,]+ the final line$/, 'a match across lines is shown, flattened');
-  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await memory.close(); removeDir(dir); }
 });
 
 test('a search hit names the view line that holds it, so the agent can zoom from there; a hit that is its own line does not', async () => {
@@ -45,5 +46,5 @@ test('a search hit names the view line that holds it, so the agent can zoom from
     assert.match(memory.render(), /^0\+4\|/m);
     const ids = searchPage(memory, 'banner').split('\n').slice(1).map(line => line.split(' · ')[0]);
     assert.deepEqual(ids, ['7', '6', '5', '4', '3 (in 0+4)', '2 (in 0+4)', '1 (in 0+4)', '0 (in 0+4)']);
-  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await memory.close(); removeDir(dir); }
 });

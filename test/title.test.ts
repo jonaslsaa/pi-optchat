@@ -11,9 +11,10 @@ import { mainTitle, statusState, TabTitle, windowTitle, type StatusState } from 
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
+import { removeDir } from './support.ts';
 
 const agentDir = process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
-after(() => rmSync(agentDir, { recursive: true, force: true }));
+after(() => removeDir(agentDir));
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate: () => boolean) {
   const deadline = Date.now() + 10000;
@@ -135,6 +136,6 @@ test('the main window title follows the real Pi session: profile, working, runni
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });

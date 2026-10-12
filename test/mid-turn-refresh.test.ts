@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -14,6 +14,7 @@ import { invalid } from '../src/settings.ts';
 import { subagentCompaction } from '../src/agents.ts';
 import { COMPACT, TURN_REFRESHED } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
+import { removeDir } from './support.ts';
 
 const reply = (content: AssistantMessage['content'], stopReason: AssistantMessage['stopReason']): AssistantMessage => ({
   role: 'assistant', content, timestamp: 2, stopReason, api: 'openai-completions', provider: 'fixture', model: 'fixture', usage: emptyUsage(),
@@ -113,6 +114,6 @@ test('a turn past its threshold is sent as the refreshed view, its task verbatim
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
     if (oldBudget === undefined) delete process.env.OPTCHAT_REFRESH_AT; else process.env.OPTCHAT_REFRESH_AT = oldBudget;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });

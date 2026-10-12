@@ -5,6 +5,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createProfile, defaults, instructions, listProfiles, loadConfig, profilePath } from '../src/profiles.ts';
+import { removeDir } from './support.ts';
 
 function sandbox() {
   const dir = fs.mkdtempSync(join(tmpdir(), 'oc-create-')), previous = process.env.OPTCHAT_HOME;
@@ -12,7 +13,7 @@ function sandbox() {
   return () => {
     mock.restoreAll(); syncBuiltinESMExports();
     if (previous === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = previous;
-    fs.rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   };
 }
 

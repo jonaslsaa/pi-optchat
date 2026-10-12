@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
@@ -12,6 +12,7 @@ import { AgentView, TranscriptView, hideImagesUnderOverlays } from '../src/agent
 import { textContent } from '../src/transcript.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { emptyUsage } from '../src/usage.ts';
+import { removeDir } from './support.ts';
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 initTheme('dark', false);
@@ -58,7 +59,7 @@ test('agent view shows the child conversation like the main chat, fills the scre
     view.handleInput('x'); // Finished agents take no input.
     view.handleInput('\x1b');
     assert.equal(closed, 1);
-  } finally { view.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { view.dispose(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
 const wheel = (delta: number): TuiMouseEvent => ({ type: 'wheel', button: 'none', x: 0, y: 0, screenX: 0, screenY: 0, width: 40, height: 12, shift: false, alt: false, ctrl: false, wheelDelta: delta });
@@ -104,7 +105,7 @@ test('agent view labels guidance from the main agent and child reports, keeps th
     assert.doesNotMatch(plain(view.render(60)), /lines up/);
     rows = 3;
     assert.deepEqual(view.render(60).length, 3, 'tiny terminals get exactly their rows');
-  } finally { view.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { view.dispose(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
 test('running tools show their real elapsed time, finished ones how long they took', () => {
@@ -192,7 +193,7 @@ test('agent view drives a running agent: streaming, guidance from the input, dra
     assert.match(text(), /Ended \(stopped\)/);
     view.handleInput('\x1b');
     assert.equal(closed, 1);
-  } finally { view.dispose(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { view.dispose(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
 test('main-chat images are hidden under the agent view and come back after', async () => {

@@ -1,6 +1,6 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
@@ -9,6 +9,7 @@ import optchat from '../src/index.ts';
 import { createProfile, lastProfile, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig } from '../src/profiles.ts';
 import { textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
+import { removeDir } from './support.ts';
 
 // Short paths: the profile lock socket has a ~103-byte limit on macOS. Windows uses a hashed named pipe, so any directory fits.
 const root = mkdtempSync(process.platform === 'win32' ? join(tmpdir(), 'oc-headless-') : '/tmp/oc-headless-');
@@ -17,7 +18,7 @@ process.env.PI_CODING_AGENT_DIR = join(root, 'agent');
 process.env.OPTCHAT_HOME = join(root, 'home');
 after(() => {
   if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-  rmSync(root, { recursive: true, force: true });
+  removeDir(root);
 });
 for (const name of ['work', 'personal']) {
   createProfile(name);

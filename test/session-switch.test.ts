@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
@@ -11,6 +11,7 @@ import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profi
 import { textContent } from '../src/transcript.ts';
 import { COMPACT } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
+import { removeDir } from './support.ts';
 
 class OffscreenTerminal implements Terminal {
   start() {} stop() {} async drainInput() {} write(_data: string) {}
@@ -155,6 +156,6 @@ test('a blocked /new, /resume, /fork or /clone says why and what lets it through
   } finally {
     for (const session of sessions.reverse()) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });

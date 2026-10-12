@@ -1,6 +1,6 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -8,9 +8,10 @@ import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager
 import optchat from '../src/index.ts';
 import { Memory } from '../src/memory.ts';
 import { checkSocketPath, createProfile, isWindows, loadConfig, lockProfile, profilePath, profileSocket, saveConfig, SOCKET_PATH_LIMIT } from '../src/profiles.ts';
+import { removeDir } from './support.ts';
 
 const agentDir = process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
-after(() => rmSync(agentDir, { recursive: true, force: true }));
+after(() => removeDir(agentDir));
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: string, talked = false) {
@@ -83,7 +84,7 @@ test('a busy profile offers to connect or pick another profile, and picking anot
     for (const session of sessions) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     await unlock?.(); await sleep(50);
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });
 
@@ -114,7 +115,7 @@ test('a connected window whose original window closed can leave: /new, /resume, 
     for (const session of [owner, window]) if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     await sleep(50);
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeDir(dir);
   }
 });
 
@@ -134,7 +135,7 @@ test('a client that hangs up early does not crash the process holding the lock',
     await sleep(100);
     await assert.rejects(lockProfile(dir, 'second'), /holder/);
   } finally {
-    await unlock(); rmSync(dir, { recursive: true, force: true });
+    await unlock(); removeDir(dir);
   }
 });
 
@@ -149,7 +150,7 @@ test('two Pis with different TMPDIRs still share one profile lock', async () => 
   } finally {
     await unlock();
     if (oldTmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = oldTmp;
-    for (const path of [dir, ...temps]) rmSync(path, { recursive: true, force: true });
+    for (const path of [dir, ...temps]) removeDir(path);
   }
 });
 
@@ -160,7 +161,7 @@ test('a regular file named like the lock socket is refused, not deleted', async 
     writeFileSync(profileSocket(dir), 'notes');
     await assert.rejects(lockProfile(dir, 'holder'), /is not an OptChat socket/);
     assert.equal(readFileSync(profileSocket(dir), 'utf8'), 'notes');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });
 
 test('on Windows, another spelling of the same profile (casing or a junction) finds the same lock', async (t) => {
@@ -170,7 +171,7 @@ test('on Windows, another spelling of the same profile (casing or a junction) fi
   const unlock = await lockProfile(dir, 'holder');
   try {
     for (const alias of [dir.toUpperCase(), junction]) await assert.rejects(lockProfile(alias, 'second'), /Profile already running: holder/);
-  } finally { await unlock(); rmSync(root, { recursive: true, force: true }); }
+  } finally { await unlock(); removeDir(root); }
 });
 
 test('a socket path over the system limit names OPTCHAT_HOME and its length without binding a truncated socket, and one at the limit locks', async () => {
@@ -198,7 +199,7 @@ test('a socket path over the system limit names OPTCHAT_HOME and its length with
       assert.deepEqual(readdirSync(dir), [], 'no truncated socket was bound');
     }
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    removeDir(root);
   }
 });
 
@@ -223,5 +224,5 @@ test('a second writer that got past the lock is refused on its next turn, with t
   }
   const reopened = new Memory(join(dir, 'home', 'profiles', 'shared'), async () => 'summary', () => {});
   try { assert.deepEqual(reopened.root.map(e => e.text), ['written by the other process']); }
-  finally { await reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+  finally { await reopened.close(); removeDir(dir); }
 });

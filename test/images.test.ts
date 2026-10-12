@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { crc32, deflateSync } from 'node:zlib';
@@ -8,6 +8,7 @@ import { saveImages } from '../src/images.ts';
 import { Memory, PAGE } from '../src/memory.ts';
 import { memoryTools } from '../src/tools.ts';
 import { logMessage, textContent } from '../src/transcript.ts';
+import { removeDir } from './support.ts';
 
 /** An RGB PNG whose pixels come from `pixel`. */
 function png(width: number, height: number, pixel: (x: number, y: number) => [number, number, number]) {
@@ -27,7 +28,7 @@ const image = (bytes: Buffer) => ({ type: 'image' as const, data: bytes.toString
 async function withMemory(run: (memory: Memory, dir: string) => Promise<void>) {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-images-'));
   const memory = new Memory(dir, async () => 'summary', () => {});
-  try { await run(memory, dir); } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  try { await run(memory, dir); } finally { await memory.close(); removeDir(dir); }
 }
 
 test('an image is kept once, unchanged when small, and zoom(id, 1) returns it on the page that names it', () => withMemory(async (memory, dir) => {

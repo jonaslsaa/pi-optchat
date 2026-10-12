@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
@@ -11,6 +11,7 @@ import { createHandoffSummarizer } from '../src/handoff.ts';
 import type { RunInfo } from '../src/runs.ts';
 import { bytes, NODE } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
+import { removeDir } from './support.ts';
 
 let sentReasoning: string | undefined;
 let sentStep = '';
@@ -45,7 +46,7 @@ async function attempts(first: number, { source = 'user: ' + 'a long message '.r
       accepted === undefined ? undefined : () => accepted);
     const line = await compress({ context: '<chat>\n</chat>', source, part: merge ? { l: 1, i: 0 } : { l: 0, i: 0 } }, new AbortController().signal);
     return { calls, bytes: line.length };
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 }
 
 test('a summary up to 640 bytes is kept; one over 640 is retried', async () => {
@@ -114,5 +115,5 @@ test('handoffs clamp the compactor\'s thinking level too', async () => {
     const run: RunInfo = { id: 'a1', task: 'Task', cwd: dir, model: 'optchat-test/compactor', thinking: 'off', parentSession: 'main', started: 0, depth: 1, state: 'completed', guidance: [] };
     assert.equal(await summarize(run, []), 'Handoff.');
     assert.equal(sent, 'low', 'the fixture asks for "off"');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });

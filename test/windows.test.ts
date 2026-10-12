@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -18,6 +18,7 @@ import { serveWindows, connectWindow, joinHeadless, listAttachableAgents, type W
 import { profileSocket, lockProfile, createProfile, profilePath } from '../src/profiles.ts';
 import { openConnectedWindow, registerConnectedRenderer } from '../src/connected-window.ts';
 import { createHandoffSummarizer } from '../src/handoff.ts';
+import { removeDir } from './support.ts';
 
 /** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
 const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
@@ -97,7 +98,7 @@ async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
   const children = new Children(memory, registry, choice, () => '', async text => { reports.push(text); }, text => warnings.push(text), dir, options);
   const unlock = await lockProfile(dir, 'test owner');
   return { control, dir, memory, children, requests, summaries, summaryOptions, reports, warnings, registry, runtime, choice, options, ledger,
-    async close() { await children.close(); await memory.close(); await unlock(); rmSync(dir, { recursive: true, force: true }); } };
+    async close() { await children.close(); await memory.close(); await unlock(); removeDir(dir); } };
 }
 
 test('connected window keeps one real SDK conversation, communicates both ways, and completes its subtree with one handoff', async () => {
@@ -276,7 +277,7 @@ test('a connected window draws each reply with its tool results, the live turn, 
   } finally {
     widget?.dispose?.();
     window.close(); await close(); await f.close();
-    rmSync(process.env.OPTCHAT_HOME!, { recursive: true, force: true });
+    removeDir(process.env.OPTCHAT_HOME!);
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
   }
 });
@@ -308,7 +309,7 @@ test('a connected window titles its tab: waiting, working, done, and disconnecte
   } finally {
     if (!closed) await close();
     await f.close();
-    rmSync(process.env.OPTCHAT_HOME!, { recursive: true, force: true });
+    removeDir(process.env.OPTCHAT_HOME!);
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
   }
 });
@@ -756,7 +757,7 @@ test('the normal Pi extension CLI attaches directly, saves no profile binding, r
   } finally {
     await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose();
     await close(); await f.close();
-    rmSync(process.env.OPTCHAT_HOME!, { recursive: true, force: true });
+    removeDir(process.env.OPTCHAT_HOME!);
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
   }
 });
@@ -871,7 +872,7 @@ test('the busy-profile menu offers background subagents below Connect and select
     assert.equal(f.children.history.records.get(available)?.state, 'running');
   } finally {
     await client.close(); await close(); await unlock(); await f.close();
-    rmSync(process.env.OPTCHAT_HOME!, { recursive: true, force: true });
+    removeDir(process.env.OPTCHAT_HOME!);
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
   }
 });
@@ -917,7 +918,7 @@ test('the busy-profile menu falls back to Connect/Back after a silent owner, wit
     assert.equal(f.children.history.records.size, 0);
   } finally {
     await client.close(); await close(); await unlock(); await f.close();
-    rmSync(process.env.OPTCHAT_HOME!, { recursive: true, force: true });
+    removeDir(process.env.OPTCHAT_HOME!);
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
   }
 });
@@ -935,7 +936,7 @@ test('attachment to an older owner that drops unknown requests gives an update/r
     assert.equal(f.children.history.records.size, 0);
   } finally {
     await close(); await f.close();
-    rmSync(process.env.OPTCHAT_HOME!, { recursive: true, force: true });
+    removeDir(process.env.OPTCHAT_HOME!);
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
   }
 });
@@ -966,7 +967,7 @@ test('a menu agent that finishes before selection is rejected and the menu refre
     assert.equal(client.session.sessionManager.getEntries().some(e => e.type === 'custom' && e.customType === 'optchat.profile'), false);
   } finally {
     await client.close(); await close(); await unlock(); await f.close();
-    rmSync(process.env.OPTCHAT_HOME!, { recursive: true, force: true });
+    removeDir(process.env.OPTCHAT_HOME!);
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
   }
 });

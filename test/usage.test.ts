@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import { emptyUsage, UsageLedger, summarizeUsage } from '../src/usage.ts';
+import { removeDir } from './support.ts';
 
 test('usage keeps roles/sessions separate, includes caches, and survives replay and a torn legacy record', () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-usage-'));
@@ -36,7 +37,7 @@ test('usage keeps roles/sessions separate, includes caches, and survives replay 
     assert.equal(ledger.entries.length, 4, 'old torn record must not swallow the next append, or replay duplicate it');
     appendFileSync(join(dir, 'usage.jsonl'), JSON.stringify({ date: new Date().toISOString(), role: 'main', model: 'bad', usage: { ...message.usage, input: -5 } }) + '\n');
     assert.equal(new UsageLedger(dir).entries.length, 4);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });
 
 test('Pi forks preserve usage identity instead of charging inherited messages twice', () => {
@@ -51,7 +52,7 @@ test('Pi forks preserve usage identity instead of charging inherited messages tw
     assert.equal(ledger.entries.length, 1);
     assert.equal(summarizeUsage(ledger.entries).total.totalTokens, 100);
     assert.equal(ledger.select('This session', fork.getSessionId()).length, 0);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });
 
 test('recent ranges use local midnight and a rolling seven days without attributing legacy records to a session', () => {
@@ -63,7 +64,7 @@ test('recent ranges use local midnight and a rolling seven days without attribut
     assert.equal(ledger.select('Today', 'x', now).length, 1);
     assert.equal(ledger.select('Last 7 days', 'x', now).length, 3);
     assert.equal(ledger.select('This session', 'x', now).length, 0);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });
 
 test('All time keeps entries dated after now', () => {
@@ -74,7 +75,7 @@ test('All time keeps entries dated after now', () => {
     ledger.add({ id: 'future', date: new Date(now + 3600_000).toISOString(), role: 'main', model: 'test', session: 's', usage: emptyUsage() });
     assert.equal(ledger.select('All time', 's', now).length, 1);
     assert.equal(ledger.select('Last hour', 's', now).length, 0);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });
 
 test('add rejects a record that a reload would reject, so totals match after a restart', () => {
@@ -94,5 +95,5 @@ test('add rejects a record that a reload would reject, so totals match after a r
     assert.deepEqual(summarizeUsage(reloaded.select('All time', '', now)).total, live);
     assert.deepEqual(reloaded.warnings, []);
     assert.equal(live.cost.total, 0.5);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { removeDir(dir); }
 });

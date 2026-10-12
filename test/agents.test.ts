@@ -12,6 +12,7 @@ import { Memory } from '../src/memory.ts';
 import { RunHistory } from '../src/runs.ts';
 import { emptyUsage, UsageLedger } from '../src/usage.ts';
 import { runTranscript, textContent, withoutFullChat } from '../src/transcript.ts';
+import { removeDir } from './support.ts';
 
 /** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
 const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
@@ -124,7 +125,7 @@ test('by default (Group subagent reports off), real SDK children stream, deliver
     await until(() => !children.active);
     for (const id of [stopRoot, stopChild, stopLeaf]) assert.equal(children.history.records.get(id)?.state, 'stopped');
     assert.deepEqual(warnings, []);
-  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
 test('one spawn\'s reports arrive together once its last child finishes, also to a parent subagent', async () => {
@@ -194,7 +195,7 @@ test('one spawn\'s reports arrive together once its last child finishes, also to
     assert.equal(children.transcript(boss, x), undefined, 'a child cannot read its parent\'s chat');
     assert.equal(reports.at(-1), `[${boss}] boss heard: [${x}] x done\n\n[${y}] y done`, 'the parent is woken once, with both reports');
     assert.equal(held.length, journaled, 'a parent subagent holds its children\'s reports itself; they would not outlive it');
-  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
 test('a subagent whose turn ends in an error still waits for its children and reads their reports', async () => {
@@ -240,7 +241,7 @@ test('a subagent whose turn ends in an error still waits for its children and re
     await until(() => !children.active);
     assert.equal(state(boss), 'completed');
     assert.deepEqual(reports, [`[${boss}] boss heard: [${worker}] worker done`], 'the parent reads its child\'s report and answers it');
-  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
 test('children get the main agent\'s extensions, AGENTS.md files and skills, but never another copy of OptChat', async () => {
@@ -284,7 +285,7 @@ test('children get the main agent\'s extensions, AGENTS.md files and skills, but
     assert.ok(system.includes(STEERABLE), 'children are told not to block steering with long commands');
     const order = ['GLOBAL_RULES', 'REPO_RULES', 'PROFILE_RULES'].map(rule => system.lastIndexOf(rule));
     assert.ok(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), 'global, then repo AGENTS.md, then profile instructions last');
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'settings.json'), { force: true }); rmSync(join(agentDir, 'AGENTS.md'), { force: true }); rmSync(join(agentDir, 'extensions'), { recursive: true, force: true }); rmSync(join(agentDir, 'skills'), { recursive: true, force: true }); }
+  } finally { removeDir(dir); rmSync(join(agentDir, 'settings.json'), { force: true }); rmSync(join(agentDir, 'AGENTS.md'), { force: true }); removeDir(join(agentDir, 'extensions')); removeDir(join(agentDir, 'skills')); }
 });
 
 test('children can message their parent mid-run: the main agent, an idle parent, or a busy one', async () => {
@@ -358,7 +359,7 @@ test('children can message their parent mid-run: the main agent, an idle parent,
     assert.ok(heard(busy, busyChild), 'busy parent sees the message after its current turn');
     assert.equal(reports.length, 4);
     assert.deepEqual(warnings, []);
-  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
 test('a child that fails to clean up still reports, is disposed, and frees its slot', async () => {
@@ -429,7 +430,7 @@ test('a child that fails to clean up still reports, is disposed, and frees its s
     assert.deepEqual(warnings.toSorted(), [
       'Subagent cleanup failed: Error: dispose failed', 'Subagent cleanup failed: Error: dispose failed', 'Subagent cleanup failed: Error: shutdown hook failed',
     ]);
-  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { for (const release of releases.values()) release(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
 test('a batch that fails mid-launch rolls back every launched child even when their cleanup throws', async () => {
@@ -468,7 +469,7 @@ test('a batch that fails mid-launch rolls back every launched child even when th
     // All slots are free again: a full batch is refused for its own launch error, not the profile limit.
     created = 2;
     await assert.rejects(children.spawn(Array.from({ length: 8 }, (_, i) => ({ task: `again ${i}` })), dir), /session store unavailable/);
-  } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); await memory.close(); removeDir(dir); }
 });
 
 test('a child stopped before its first request ends stopped without running its task', async () => {
@@ -501,7 +502,7 @@ test('a child stopped before its first request ends stopped without running its 
     assert.equal(records.find(r => r.task === 'first')?.state, 'stopped');
     assert.equal(records.find(r => r.task === 'second')?.state, 'completed');
     assert.deepEqual(asked, ['second'], 'the stopped child never sent its task to the model');
-  } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); await memory.close(); removeDir(dir); }
 });
 
 /** Children whose model works on its task until aborted, and answers any later message at once. */
@@ -559,7 +560,7 @@ test('interrupting a child aborts its step and continues with the queued message
     await until(() => !children.active);
     assert.equal(children.history.records.get(idle)?.state, 'completed');
     assert.equal(reports.at(-1), `[${idle}] Now doing: Carry on.`, 'the next message resumes it');
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('a message sent while an interrupt is still settling is not lost; a stop during that time wins', async () => {
@@ -582,7 +583,7 @@ test('a message sent while an interrupt is still settling is not lost; a stop du
     await until(() => children.history.records.get(stopped)?.state === 'stopped');
     assert.ok(!asked.flat().some(text => text.startsWith('Interrupted by the user:')), 'no turn starts after the stop');
     assert.equal(children.history.records.get(stopped)?.guidance[0].state, 'undelivered');
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('a stopped agent\'s report says who stopped it and that tell resumes it', async () => {
@@ -612,7 +613,7 @@ test('a stopped agent\'s report says who stopped it and that tell resumes it', a
     const closed = memory.root.filter(e => e.kind === 'work' && e.text.startsWith(`[${idle}]`)).map(e => withoutFullChat(e.text));
     assert.equal(closed.length, 1);
     assert.match(closed[0], /^\[\w+\] Stopped because Pi closed or reloaded while it waited for the user\. It is not resumed on its own; .*tell resumes it/, 'a paused run Pi stops on close says so, since it is not resumed on its own');
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('a child still at work when its parent\'s run throws is stopped, and its report says its parent ended', async () => {
@@ -630,7 +631,7 @@ test('a child still at work when its parent\'s run throws is stopped, and its re
     assert.equal(children.history.records.get(boss)?.state, 'failed');
     assert.equal(children.history.records.get(worker)?.state, 'stopped');
     assert.match(children.history.records.get(worker)?.report ?? '', /^Stopped because the agent that started it stopped or ended\./, 'not taken for a user stop');
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('a run stopped while its next request throws still reports its last message under the stop text', async () => {
@@ -649,7 +650,7 @@ test('a run stopped while its next request throws still reports its last message
     assert.equal(children.history.records.get(id)?.state, 'stopped');
     assert.ok(before);
     assert.equal(reports.at(-1), `[${id}] Stopped by the user. They ended it on purpose, so it did not fail: do not redo or delegate this task again unless they ask. Its chat is kept, so tell resumes it where it stopped.\n\nIts last message before the stop:\n${before}`);
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('the user can take their newest queued message back; the rest stays queued in order', async () => {
@@ -666,7 +667,7 @@ test('the user can take their newest queued message back; the rest stays queued 
     const session = children.live(id)!.session;
     await until(() => session.getSteeringMessages().length === 2);
     assert.deepEqual(session.getSteeringMessages(), ['First.', 'Main agent note.']);
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('taking back a message whose text is queued twice keeps the queue and its records in the same order', async () => {
@@ -682,7 +683,7 @@ test('taking back a message whose text is queued twice keeps the queue and its r
     const session = children.live(id)!.session;
     await until(() => session.getSteeringMessages().length === 2);
     assert.deepEqual(children.history.records.get(id)?.guidance.map(g => g.text), [...session.getSteeringMessages()]);
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('an interrupt right after taking a message back delivers each remaining message once', async () => {
@@ -698,7 +699,7 @@ test('an interrupt right after taking a message back delivers each remaining mes
     await until(() => reports.length === 1);
     assert.match(reports[0], /Now doing: Interrupted by the user:\n\nA\.\n\nB\.$/);
     assert.deepEqual(asked.at(-1)?.filter(text => text.includes('B.')).length, 1, 'B arrives once, not also as steering');
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('deleting a running agent stops it and the agents it started, delivers its report, then removes their files for good', async () => {
@@ -741,7 +742,7 @@ test('deleting a running agent stops it and the agents it started, delivers its 
     assert.match(reports.at(-1) ?? '', new RegExp(`^\\[${again}\\] Deleted by the user while it was working`));
     assert.deepEqual(deleted(), [`[${done}] deleted by the user`], 'not logged a second time');
     assert.equal(new RunHistory(join(dir, 'profile')).records.size, 0, 'nothing comes back at the next start');
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('deleting a parent while its child is still being deleted finishes both deletes', async () => {
@@ -762,7 +763,7 @@ test('deleting a parent while its child is still being deleted finishes both del
     release();
     await first;
     assert.equal(children.history.records.size, 0);
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('a tell that arrives while an agent is being deleted does not resume it', async () => {
@@ -777,7 +778,7 @@ test('a tell that arrives while an agent is being deleted does not resume it', a
     await assert.rejects(told, /being deleted/);
     assert.ok(!children.active && !children.history.records.has(id));
     assert.equal(asked.length, 1, 'the run never started another turn');
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('with grouped reports, deleting one child of a spawn still lets its siblings report together', async () => {
@@ -794,7 +795,7 @@ test('with grouped reports, deleting one child of a spawn still lets its sibling
     await until(() => !children.active);
     assert.equal(reports.length, 1);
     assert.match(reports[0], new RegExp(`^\\[${a}\\] .*\\n\\n\\[${b}\\] `, 's'), 'the deleted child\'s stop report is in the batch');
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('with grouped reports, a child the user pauses lets its siblings report together, and reports on its own later', async () => {
@@ -828,7 +829,7 @@ test('with grouped reports, a child the user pauses lets its siblings report tog
     assert.equal(await children.interrupt(x), 'paused');
     await until(() => asked.some(typed => typed.at(-1)?.startsWith(`[${x}] Interrupted by the user`)));
     assert.match(asked.at(-1)!.at(-1)!, new RegExp(`^\\[${x}\\] Interrupted by the user.*\\n\\n\\[${y}\\] Now doing: `, 's'));
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 test('a connected run whose handoff has not been delivered is kept', async () => {
@@ -839,7 +840,7 @@ test('a connected run whose handoff has not been delivered is kept', async () =>
       state: 'interrupted', connected: true, handoff: { reason: 'disconnected' }, guidance: [] });
     await assert.rejects(children.remove('window'), /handoff has not reached the main agent/);
     assert.ok(existsSync(join(dir, 'profile', 'runs', 'window.optchat.json')));
-  } finally { await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await children.close(); removeDir(dir); }
 });
 
 async function quickChildren(dir: string, memory = new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {})) {
@@ -871,7 +872,7 @@ test('close() does not wait for a spawn that is still waiting for memory to be s
     assert.ok(closed, 'close() is still waiting for the spawn');
     await memory.close();
     await refused;
-  } finally { await memory.close(); await children.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await memory.close(); await children.close(); removeDir(dir); }
 });
 
 test('a task cwd may start with ~ or be relative to the spawning agent; a missing one is refused', async () => {
@@ -890,7 +891,7 @@ test('a task cwd may start with ~ or be relative to the spawning agent; a missin
     await until(() => !children.active);
   } finally {
     for (const [name, value] of Object.entries(saved)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
-    await children.close(); rmSync(dir, { recursive: true, force: true });
+    await children.close(); removeDir(dir);
   }
 });
 
@@ -906,8 +907,8 @@ test('a broken package.json above an installed extension does not block spawning
     assert.ok(children.live(id)?.session.getAllTools().some(t => t.name === 'installed_web'));
     await until(() => !children.active);
   } finally {
-    await children.close(); rmSync(dir, { recursive: true, force: true });
-    rmSync(join(agentDir, 'package.json'), { force: true }); rmSync(join(agentDir, 'extensions'), { recursive: true, force: true });
+    await children.close(); removeDir(dir);
+    rmSync(join(agentDir, 'package.json'), { force: true }); removeDir(join(agentDir, 'extensions'));
   }
 });
 

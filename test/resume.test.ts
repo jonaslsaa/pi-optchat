@@ -10,6 +10,7 @@ import { Memory } from '../src/memory.ts';
 import type { Settings } from '../src/settings.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent, withoutFullChat } from '../src/transcript.ts';
+import { removeDir } from './support.ts';
 
 /** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
 const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
@@ -72,7 +73,7 @@ async function setup(prefix: string) {
   const cleanup = async (...all: Children[]) => {
     for (const release of releases.values()) release();
     for (const children of all) await children.close();
-    await memory.close(); rmSync(dir, { recursive: true, force: true });
+    await memory.close(); removeDir(dir);
   };
   return { dir, releases, hooks, reports, warnings, make, cleanup };
 }

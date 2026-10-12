@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { atomicWrite } from '../src/store.ts';
 import { lockProfile, ProfileBusyError } from '../src/profiles.ts';
+import { removeDir } from './support.ts';
 
 test('a failed file flush preserves the previous state and a subsequent write recovers', () => {
   const dir = mkdtempSync(join(tmpdir(), 'oc-flush-'));
@@ -22,7 +23,7 @@ test('a failed file flush preserves the previous state and a subsequent write re
     atomicWrite(file, 'recovered');
     assert.equal(readFileSync(file, 'utf8'), 'recovered');
     assert.deepEqual(readdirSync(dir), ['state.json']);
-  } finally { mock.restoreAll(); syncBuiltinESMExports(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { mock.restoreAll(); syncBuiltinESMExports(); removeDir(dir); }
 });
 
 test('a profile lock is released by the OS when its owning process is killed', { timeout: 20_000 }, async () => {
@@ -51,6 +52,6 @@ test('a profile lock is released by the OS when its owning process is killed', {
     clearTimeout(timeout);
     // `exit` rejects if the child failed to spawn; cleanup below must still run.
     if (!exited) { child.kill('SIGKILL'); await exit.catch(() => {}); }
-    await unlock?.(); rmSync(dir, { recursive: true, force: true });
+    await unlock?.(); removeDir(dir);
   }
 });

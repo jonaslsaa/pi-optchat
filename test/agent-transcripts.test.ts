@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -8,6 +8,7 @@ import { Memory, PAGE } from '../src/memory.ts';
 import { memoryTools } from '../src/tools.ts';
 import { runTranscript } from '../src/transcript.ts';
 import { reportParts } from '../src/report-message.ts';
+import { removeDir } from './support.ts';
 
 const at = { timestamp: 0 };
 const assistant = (content: Extract<AgentMessage, { role: 'assistant' }>['content']): AgentMessage => ({ role: 'assistant', content, api: 'anthropic-messages', provider: 'p', model: 'm',
@@ -47,7 +48,7 @@ test('zoom takes a run id: the transcript in pages that say where to go on; an u
     await assert.rejects(zoom.execute('call', { id: '87654321' }), /^Error: No run 87654321\.$/, 'eight digits is a run id, even one that is gone');
     assert.equal(await text({ id: '0', n: 1 }), '0+1|user: hello', 'a message id sent as a string still opens the message');
     assert.equal(await text({ id: 0 }), '0+1|user: hello', 'n defaults to 1');
-  } finally { await memory.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await memory.close(); removeDir(dir); }
 });
 
 test('the report box leaves out the Full chat trailer', () => {
