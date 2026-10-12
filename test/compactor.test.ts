@@ -5,13 +5,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { createCompressor } from '../src/compactor.ts';
 
 /** Actual Anthropic serialization/SSE against a local provider. Response starts and completions are independent. */
-async function setup(t: TestContext) {
+async function setup(t: TestContext, retryDelays: readonly number[] = [0, 0]) {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-compactor-'));
-  const calls: { source: string; answer: () => void; finish: () => void; fail: () => void }[] = [];
+  const calls: { source: string; body: unknown; answer: () => void; finish: () => void; fail: (error?: string) => void }[] = [];
+  const usage: AssistantMessage[] = [];
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString());
@@ -20,7 +22,7 @@ async function setup(t: TestContext) {
     res.writeHead(200, { 'content-type': 'text/event-stream' }); res.flushHeaders();
     const send = (type: string, data: object) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
     let answered = false;
-    calls.push({ source, answer: () => {
+    calls.push({ source, body, answer: () => {
       if (answered) return; answered = true;
       send('message_start', { message: { id: source, type: 'message', role: 'assistant', model: body.model, content: [], stop_reason: null, usage: { input_tokens: 100, output_tokens: 0 } } });
       send('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
@@ -28,7 +30,7 @@ async function setup(t: TestContext) {
     }, finish: () => {
       send('content_block_stop', { index: 0 });
       send('message_delta', { delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 4 } }); send('message_stop', {}); res.end();
-    }, fail: () => { send('error', { error: { type: 'overloaded_error', message: 'overloaded' } }); res.end(); } });
+    }, fail: (error = 'invalid request') => { send('error', { error: { type: 'api_error', message: error } }); res.end(); } });
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
@@ -37,17 +39,18 @@ async function setup(t: TestContext) {
     baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}`, apiKey: 'synthetic', api: 'anthropic-messages',
     models: [{ id: 'claude-sonnet-5-5', name: 'Synthetic compactor', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1000 }],
   });
-  const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'claude-sonnet-5-5', thinking: 'off' }));
+  const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'claude-sonnet-5-5', thinking: 'off' }),
+    message => { usage.push(message); }, undefined, undefined, retryDelays);
   // Long enough for a cache mark, so the first 50k characters are a shared, cacheable prefix.
   const view = `<chat>\n${'0+1|user: an old remembered line\n'.repeat(2000)}</chat>`;
   // The compactor only sees sources over NODE bytes; the fake model reads just the last line.
   const run = (source: string, context = view, signal = new AbortController().signal) => compress({ context, source: `${'x'.repeat(600)}\n${source}`, part: { l: 0, i: 0 } }, signal);
-  const settle = async () => {
+  const settle = async (expected = 1) => {
     const end = Date.now() + 5000;
-    while (!calls.length) { if (Date.now() > end) throw new Error('No request'); await new Promise(resolve => setTimeout(resolve, 10)); }
+    while (calls.length < expected) { if (Date.now() > end) throw new Error(`Expected ${expected} requests, got ${calls.length}`); await new Promise(resolve => setTimeout(resolve, 10)); }
     await new Promise(resolve => setTimeout(resolve, 80));
   };
-  return { calls, run, settle, view };
+  return { calls, run, settle, view, usage };
 }
 
 test('parallel calls on a cold view wait until one call has started answering, and a warm view skips the wait', async t => {
@@ -91,7 +94,7 @@ test('a failing primer releases the waiting calls instead of hanging them', { ti
   await settle();
   calls.slice(1).forEach(c => { c.answer(); c.finish(); });
   const results = await Promise.all(replies);
-  assert.match(results[0], /overloaded/); assert.deepEqual(results.slice(1), ['summary of b', 'summary of c']);
+  assert.match(results[0], /invalid request/); assert.deepEqual(results.slice(1), ['summary of b', 'summary of c']);
 });
 
 test('a waiting call that is cancelled stops at once without ever calling the model', { timeout: 5000 }, async t => {
@@ -104,4 +107,43 @@ test('a waiting call that is cancelled stops at once without ever calling the mo
   calls[0].answer(); calls[0].finish();
   await primer;
   assert.deepEqual(calls.map(c => c.source), ['a']);
+});
+
+test('a dropped connection is asked again quietly instead of failing the summary', { timeout: 5000 }, async t => {
+  const { calls, run, settle, usage } = await setup(t);
+  const reply = run('a');
+  await settle();
+  calls[0].fail('terminated');
+  await settle(2);
+  calls[1].answer(); calls[1].finish();
+  assert.equal(await reply, 'summary of a');
+  assert.deepEqual(calls[1].body, calls[0].body, 'the retry preserves the shared prefix and conversation');
+  assert.deepEqual(usage.map(message => message.stopReason), ['error', 'stop'], 'each provider attempt is accounted for');
+});
+
+test('an error that is not transient surfaces at once, and a transient one after two retries', { timeout: 5000 }, async t => {
+  const { calls, run, settle } = await setup(t);
+  const invalid = run('a').catch((error: Error) => error.message);
+  await settle();
+  calls[0].fail('invalid request');
+  assert.match(await invalid, /invalid request/);
+  assert.equal(calls.length, 1);
+  const dropped = run('b').catch((error: Error) => error.message);
+  for (let i = 1; i <= 3; i++) { await settle(i + 1); calls[i].fail('terminated'); }
+  assert.match(await dropped, /terminated/);
+  assert.equal(calls.length, 4);
+});
+
+test('cancelling during a retry delay stops promptly without another provider request', { timeout: 5000 }, async t => {
+  const { calls, run, settle, view, usage } = await setup(t, [10000]);
+  const cancel = new AbortController();
+  t.after(() => cancel.abort());
+  const reply = run('a', view, cancel.signal);
+  await settle();
+  calls[0].fail('terminated');
+  await settle();
+  assert.equal(usage.length, 1, 'the failed attempt has completed before cancellation');
+  cancel.abort();
+  await assert.rejects(reply, /abort/i);
+  assert.equal(calls.length, 1);
 });
