@@ -23,9 +23,17 @@ export const end = (part: Part) => start(part) + 2 ** part.l;
 export const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
 const UNBUILT_BYTES = bytes(UNBUILT);
 export const flat = (s: string) => s.replace(/[\r\n]+/g, ' ');
-const lineBytes = (s: string) => bytes(flat(s));
+// A node's body size is independent of its label in either view.
+const bodyBytes = (s: string) => bytes(flat(s));
 const notice = (omitted: number) => `\n[${omitted} characters omitted; head and tail retained]\n`;
 const VIEW_OPEN = '<chat>\n';
+const VIEW_CLOSE = '</chat>';
+const VIEW_FRAME_BYTES = bytes(VIEW_OPEN + VIEW_CLOSE);
+const label = (part: Part) => `${start(part)}+${2 ** part.l}|`;
+const renderLine = (part: Part, text: string) => label(part) + flat(text);
+// Every nonempty line owns its trailing newline. The empty view retains its one blank line.
+const renderedLineBytes = (part: Part, body: number) => bytes(label(part)) + body + 1;
+const renderView = (lines: string[]) => `${VIEW_OPEN}${lines.join('\n')}\n${VIEW_CLOSE}`;
 export const isView = (text: string) => text.startsWith(VIEW_OPEN);
 export function cap(text: string, limit = CAP) {
   if (text.length <= limit) return text;
@@ -48,13 +56,14 @@ export function mostDue(view: readonly Part[], total: number, built: (part: Part
 }
 /** A view (recipe §3.2): lines that tile the log, oldest first. It grows a line per message and, once over `high` bytes or when
  * forced, merges its most due pairs in one batch down to `low`, merging what it can at each change until then. */
-class Sawtooth {
+export class Sawtooth {
   readonly parts: Part[] = [];
-  private measured = 0;
+  private measured = VIEW_FRAME_BYTES;
   private merging = false;
   constructor(private readonly high: number, private readonly low: number, private readonly node: (part: Part) => Summary | undefined) {}
-  private lineSize(part: Part) { return this.node(part)?.size ?? UNBUILT_BYTES; }
-  get size() { return this.measured; }
+  private lineSize(part: Part) { return renderedLineBytes(part, this.node(part)?.size ?? UNBUILT_BYTES); }
+  get size() { return this.measured + (this.parts.length ? 0 : 1); }
+  render() { return renderView(this.parts.map(part => renderLine(part, this.node(part)?.text ?? UNBUILT))); }
   push(part: Part) { this.parts.push(part); this.measured += this.lineSize(part); }
   /** The line covering message `at`. The lines tile the log in order, so a binary search finds it. */
   covering(at: number): Part | undefined {
@@ -66,17 +75,20 @@ class Sawtooth {
     }
   }
   /** A message got its node. Its line is usually still shown, but after a damaged tree file a saved parent can already hide it. */
-  built(i: number) { if (this.covering(i)?.l === 0) this.measured += this.lineSize({ l: 0, i }) - UNBUILT_BYTES; }
+  built(i: number) {
+    const part = { l: 0, i };
+    if (this.covering(i)?.l === 0) this.measured += this.lineSize(part) - renderedLineBytes(part, UNBUILT_BYTES);
+  }
   /** Returns whether any lines merged. */
   fit(total: number, force = false) {
     const lines = this.parts.length;
-    if (force || this.measured > this.high) this.merging = true;
-    for (let best: number; this.merging && this.measured > this.low && (best = mostDue(this.parts, total, part => !!this.node(part))) >= 0;) {
+    if (force || this.size > this.high) this.merging = true;
+    for (let best: number; this.merging && this.size > this.low && (best = mostDue(this.parts, total, part => !!this.node(part))) >= 0;) {
       const a = this.parts[best], b = this.parts[best + 1], parent = { l: a.l + 1, i: a.i / 2 };
       this.measured += this.lineSize(parent) - this.lineSize(a) - this.lineSize(b);
       this.parts.splice(best, 2, parent);
     }
-    if (this.measured <= this.low) this.merging = false;
+    if (this.size <= this.low) this.merging = false;
     return this.parts.length < lines;
   }
 }
@@ -145,7 +157,7 @@ export class Memory {
     for (const value of saved.tree) {
       if (!isSummary(value) || value.l < 0 || value.i < 0 || end(value) > this.root.length)
         throw new Error('Invalid OptChat summary record.');
-      this.tree.set(key(value), { ...value, size: lineBytes(value.text) });
+      this.tree.set(key(value), { ...value, size: bodyBytes(value.text) });
     }
     for (const node of this.tree.values()) this.queueParent(node);
     for (let i = 0; i < this.root.length; i++) if (!this.node({ l: 0, i })) this.unbuilt.add(i);
@@ -213,7 +225,7 @@ export class Memory {
     if (!this.node(part)) this.unbuilt.add(i);
   }
   get view(): readonly Part[] { return this.chat.parts; }
-  render() { return `${VIEW_OPEN}${this.view.map(p => `${start(p)}+${2 ** p.l}|${flat(this.text(p))}`).join('\n')}\n</chat>`; }
+  render() { return this.chat.render(); }
   get ready() { return this.view.every(p => this.node(p)); }
   get pending() { return this.unbuilt.size; }
   get active() { return this.busy.size; }
@@ -286,7 +298,7 @@ export class Memory {
       ...(call ? { call: { i: call.i, text: cap(`tool: ${call.text}`, 4000) } } : {}) }, this.controller.signal)).trim();
     if (this.stopped) return;
     if (!text) throw new Error('Compactor returned an empty summary.');
-    const node = { ...part, text, size: lineBytes(text) };
+    const node = { ...part, text, size: bodyBytes(text) };
     // A failed node write fails the build, which is retried.
     const written = this.enqueue(() => this.store.appendNode(node), error => { throw error; });
     if (written) await written;
@@ -310,8 +322,8 @@ export class Memory {
    * real turns (#101) found that cutting there also hid the built lines after it, such as an echo's own tool call. */
   private compactionView(part: Part) {
     const boundary = part.l === 0 ? start(part) : end(part), lines: string[] = [];
-    for (const p of this.compaction.parts) { if (end(p) > boundary) break; lines.push(`${start(p)}+${2 ** p.l}|${flat(this.text(p))}`); }
-    return `${VIEW_OPEN}${lines.join('\n')}\n</chat>`;
+    for (const p of this.compaction.parts) { if (end(p) > boundary) break; lines.push(renderLine(p, this.text(p))); }
+    return renderView(lines);
   }
   private queueParent({ l, i }: Part) {
     const parent = { l: l + 1, i: Math.floor(i / 2) };

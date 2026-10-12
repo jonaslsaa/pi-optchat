@@ -38,13 +38,13 @@ test('search finds original messages newest first, pages backwards, and never re
 
 test('a search hit names the view line that holds it, so the agent can zoom from there; a hit that is its own line does not', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'oc-search-line-'));
-  // 300-byte summaries in a 1,500-byte view: the four oldest messages fold into one line.
+  // 300-byte bodies plus labels/framing in a 1,500-byte view: the four oldest messages fold into one line.
   const memory = new Memory(dir, async () => 's'.repeat(300), () => {}, 1500);
   try {
     // Each message is summarized before the next, as each turn waits for summaries, so the batch finds its parents built.
-    for (let i = 0; i < 8; i++) { memory.append('user', `${i} banner ${'.'.repeat(600)}`); await memory.settle(undefined, 'tree'); }
+    for (let i = 0; i < 7; i++) { memory.append('user', `${i} banner ${'.'.repeat(600)}`); await memory.settle(undefined, 'tree'); }
     assert.match(memory.render(), /^0\+4\|/m);
     const ids = searchPage(memory, 'banner').split('\n').slice(1).map(line => line.split(' · ')[0]);
-    assert.deepEqual(ids, ['7', '6', '5', '4', '3 (in 0+4)', '2 (in 0+4)', '1 (in 0+4)', '0 (in 0+4)']);
+    assert.deepEqual(ids, ['6', '5', '4', '3 (in 0+4)', '2 (in 0+4)', '1 (in 0+4)', '0 (in 0+4)']);
   } finally { await memory.close(); removeDir(dir); }
 });
