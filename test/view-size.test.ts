@@ -84,7 +84,7 @@ test('16,000 short leaves cannot evade either maintained view budget with all pa
   }
   const saved = { entries, tree, view: JSON.stringify(entries.map(e => [0, e.i])) };
   const store: Store = { load: () => saved, append: () => undefined, appendNode: () => undefined,
-    saveView: () => undefined, putImage: () => undefined, image: () => undefined };
+    saveView: () => undefined, savePending: () => undefined, putImage: () => undefined, image: () => undefined };
   const memory = new Memory({ directory: '/unused', saved, store }, async () => { throw new Error('all nodes already built'); });
   try {
     for (const [view, high] of [[memory['chat'], 128_000], [memory['compaction'], 32_000]] as const) {

@@ -126,13 +126,16 @@ export default function optchat(pi: ExtensionAPI) {
   };
   // `steered` describes this process's Pi queue, so it is not journaled.
   const saveReports = () => { if (active) atomicWrite(join(active.dir, 'pending-reports.json'), JSON.stringify(reports, (key, value: unknown) => key === 'steered' ? undefined : value)); };
-  const flush = () => {
-    if (!active) return;
+  let flushing: Promise<void> | undefined;
+  const flushRun = async () => {
+    const a = active;
+    if (!a) return;
     while (logged < run.length) {
       const message = run[logged];
       const receipt = receipts.get(message);
-      logMessage(active.memory, message, receipt); logged++;
-      if (receipt && !receipt.startsWith(REPORT_RECEIPT)) active.inbox.acknowledge(receipt);
+      logMessage(a.memory, message, receipt); logged++;
+      await a.memory.durable();
+      if (receipt && !receipt.startsWith(REPORT_RECEIPT)) a.inbox.acknowledge(receipt);
       receipts.delete(message);
       if (message.role === 'user') {
         const text = textContent(message.content), index = reports.findIndex(r => !r.batch && r.text === text);
@@ -140,6 +143,8 @@ export default function optchat(pi: ExtensionAPI) {
       }
     }
   };
+  // Lifecycle events may overlap while an asynchronous store writes. All wait for the same delivery acknowledgments.
+  const flush = () => flushing ??= flushRun().finally(() => { flushing = undefined; });
   // Shown as a dark background box, not as the user's own message. Before this profile has run once there is no
   // built system prompt to reuse, so that rare case still goes through Pi's normal prompt path as a user message.
   const sendReport = (report: Report) => {
@@ -149,7 +154,7 @@ export default function optchat(pi: ExtensionAPI) {
     else pi.sendUserMessage(text, { deliverAs: 'steer', expandPromptTemplates: false });
   };
   const deliverReport = async (text: string, { once = false, count }: { once?: boolean; count?: number } = {}) => {
-    if (once && (active?.memory.root.some(e => e.receipt === reportReceipt(text)) || reports.some(r => r.text === text))) return;
+    if (once && (active?.memory.hasReceipt(reportReceipt(text)) || reports.some(r => r.text === text))) return;
     const report = { text, count };
     reports.push(report); saveReports();
     if (!stopping) sendReport(report);
@@ -167,7 +172,7 @@ export default function optchat(pi: ExtensionAPI) {
     try {
       await closeWindows?.(); closeWindows = undefined;
       await recovery;
-      await old.children.close(); flush(); if (!pendingImport(old.dir)) old.inbox.recover(old.memory);
+      await old.children.close(); await flush(); if (!pendingImport(old.dir)) await old.inbox.recover(old.memory);
       await old.memory.close(); await checkpoints;
       await checkpoint(old.dir);
     } finally {
@@ -207,7 +212,7 @@ export default function optchat(pi: ExtensionAPI) {
       }, () => config.summaryAcceptBytes), warning => ctx.ui.notify(warning, 'error'));
       openingMemory = memory;
       const inbox = new Inbox(dir);
-      const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
+      const recovered = pendingImport(dir) ? 0 : await inbox.recover(memory);
       if (recovered) ctx.ui.notify(`Recovered ${recovered} unanswered inputs into ${name}'s memory. Ask to continue them when ready.`, 'info');
       const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => `${instructions(dir)}\n\n${IMPORT_GUIDANCE}`,
         deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, builtins: () => loadedBuiltins(pi), settings: () => config, hold: holdReports,
@@ -368,20 +373,20 @@ export default function optchat(pi: ExtensionAPI) {
     }
     return { action: 'continue' };
   });
-  const startRun = (ctx: ExtensionContext) => {
-    flush(); run = []; logged = 0; keep = 0; view = undefined; runStarted = true;
+  const startRun = async (ctx: ExtensionContext) => {
+    await flush(); run = []; logged = 0; keep = 0; view = undefined; runStarted = true;
     const config = active?.config;
     previous = config?.previousExchange ? previousExchange(ctx.sessionManager.getBranch(), config.previousExchangeKB * 1000) : [];
     pi.appendEntry(RUN_BOUNDARY, { state: 'start' });
   };
   // A report sent while Pi is idle starts its run without before_agent_start; it reuses the last built prompt.
-  pi.on('agent_start', (_event, ctx) => {
+  pi.on('agent_start', async (_event, ctx) => {
     working = true; showTitle(ctx);
-    if (active && !runStarted) startRun(ctx);
+    if (active && !runStarted) await startRun(ctx);
   });
-  pi.on('before_agent_start', (event, ctx) => {
+  pi.on('before_agent_start', async (event, ctx) => {
     if (!active) return; // Plain Pi run: leave Pi's own prompt untouched.
-    startRun(ctx);
+    await startRun(ctx);
     const a = required();
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
     syncSearch(a.config);
@@ -408,7 +413,7 @@ export default function optchat(pi: ExtensionAPI) {
           // A report sent again after a lost steer can still arrive twice (Pi kept the old steer after an abort): drop the extra copy.
           // Copies are counted, so a later report that happens to repeat an earlier text still arrives.
           const receipt = reportReceipt(text), copies = run.slice(logged).filter(m => receipts.get(m) === receipt).length;
-          if (reports.filter(r => !r.batch && r.text === text).length <= copies && (copies > 0 || active.memory.root.some(e => e.receipt === receipt)))
+          if (reports.filter(r => !r.batch && r.text === text).length <= copies && (copies > 0 || active.memory.hasReceipt(receipt)))
             return { message: bounded.role === 'custom' ? { ...bounded, content: DUPLICATE_REPORT, display: false } : { ...message, content: DUPLICATE_REPORT } };
           receipts.set(message, receipt);
         } else {
@@ -423,7 +428,7 @@ export default function optchat(pi: ExtensionAPI) {
     }
     run.push(message);
     if (view !== undefined) {
-      try { flush(); } catch (error) { ctx.abort(); fault = errorText(error); ctx.ui.notify(fault, 'error'); }
+      try { await flush(); } catch (error) { ctx.abort(); fault = errorText(error); ctx.ui.notify(fault, 'error'); }
     }
     if (bounded !== event.message) return { message: bounded };
   });
@@ -445,7 +450,7 @@ export default function optchat(pi: ExtensionAPI) {
         const unsubscribe = a.memory.onChange(show);
         try { await a.memory.settle(ctx.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
         view = a.memory.render(); // Capture old history before logging the new input.
-        flush();
+        await flush();
       }
       // Extensions that run after ours (Pi's built-in MCP adds <mcp_servers>) still change the prompt; send what Pi has now.
       // A prompt without our preamble (a report run started while Pi was idle) keeps the last one we built.
@@ -456,7 +461,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (refresh) {
         const { cut, size } = refresh, began = Date.now();
         ctx.ui.setWorkingMessage(`OptChat: moving this turn's ${Math.round(size / 4000)}k tokens into memory…`);
-        try { flush(); await a.memory.settle(ctx.signal); } finally { ctx.ui.setWorkingMessage(); }
+        try { await flush(); await a.memory.settle(ctx.signal); } finally { ctx.ui.setWorkingMessage(); }
         view = a.memory.render(); keep = cut;
         ctx.ui.notify(`OptChat moved ${Math.round(size / 4000)}k tokens of this turn into memory (${((Date.now() - began) / 1000).toFixed(1)}s).`, 'info');
       }
@@ -465,7 +470,7 @@ export default function optchat(pi: ExtensionAPI) {
     } catch (error) {
       // Pi catches extension errors. Explicitly abort so it cannot fall back to old context.
       ctx.abort();
-      try { flush(); } catch (persistenceError) { fault = errorText(persistenceError); }
+      try { await flush(); } catch (persistenceError) { fault = errorText(persistenceError); }
       ctx.ui.notify(errorText(error), 'error');
       return { messages: [{ role: 'system', content: 'OptChat context unavailable. Stop.', timestamp: 0 }] };
     }
@@ -483,7 +488,7 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('turn_end', (_event, ctx) => collectUsage(ctx));
   pi.on('agent_settled', async (_event, ctx) => {
     collectUsage(ctx);
-    try { flush(); active?.inbox.dropReturned(); } catch (error) { fault = errorText(error); ctx.ui.notify(fault, 'error'); }
+    try { await flush(); active?.inbox.dropReturned(); } catch (error) { fault = errorText(error); ctx.ui.notify(fault, 'error'); }
     // A report steered into this run that never reached it (Esc or a dequeue cleared Pi's queue) is sent again, now as its own turn.
     if (active && !fault && !stopping) for (const r of reports) if (r.steered && !r.batch) sendReport(r);
     if (runStarted) pi.appendEntry(RUN_BOUNDARY, { state: 'end' });
@@ -577,7 +582,7 @@ export default function optchat(pi: ExtensionAPI) {
           const plan = await chooseImport(ctx, a.name, a.memory, `${a.config.compactor.provider}/${a.config.compactor.model} (${a.config.compactor.thinking})`, signal);
           if (!plan) return;
           signal.throwIfAborted();
-          flush(); a.inbox.recover(a.memory); await checkpoints; await a.memory.close(); closed = true;
+          await flush(); await a.inbox.recover(a.memory); await checkpoints; await a.memory.close(); closed = true;
           signal.throwIfAborted();
           job = prepareImport(a.dir, a.memory, plan.entries, plan.mode);
           if (!job) return;

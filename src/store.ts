@@ -9,7 +9,7 @@ export const isMime = (mime: string): mime is Mime => Object.hasOwn(EXTENSIONS, 
 const MIMES = new Map<string, Mime>((Object.keys(EXTENSIONS) as Mime[]).map(mime => [EXTENSIONS[mime], mime]));
 
 /** What a store gives back when a memory opens. Memory validates every record itself; `view` is the JSON `saveView` was last given. */
-export interface Saved { entries: unknown[]; tree: unknown[]; view?: string }
+export interface Saved { entries: unknown[]; tree: unknown[]; view?: string; pending?: unknown }
 /** A write is done when it returns: a store that writes behind returns a promise instead, which Memory awaits in order. */
 type Write = Promise<void> | undefined;
 type Maybe<T> = T | Promise<T>;
@@ -34,6 +34,8 @@ export interface Store {
   load(): Maybe<Saved>;
   /** Appends a message. Throws, writing nothing, if someone else appended since this store loaded. */
   append(entry: Entry): Write;
+  /** Atomically saves the entire next logical message before any of its chunks, or clears it after the last durable append. */
+  savePending(entries: readonly Entry[] | undefined): Write;
   /** Appends a summary node. */
   appendNode(node: Summary): Write;
   /** Replaces the saved view. */
@@ -106,7 +108,9 @@ export class FileStore implements Store {
     // An unreadable view is rebuilt, as a damaged one is.
     let saved: string | undefined;
     if (existsSync(view)) try { saved = readFileSync(view, 'utf8'); } catch { saved = ''; }
-    return { entries, tree: records(join(this.directory, 'tree'), this.warn), view: saved };
+    const pending = join(this.directory, 'pending-message.json');
+    return { entries, tree: records(join(this.directory, 'tree'), this.warn), view: saved,
+      ...(existsSync(pending) ? { pending: JSON.parse(readFileSync(pending, 'utf8')) } : {}) };
   }
   append(entry: Entry): undefined {
     const file = join(this.directory, 'main', `${localDay()}.jsonl`);
@@ -118,6 +122,11 @@ export class FileStore implements Store {
     if (names.length !== this.lastSeenBytes.size || names.some(n => statSync(join(main, n)).size !== this.lastSeenBytes.get(join(main, n)))) throw otherWriter(next);
   }
   appendNode(node: Summary): undefined { appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), node); }
+  savePending(entries: readonly Entry[] | undefined): undefined {
+    // Check ownership before replacing recovery data as well as before appending originals.
+    this.checkLog(join(this.directory, 'main', `${localDay()}.jsonl`));
+    atomicWrite(join(this.directory, 'pending-message.json'), JSON.stringify(entries ?? null));
+  }
   saveView(view: string): undefined { atomicWrite(join(this.directory, 'view.json'), view); }
   putImage(name: string, mimeType: Mime, data: Uint8Array): undefined { atomicWrite(join(this.directory, 'images', `${name}.${EXTENSIONS[mimeType]}`), data); }
   image(name: string) {

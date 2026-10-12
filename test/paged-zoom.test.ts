@@ -1,18 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Memory, CAP, PAGE } from '../src/memory.ts';
 import { removeDir } from './support.ts';
 
-test('zoom pages a long message without splitting characters, and leaves short ones whole', async () => {
+test('zoom pages a legacy long message without rewriting it or splitting characters, and leaves short ones whole', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-large-'));
+  const long = 'a'.repeat(PAGE - 1) + '😀' + 'b'.repeat(40_000);
+  mkdirSync(join(dir, 'main'));
+  writeFileSync(join(dir, 'main', 'legacy.jsonl'), ['short', long].map((text, i) => JSON.stringify({ i, kind: 'user', text, date: '2026-10-12' })).join('\n') + '\n');
   const memory = new Memory(dir, async () => 'summary', () => {});
   try {
-    memory.append('user', 'short');
-    const long = 'a'.repeat(PAGE - 1) + '😀' + 'b'.repeat(40_000);
-    memory.append('user', long);
     assert.equal(memory.zoom(0, 1), '0+1|user: short');
     let text = '', offset: number | undefined;
     for (let pages = 0; pages < 3; pages++) {

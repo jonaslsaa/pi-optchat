@@ -48,12 +48,16 @@ export class Inbox {
   acknowledge(id: string) {
     this.items = this.items.filter(i => i.id !== id); this.claimed.delete(id); this.save();
   }
-  recover(memory: Memory) {
+  async recover(memory: Memory) {
     let count = 0;
-    const receipts = new Set(memory.root.map(e => e.receipt));
-    for (const item of this.items) {
-      if (!receipts.has(item.id)) { memory.append('user', item.text, item.date, item.id); count++; }
+    await memory.durable();
+    for (const item of [...this.items]) {
+      if (!memory.hasReceipt(item.id)) {
+        memory.append('user', item.text, item.date, item.id);
+        await memory.durable(); count++;
+      }
+      this.acknowledge(item.id);
     }
-    this.items = []; this.claimed.clear(); this.queued.clear(); this.save(); return count;
+    this.queued.clear(); return count;
   }
 }

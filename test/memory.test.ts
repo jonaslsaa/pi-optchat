@@ -453,9 +453,9 @@ test('crash recovery saves unconsumed inputs once, including append-before-ack c
     const delivered = inbox.record('delivered, but crashed before the journal acknowledgment');
     memory.append('user', 'delivered, but crashed before the journal acknowledgment', new Date().toISOString(), delivered);
     inbox = new Inbox(dir);
-    assert.equal(inbox.recover(memory), 1);
+    assert.equal(await inbox.recover(memory), 1);
     assert.equal(memory.root.length, 2);
-    assert.equal(new Inbox(dir).recover(memory), 0);
+    assert.equal(await new Inbox(dir).recover(memory), 0);
     assert.equal(memory.root.length, 2);
   } finally { await memory.close(); removeDir(dir); }
 });

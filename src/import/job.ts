@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, rmSync, cpSync, mkdirSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Memory, bytes, isEntry, type Entry, type Compressor } from '../memory.ts';
+import { Memory, bytes, isEntry, logicalEntries, messageEntries, type Entry, type Compressor } from '../memory.ts';
 import { atomicWrite } from '../store.ts';
 import { record } from '../cache.ts';
 import { copyKey, type ImportedEntry } from './sources.ts';
@@ -41,7 +41,7 @@ export function pendingImport(dir: string): ImportJob | undefined {
 }
 export function deduplicate(existing: readonly Entry[], incoming: readonly ImportedEntry[]) {
   const receipts = new Set(existing.map(e => e.receipt).filter(Boolean));
-  const copies = new Set(existing.map(copyKey).filter(Boolean));
+  const copies = new Set(logicalEntries(existing).map(copyKey).filter(Boolean));
   const added: ImportedEntry[] = []; let skipped = 0;
   for (const entry of incoming) {
     if (!entry.receipt?.startsWith('import:')) throw new Error('Imported entry has no stable source identity.');
@@ -71,8 +71,9 @@ export function prepareImport(dir: string, old: Memory, incoming: readonly Impor
   if (!added.length) return undefined;
   const id = randomUUID(), target = `memories/${id}`, path = generationPath(dir, target);
   // Append copies existing summaries without changing their indices. Rebuild regenerates every node.
-  const all = mode === 'rebuild' ? chronological([...old.root, ...added]) : [...old.root, ...chronological(added)];
-  const entries: Entry[] = all.map((e, i) => ({ ...e, i, size: bytes(`${e.kind}: ${e.text}`) }));
+  const all = mode === 'rebuild' ? chronological([...logicalEntries(old.root), ...added]) : chronological(added);
+  const entries: Entry[] = mode === 'append' ? [...old.root] : [];
+  for (const e of all) entries.push(...messageEntries(entries.length, e.kind, e.text, e.date, e.receipt, e.origin));
   const kept = mode === 'append' ? old.root.length : 0;
   for (const sub of ['main', 'tree']) mkdirSync(join(path, sub), { recursive: true, mode: 0o700 });
   if (kept) atomicWrite(join(path, 'main', '000-import.jsonl'), entries.slice(0, kept).map(e => JSON.stringify(e)).join('\n') + '\n');
@@ -114,7 +115,14 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
     report();
     // Recipe §10: imported messages are compressed like any other. Each is logged once its node can start, as a burst of live
     // messages is, so up to `jobs` summaries run at once (the "Import: summaries at once" setting). Unlike a turn, an import waits through failures (its progress shows the error).
-    for (const e of plan.slice(memory.root.length)) { await memory.settle(signal, 'ahead'); memory.append(e.kind, e.text, e.date, e.receipt, e.origin); }
+    for (let at = memory.root.length; at < plan.length;) {
+      const e = plan[at], count = e.chunk?.count ?? 1;
+      if (e.chunk && e.chunk.index !== 0) throw new Error('Import stopped inside a logical message without recovery data.');
+      const group = plan.slice(at, at + count);
+      await memory.settle(signal, 'ahead');
+      memory.append(e.kind, group.map(chunk => chunk.text).join(''), e.date, group.at(-1)?.receipt, e.origin, e.chunk?.id);
+      await memory.durable(); at += count;
+    }
     await memory.settle(signal, 'tree'); signal.throwIfAborted();
     // Close all writers before the single atomic pointer swap. The previous generation stays intact.
     await memory.close();

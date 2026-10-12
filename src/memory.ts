@@ -1,15 +1,19 @@
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { FileStore, storeFor, type Saved, type Store } from './store.ts';
 
 export const NODE = 512;
 export const VIEW = 128_000;
 export const CAP = 30_000;
+/** Source text per non-tool-result log chunk, in UTF-8 bytes (the kind prefix is additional). */
+export const SOURCE_BYTES = 30_000;
 /** The most characters one zoom into a message returns, so a page stays under the tool output CAP instead of losing its middle. */
 export const PAGE = 25_000;
 export const KINDS = ['user', 'talk', 'tool', 'echo', 'note', 'work'] as const;
 export type Kind = typeof KINDS[number];
 export interface Origin { source: 'claude' | 'claude-memory' | 'codex' | 'pi' | 'chatgpt'; conversation: string; message: string; title: string; project?: string }
-export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin }
+export interface Chunk { id: string; index: number; count: number }
+export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin; chunk?: Chunk }
 export interface Part { l: number; i: number }
 export interface Summary extends Part { text: string; size: number }
 /** `part` is the node to build: a message's leaf, or the merge of its two halves. `call` is the tool call a tool result's leaf
@@ -35,6 +39,59 @@ const renderLine = (part: Part, text: string) => label(part) + flat(text);
 const renderedLineBytes = (part: Part, body: number) => bytes(label(part)) + body + 1;
 const renderView = (lines: string[]) => `${VIEW_OPEN}${lines.join('\n')}\n${VIEW_CLOSE}`;
 export const isView = (text: string) => text.startsWith(VIEW_OPEN);
+/** Lossless UTF-8 bounded pieces, preferring a nearby newline. JS string offsets never split a surrogate pair. */
+export function splitText(text: string): string[] {
+  if (bytes(text) <= SOURCE_BYTES) return [text];
+  const pieces: string[] = [];
+  for (let from = 0; from < text.length;) {
+    let to = from, size = 0, newline = from;
+    while (to < text.length) {
+      const point = text.codePointAt(to)!;
+      const cost = point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+      if (size + cost > SOURCE_BYTES) break;
+      size += cost; to += point > 0xffff ? 2 : 1;
+      if (point === 10) newline = to;
+    }
+    if (to < text.length && newline > from + (to - from) / 2) to = newline;
+    pieces.push(text.slice(from, to)); from = to;
+  }
+  return pieces;
+}
+/** Receipts denote the final chunk only; every chunk shares a stable logical-message identity and provenance. */
+export function messageEntries(first: number, kind: Kind, text: string, date: string, receipt?: string, origin?: Origin, chunkId: string = randomUUID()): Entry[] {
+  const pieces = kind === 'echo' ? [text] : splitText(text);
+  return pieces.map((text, index) => ({ i: first + index, kind, text, date, size: bytes(`${kind}: ${text}`),
+    ...(origin ? { origin } : {}), ...(receipt && index === pieces.length - 1 ? { receipt } : {}),
+    ...(pieces.length > 1 ? { chunk: { id: chunkId, index, count: pieces.length } } : {}) }));
+}
+/** Reconstruct logical texts for source deduplication, without changing stored originals or IDs. */
+export function logicalEntries(entries: readonly Entry[]): Entry[] {
+  const result: Entry[] = [];
+  for (let i = 0; i < entries.length;) {
+    const first = entries[i], count = first.chunk?.count ?? 1, group = entries.slice(i, i + count);
+    const { chunk: _chunk, ...entry } = first;
+    const text = group.map(e => e.text).join('');
+    result.push({ ...entry, text, size: bytes(`${entry.kind}: ${text}`), receipt: group.at(-1)?.receipt });
+    i += count;
+  }
+  return result;
+}
+/** Chunk groups must be complete and consecutive. A missing suffix is recovered from the intent before this check. */
+function validateChunks(entries: readonly Entry[]) {
+  for (let at = 0; at < entries.length;) {
+    const first = entries[at], chunk = first.chunk;
+    if (!chunk) { at++; continue; }
+    if (typeof chunk.id !== 'string' || !chunk.id || chunk.index !== 0 || !Number.isSafeInteger(chunk.count)
+      || chunk.count < 2 || chunk.count > entries.length - at) throw new Error('Incomplete or invalid OptChat message chunks; recovery data is required.');
+    for (let index = 0; index < chunk.count; index++) {
+      const entry = entries[at + index];
+      if (entry.chunk?.id !== chunk.id || entry.chunk.index !== index || entry.chunk.count !== chunk.count
+        || entry.kind !== first.kind || entry.date !== first.date || JSON.stringify(entry.origin) !== JSON.stringify(first.origin)
+        || (index < chunk.count - 1 && entry.receipt)) throw new Error('Invalid OptChat message chunk identity or provenance.');
+    }
+    at += chunk.count;
+  }
+}
 export function cap(text: string, limit = CAP) {
   if (text.length <= limit) return text;
   const half = Math.floor((limit - notice(text.length).length) / 2);
@@ -130,6 +187,7 @@ export class Memory {
   /** The last store write still running, if any. Once an append fails, later writes are skipped and appends throw, as after a failed file write. */
   private writing?: Promise<void>;
   private failed?: string;
+  private durableLength = 0;
   /** Where this memory's local files live: all of it for a FileStore, and the browser page, runs and imports for any store. */
   readonly directory: string;
   readonly store: Store;
@@ -138,7 +196,9 @@ export class Memory {
   /** Opens the memory in `directory` through the store `storeFor` picks, after its load. */
   static async open(directory: string, compress: Compressor, warn: (s: string) => void = console.error, budget = VIEW, jobs = 8) {
     const store = storeFor(directory, warn);
-    return new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs);
+    const memory = new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs);
+    try { await memory.durable(); return memory; }
+    catch (error) { await memory.close(); throw error; }
   }
   /** A directory alone opens a FileStore there. `jobs`: summaries built at once, and how many unbuilt lines a new message's node
    * waits behind. Chat keeps 8; imports pass the "Import: summaries at once" setting. */
@@ -154,6 +214,9 @@ export class Memory {
     const entries = log.every(isEntry) ? log.sort((a, b) => a.i - b.i) : undefined;
     if (!entries || entries.some((entry, i) => entry.i !== i)) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
     for (const value of entries) this.root.push({ ...value, size: bytes(`${value.kind}: ${value.text}`) });
+    this.durableLength = this.root.length;
+    this.recoverMessage(saved.pending);
+    validateChunks(this.root);
     for (const value of saved.tree) {
       if (!isSummary(value) || value.l < 0 || value.i < 0 || end(value) > this.root.length)
         throw new Error('Invalid OptChat summary record.');
@@ -168,16 +231,63 @@ export class Memory {
     for (let i = loaded; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
     this.fit(); this.save(); this.schedule();
   }
-  append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string, origin?: Origin) {
+  append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string, origin?: Origin, chunkId?: string) {
     if (this.stopped) throw new Error('Memory is closed.');
     if (this.failed) throw new Error(`Memory could not be saved: ${this.failed}`);
-    const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}) };
-    void this.enqueue(() => this.store.append(entry), error => {
+    const entries = messageEntries(this.root.length, kind, text, date, receipt, origin, chunkId);
+    if (entries.length > 1) this.writeMessage(() => this.store.savePending(entries));
+    for (const entry of entries) {
+      this.writeEntry(entry);
+      this.root.push(entry); this.push(entry.i); if (this.fit()) this.save();
+    }
+    if (entries.length > 1) this.writeMessage(() => this.store.savePending(undefined));
+    this.schedule();
+    return entries.at(-1)!;
+  }
+  /** Waits for writes already requested, including a logical message's final chunk. Never acknowledges an async failure. */
+  async durable() {
+    await this.writing;
+    if (this.failed) throw new Error(`Memory could not be saved: ${this.failed}`);
+  }
+  hasReceipt(receipt: string) {
+    for (let i = 0; i < this.durableLength; i++) if (this.root[i].receipt === receipt) return true;
+    return false;
+  }
+  private writeMessage(write: () => Promise<void> | undefined) {
+    const failed = (error: unknown) => {
       this.failed ??= error instanceof Error ? error.message : String(error);
       this.warn(`Memory could not be saved: ${this.failed}`);
+    };
+    try { void this.enqueue(write, failed); } catch (error) { failed(error); throw error; }
+  }
+  private writeEntry(entry: Entry) {
+    this.writeMessage(() => {
+      const written = this.store.append(entry), done = () => { this.durableLength = entry.i + 1; };
+      if (written) return written.then(done);
+      done(); return undefined;
     });
-    this.root.push(entry); this.push(entry.i); if (this.fit()) this.save(); this.schedule();
-    return entry;
+  }
+  /** Complete a saved intent before accepting another message, checking every already durable chunk without rewriting it. */
+  private recoverMessage(pending: unknown) {
+    if (pending == null) return;
+    const invalid = () => { throw new Error('Invalid pending OptChat message; refusing to change the log.'); };
+    if (!Array.isArray(pending) || pending.length < 2 || !pending.every(isEntry)) return invalid();
+    validateChunks(pending);
+    const first = pending[0], last = pending.at(-1)!;
+    if (!first.chunk || first.i < 0 || first.i > this.root.length || last.i + 1 < this.root.length) return invalid();
+    for (const [index, entry] of pending.entries()) {
+      if (entry.i !== first.i + index || entry.chunk?.id !== first.chunk.id || entry.chunk?.index !== index
+        || entry.chunk?.count !== pending.length || entry.kind !== first.kind || entry.date !== first.date
+        || (index < pending.length - 1 && entry.receipt)) return invalid();
+      const existing = this.root[entry.i];
+      if (existing && (existing.kind !== entry.kind || existing.text !== entry.text || existing.date !== entry.date
+        || existing.receipt !== entry.receipt || JSON.stringify(existing.origin) !== JSON.stringify(entry.origin)
+        || JSON.stringify(existing.chunk) !== JSON.stringify(entry.chunk))) return invalid();
+    }
+    for (const entry of pending.slice(this.root.length - first.i)) {
+      this.writeEntry(entry); this.root.push({ ...entry, size: bytes(`${entry.kind}: ${entry.text}`) });
+    }
+    this.writeMessage(() => this.store.savePending(undefined));
   }
   node(part: Part) { return this.tree.get(key(part)); }
   private text(part: Part) { return this.node(part)?.text ?? UNBUILT; }
@@ -315,7 +425,13 @@ export class Memory {
     while (this.root[results - 1]?.kind === 'echo') results--;
     let calls = results;
     while (this.root[calls - 1]?.kind === 'tool') calls--;
-    const call = calls + i - results < results ? this.root[calls + i - results] : undefined;
+    const logical: Entry[] = [];
+    for (let at = calls; at < results;) {
+      const entry = this.root[at], count = entry.chunk?.count ?? 1;
+      logical.push({ ...entry, text: this.root.slice(at, at + count).map(e => e.text).join('') });
+      at += count;
+    }
+    const call = logical[i - results];
     return call && this.root[i].text.startsWith(`${call.text.split(' ', 1)[0]}:`) ? call : undefined;
   }
   /** The compactions' view up to the node. A line still being built shows as a placeholder instead of ending the view: an A/B on
@@ -358,9 +474,10 @@ export class Memory {
     if (!Number.isSafeInteger(id) || id < 0 || !Number.isSafeInteger(n) || n < 1 || !Number.isInteger(Math.log2(n)) || id % n || id + n > this.root.length)
       throw new Error(`No line ${id}+${n}.`);
     if (n === 1) {
-      const { kind, text } = this.root[id], page = Math.min(limit ?? PAGE, PAGE);
+      const { kind, text, chunk } = this.root[id], page = Math.min(limit ?? PAGE, PAGE);
+      const group = chunk ? `\n[chunk ${chunk.index + 1}/${chunk.count}; logical message spans IDs ${id - chunk.index}-${id - chunk.index + chunk.count - 1}; zoom each with n=1]` : '';
       if (!Number.isSafeInteger(page) || page < 1) throw new Error('limit must be a positive integer.');
-      if (offset === undefined && text.length <= page) return `${id}+1|${kind}: ${text}`;
+      if (offset === undefined && text.length <= page) return `${id}+1|${kind}: ${text}${group}`;
       if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0 || offset >= Math.max(1, text.length)))
         throw new Error(`Message ${id} has ${text.length} characters; offset must be 0 to ${Math.max(0, text.length - 1)}.`);
       // Never split a surrogate pair: a page starts on its first half and ends after its second.
@@ -369,7 +486,7 @@ export class Memory {
       // A one-unit page on a pair takes the whole pair, so the next offset always moves forward.
       if (to < text.length && /[\ud800-\udbff]/.test(text[to - 1])) to += to - 1 === from ? 1 : -1;
       const hint = text.length <= PAGE ? `\n[note: this message is only ${text.length.toLocaleString('en-US')} characters and fits in one zoom; offset/limit are for messages over ${PAGE.toLocaleString('en-US')}]` : '';
-      return `${id}+1|${kind}: ${text.slice(from, to)}\n[showing characters ${from}-${to} of ${text.length}${to < text.length ? `; next page: offset ${to}` : ''}]${hint}`;
+      return `${id}+1|${kind}: ${text.slice(from, to)}\n[showing characters ${from}-${to} of ${text.length}${to < text.length ? `; next page: offset ${to}` : ''}]${hint}${group}`;
     }
     if (offset !== undefined) throw new Error('offset and limit page one message: use them with n = 1.');
     const l = Math.log2(n) - 1, i = 2 * id / n;

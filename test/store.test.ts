@@ -101,6 +101,7 @@ function behind() {
   const store: Store = {
     load: async (): Promise<Saved> => ({ entries: [], tree: [] }),
     append: e => later(e.text), appendNode: n => later(`node ${n.i}`), saveView: () => later('view'),
+    savePending: () => later('pending'),
     putImage: () => later('image'), image: async () => undefined,
   };
   return { store, landed, failing: (on: boolean) => { fail = on; } };
