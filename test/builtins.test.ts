@@ -23,6 +23,11 @@ async function until(condition: () => boolean) {
   while (!condition()) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 10)); }
 }
 
+/** Whether every fake MCP server in the log has exited. Pi starts them in the test's dir, and Windows won't remove a live process's cwd (#164). */
+const exited = (log: string) => readFileSync(log, 'utf8').trim().split('\n').every(line => {
+  try { process.kill(Number(line.split(' ')[1]), 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+});
+
 /** A main session that loads the built-in extensions the way Pi's CLI does, and the names it reports. */
 async function mainBuiltins(cwd: string, settings: object, extra: ((pi: ExtensionAPI) => void)[] = []) {
   let api: ExtensionAPI | undefined;
@@ -86,6 +91,7 @@ test('subagents at every depth get the main session\'s built-in extensions and c
     // Each subagent opens its own connection, and closes it when it ends.
     await until(() => servers().length === 4);
     assert.deepEqual(servers().map(line => line.split(' ')[0]).sort(), ['exit', 'exit', 'start', 'start']);
+    await until(() => exited(log));
     await children.close();
 
     // With MCP switched off for the main session, subagents do not connect either.
@@ -126,6 +132,7 @@ test('a batch that fails mid-launch closes the MCP connections of the children i
     await assert.rejects(children.spawn([{ task: 'one' }, { task: 'two' }], dir), /session store unavailable/);
     await until(() => readFileSync(log, 'utf8').includes('exit'));
     assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n').map(line => line.split(' ')[0]), ['start', 'exit']);
+    await until(() => exited(log));
   } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
 });
 
@@ -151,6 +158,7 @@ test('a child whose extensions fail to start still closes its MCP connections', 
     await assert.rejects(children.spawn([{ task: 'one' }], dir), /binding failed/);
     await until(() => readFileSync(log, 'utf8').includes('exit'));
     assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n').map(line => line.split(' ')[0]), ['start', 'exit']);
+    await until(() => exited(log));
     assert.equal(children.active, false, 'the failed child holds no agent slot');
   } finally { await children.close(); await memory.close(); rmSync(dir, { recursive: true, force: true }); rmSync(join(agentDir, 'mcp.json'), { force: true }); }
 });
