@@ -75,7 +75,7 @@ class LiveTurn implements Component {
   dispose() { clearInterval(this.timer); this.loader.stop(); }
 }
 
-export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContext, profile: string, setTitle: (title: string) => void = title => ctx.ui.setTitle(title)) {
+export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContext, profile: string, setTitle: (title: string) => void = title => ctx.ui.setTitle(title), agentId?: string, activeOnly = false) {
   // Each window draws with its own transcript, so nothing from an earlier window carries over.
   transcript = undefined;
   let started = false, ended = false, liveTurn: LiveTurn | undefined, live: LiveState | undefined, turn: AgentMessage[] = [];
@@ -95,7 +95,7 @@ export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContex
   const connection = await connectWindow(profilePath(profile), event => {
     if (event.name === 'started') {
       started = true; showLive(); title('working');
-      ctx.ui.setStatus('optchat', `OptChat: ${profile} · connected agent ${event.text} · /complete`);
+      ctx.ui.setStatus('optchat', `OptChat: ${profile} · ${agentId ? 'attached' : 'connected'} agent ${event.text} · /complete`);
     } else if (event.name === 'status') {
       live = event.live; refresh();
       // The tab says working exactly when the spinner spins.
@@ -119,10 +119,22 @@ export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContex
     if (ended) return;
     ended = true; commit(); hideLive();
     ctx.ui.setStatus('optchat', `OptChat: ${profile} · disconnected`); title('disconnected');
-    ctx.ui.notify('Connection closed. If you sent a task here, the main agent gets its handoff when the profile next opens. Use /new to start over: after the profile picker if Pi started without --optchat-profile, a profile still open elsewhere offers Connect again, and a free one opens here.', 'info');
+    ctx.ui.notify(agentId ? 'Detached from the background agent. Closing this window does not stop it; no local agent will run here.'
+      : 'Connection closed. If you sent a task here, the main agent gets its handoff when the profile next opens. Use /new to start over: after the profile picker if Pi started without --optchat-profile, a profile still open elsewhere offers Connect again, and a free one opens here.', 'info');
   });
-  ctx.ui.setStatus('optchat', `OptChat: ${profile} · connected window · send a task to start`); title('waiting');
-  display(`Connected to ${profile}'s original window. Messages here go to one subagent using the profile's subagent model. /tell-main sends a message to the main agent; /complete ends this conversation and sends a handoff. Closing this window interrupts it.`);
+  if (agentId) {
+    display(`Opening existing agent ${agentId}. Messages go to that same agent; /tell-main contacts the main agent. /complete or closing this window only detaches. The original Pi window must remain open.`);
+    try { await connection.request('attach', agentId, undefined, { activeOnly }); }
+    catch (error) {
+      ended = true; connection.close(); hideLive();
+      if (!started && error instanceof Error && error.message === 'Connection to the original Pi window was lost')
+        throw new Error('The original Pi window closed the connection before attachment. It may run an OptChat version that cannot open existing agents. Update OptChat and restart that window.');
+      throw error;
+    }
+  } else {
+    ctx.ui.setStatus('optchat', `OptChat: ${profile} · connected window · send a task to start`); title('waiting');
+    display(`Connected to ${profile}'s original window. Messages here go to one subagent using the profile's subagent model. /tell-main sends a message to the main agent; /complete ends this conversation and sends a handoff. Closing this window interrupts it.`);
+  }
   return {
     /** Ended by /complete, by the owner, or by losing the owner: nothing left here to protect from a session switch. */
     get ended() { return ended; },
@@ -132,7 +144,7 @@ export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContex
     },
     async tell(text: string) { await connection.request('tell-main', text); },
     async complete() {
-      ctx.ui.setWorkingMessage('Ending conversation and preparing handoff…');
+      ctx.ui.setWorkingMessage(agentId ? 'Detaching from background agent…' : 'Ending conversation and preparing handoff…');
       try {
         if (started && !ended) await connection.request('complete');
         ended = true; connection.close(); ctx.shutdown();
