@@ -14,7 +14,7 @@ import { createAssistantMessageEventStream, type AssistantMessage, type UserMess
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
-import { COMPACT } from '../src/prompts.ts';
+import { isCompaction } from './request-fixture.ts';
 
 const temp = () => mkdtempSync(join(tmpdir(), 'optchat-chunks-'));
 const date = '2026-10-12T12:34:56.000Z';
@@ -238,7 +238,7 @@ test('the real Pi request waits for durable chunks and sends the entire million-
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 2_000_000, maxTokens: 1000 }],
       streamSimple(model, context) {
-        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+        const compression = isCompaction(context);
         if (!compression) captured.push(textContent(context.messages.at(-1)?.content));
         const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'summary' : 'Received.' }],
           timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };

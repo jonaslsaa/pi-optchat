@@ -10,7 +10,8 @@ import { Memory } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
 import { createCompressor } from './compactor.ts';
 import { createProfile, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
-import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, MASTER, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC } from './prompts.ts';
+import { IMPORT_GUIDANCE, TURN_REFRESHED } from './prompts.ts';
+import { PrefixTools, requestPrefix } from './prefix.ts';
 import { cachePayload, record } from './cache.ts';
 import { saveImages } from './images.ts';
 import { asUser, boundedMessage, atWork, buildContext, logMessage, previousExchange, refreshedRun, refreshBudget, refreshFraction, refreshPoint, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
@@ -44,10 +45,6 @@ async function printReply(text: string) {
     catch (error) { if (!record(error) || error.code !== 'EAGAIN') throw error; await new Promise(resolve => setTimeout(resolve, 10)); }
   }
 }
-const toggle = (prompt: string, line: string, on: boolean, after: string) => on === prompt.includes(line) ? prompt : on ? prompt.replace(after, after + line) : prompt.replace(line, '');
-/** A report run while idle reuses the last built prompt, so Previous exchange and Memory search changes since then are applied here. */
-const promptFor = (prompt: string, { previousExchange, memorySearch }: ProfileConfig) =>
-  allowSearch(toggle(toggle(prompt, CONTINUITY, previousExchange, VIEW_DOC), SEARCH_DOC, memorySearch, previousExchange ? VIEW_DOC + CONTINUITY : VIEW_DOC), memorySearch);
 interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
 /** OptChat's own version, read from the package.json beside src/ (in the checkout and the npm package alike); none if unreadable. */
@@ -72,7 +69,10 @@ export default function optchat(pi: ExtensionAPI) {
   /** After a mid-turn refresh (#146), the run is sent from here on, after its task; 0 sends it whole. */
   let keep = 0;
   let view: string | undefined;
+  let runtime: string | undefined;
   let prompt = '';
+  const prefixTools = new PrefixTools();
+  const sharedPrefix = (ctx: ExtensionContext, dir: string, config: ProfileConfig) => requestPrefix(prefixTools.prompt(ctx.getSystemPrompt()), instructions(dir), config, prefixTools.snapshot());
   let runStarted = false;
   let fault: string | undefined;
   /** Reports not yet in memory. `count`: how many subagent reports the text joins. `batch`: held while the rest of that spawn runs, not sent yet.
@@ -209,7 +209,7 @@ export default function optchat(pi: ExtensionAPI) {
       const memory = await Memory.open(memoryDirectory(dir), createCompressor(ctx.modelRegistry, () => config.compactor, message => {
         usage.compression(message, 'compactor', sessionId);
         status(ctx);
-      }, () => config.summaryAcceptBytes), warning => ctx.ui.notify(warning, 'error'));
+      }, () => config.summaryAcceptBytes, () => sharedPrefix(ctx, dir, config)), warning => ctx.ui.notify(warning, 'error'));
       openingMemory = memory;
       const inbox = new Inbox(dir);
       const recovered = pendingImport(dir) ? 0 : await inbox.recover(memory);
@@ -374,7 +374,7 @@ export default function optchat(pi: ExtensionAPI) {
     return { action: 'continue' };
   });
   const startRun = async (ctx: ExtensionContext) => {
-    await flush(); run = []; logged = 0; keep = 0; view = undefined; runStarted = true;
+    await flush(); run = []; logged = 0; keep = 0; view = undefined; runtime = undefined; runStarted = true;
     const config = active?.config;
     previous = config?.previousExchange ? previousExchange(ctx.sessionManager.getBranch(), config.previousExchangeKB * 1000) : [];
     pi.appendEntry(RUN_BOUNDARY, { state: 'start' });
@@ -388,10 +388,8 @@ export default function optchat(pi: ExtensionAPI) {
     if (!active) return; // Plain Pi run: leave Pi's own prompt untouched.
     await startRun(ctx);
     const a = required();
-    // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
+    // Pi and later extensions own their assembled prompt; the common request prefix adds OptChat and profile instructions.
     syncSearch(a.config);
-    event.systemPromptOptions.customPrompt = allowSearch(`${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}${a.config.memorySearch ? SEARCH_DOC : ''}`, a.config.memorySearch);
-    event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
     prompt = event.systemPrompt;
   });
   const DUPLICATE_REPORT = '(duplicate report, already delivered)';
@@ -438,6 +436,11 @@ export default function optchat(pi: ExtensionAPI) {
       const a = required();
       if (importing || pendingImport(a.dir)) throw new Error('Profile is unavailable while importing.');
       if (fault) throw new Error(fault);
+      // Capture after Pi/MCP finalized the prompt and complete tool declarations, before waiting for compactions.
+      prefixTools.finalize(event.messages, ctx.getSystemPrompt());
+      const shared = sharedPrefix(ctx, a.dir, a.config);
+      prompt = shared.system.content as string;
+      runtime ??= shared.runtime;
       if (view === undefined) {
         // A misconfigured summarizer retries forever, so say why instead of spinning silently.
         let shown: string | undefined;
@@ -452,10 +455,6 @@ export default function optchat(pi: ExtensionAPI) {
         view = a.memory.render(); // Capture old history before logging the new input.
         await flush();
       }
-      // Extensions that run after ours (Pi's built-in MCP adds <mcp_servers>) still change the prompt; send what Pi has now.
-      // A prompt without our preamble (a report run started while Pi was idle) keeps the last one we built.
-      const current = ctx.getSystemPrompt();
-      if (current.startsWith(MASTER.slice(0, 40))) prompt = current;
       // A turn past its budget moves its steps into the view, keeping the task and the last tool call whole (#146).
       const refresh = refreshPoint(run, keep, refreshBudget(ctx.model?.contextWindow, refreshFraction(a.config.refreshAt)));
       if (refresh) {
@@ -466,7 +465,7 @@ export default function optchat(pi: ExtensionAPI) {
         ctx.ui.notify(`OptChat moved ${Math.round(size / 4000)}k tokens of this turn into memory (${((Date.now() - began) / 1000).toFixed(1)}s).`, 'info');
       }
       // Built on every call, unlike the view, so it is never out of date; it goes last, after everything cached.
-      return { messages: buildContext(event.messages, refreshedRun(run, keep, TURN_REFRESHED), view, promptFor(prompt, a.config), previous, atWork(a.children.working)) };
+      return { messages: buildContext([shared.system], refreshedRun(run, keep, TURN_REFRESHED), view, prompt, previous, atWork(a.children.working), runtime) };
     } catch (error) {
       // Pi catches extension errors. Explicitly abort so it cannot fall back to old context.
       ctx.abort();
@@ -503,7 +502,8 @@ export default function optchat(pi: ExtensionAPI) {
   registerConnectedRenderer(pi);
   registerReportRenderer(pi);
   const [zoom, date] = memoryTools(() => required().memory, id => required().children.transcript(id));
-  pi.registerTool(zoom); pi.registerTool(date);
+  pi.registerTool({ ...zoom, prepareLoadout: loadout => { prefixTools.loadout(loadout.declared); return undefined; } });
+  pi.registerTool({ ...date, prepareLoadout: loadout => { prefixTools.loadout(loadout.declared); return undefined; } });
   pi.registerTool({ ...searchTool(() => required().memory), defaultActive: false });
   // The tool and its prompt line change together, once per toggle, so the cached prefix is otherwise stable.
   // Synced on save too: a report turn started while idle reuses the tool set without before_agent_start.
@@ -590,7 +590,7 @@ export default function optchat(pi: ExtensionAPI) {
         if (!closed) { await a.memory.close(); closed = true; }
         const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, message => {
           a.usage.compression(message, 'import', ctx.sessionManager.getSessionId());
-        }, () => a.config.summaryAcceptBytes);
+        }, () => a.config.summaryAcceptBytes, () => sharedPrefix(ctx, a.dir, a.config));
         const completed = await showProgress(ctx, job, (signal, progress) => runImport(a.dir, compress, signal, a.config.importJobs, progress), signal);
         ctx.ui.notify(completed ? `Imported ${job.added} messages into ${a.name}. Previous memory retained at ${job.previous === '.' ? a.dir : join(a.dir, job.previous)}.`
           : 'Import paused. Use /optchat import to resume. Other profiles remain available.', 'info');

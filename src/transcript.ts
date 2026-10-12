@@ -162,7 +162,7 @@ export function atWork(runs: readonly { id: string; task: string }[]) {
  * `status` goes last, after everything cached, so it never moves the cached prefix (see cachePayload). It comes with new input only
  * (the user, a report, a restart note): a call that follows a tool result is the same turn, which already had it. */
 export function buildContext(canonical: AgentMessage[], run: AgentMessage[], view: string, prompt: string,
-  previous: readonly AgentMessage[] = [], status?: string): AgentMessage[] {
+  previous: readonly AgentMessage[] = [], status?: string, runtime?: string): AgentMessage[] {
   const system = getCurrentSystemMessage(canonical);
   const head: SystemMessage = { role: 'system', content: prompt, toolsAdded: system?.toolsAdded, timestamp: 0 };
   if (!run.some(m => m.role === 'user')) throw new Error('OptChat has no current user message; refusing to send historical context.');
@@ -172,7 +172,8 @@ export function buildContext(canonical: AgentMessage[], run: AgentMessage[], vie
     injected = true;
     // OpenAI joins text blocks with nothing between them, so the user's words start their own paragraph after the view.
     const [first, ...rest] = typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content;
-    return { ...message, content: [{ type: 'text' as const, text: view }, ...first?.type === 'text' ? [{ ...first, text: `\n\n${first.text}` }] : first ? [first] : [], ...rest] };
+    return { ...message, content: [{ type: 'text' as const, text: view }, ...runtime ? [{ type: 'text' as const, text: `\n\n${runtime}` }] : [],
+      ...first?.type === 'text' ? [{ ...first, text: `\n\n${first.text}` }] : first ? [first] : [], ...rest] };
   });
   return [head, ...messages, ...status && messages.at(-1)?.role !== 'toolResult' ? [{ role: 'user' as const, content: [{ type: 'text' as const, text: status }], timestamp: 0 }] : []];
 }

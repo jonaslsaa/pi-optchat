@@ -1,3 +1,4 @@
+import { isCompaction } from './request-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
@@ -12,7 +13,7 @@ import { buildContext, messageChars, refreshBudget, refreshedRun, refreshFractio
 import { parsePercent } from '../src/settings-page.ts';
 import { invalid } from '../src/settings.ts';
 import { subagentCompaction } from '../src/agents.ts';
-import { COMPACT, TURN_REFRESHED } from '../src/prompts.ts';
+import { TURN_REFRESHED } from '../src/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { removeDir } from './support.ts';
 
@@ -70,7 +71,7 @@ test('a turn past its threshold is sent as the refreshed view, its task verbatim
       baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000, maxTokens: 1000 }],
       streamSimple(model, context) {
-        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+        const compression = isCompaction(context);
         if (!compression) captured.push(structuredClone({ ...context, messages: context.messages.filter(m => m.role !== 'system') }));
         const step = compression ? 0 : ++calls;
         const message = compression ? reply([{ type: 'text', text: 'Summary.' }], 'stop')

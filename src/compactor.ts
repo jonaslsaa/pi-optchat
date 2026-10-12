@@ -1,10 +1,12 @@
 import { clampThinkingLevel, type Api, type AssistantMessage, type Message, type Model } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
-import { COMPACT, compaction, IMPORT_GUIDANCE, tooLong } from './prompts.ts';
+import { compaction, IMPORT_GUIDANCE, tooLong } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
 import { cachePayload, splitView } from './cache.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
+import { commonPrompt, type RequestPrefix } from './prefix.ts';
+import { createHash } from 'node:crypto';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
 /** A level the model can't take would be sent as no level, which Sonnet 5.5 runs at high effort; Pi's own sessions clamp the same way. */
@@ -43,27 +45,34 @@ function primeFirst() {
 }
 /** The model is asked for 512 bytes; `accepted` is the longest line kept without a retry (the profile's summary size tolerance). */
 export function createCompressor(registry: ModelRegistry, choice: () => ModelChoice,
-  onUsage: (message: AssistantMessage) => void = () => {}, accepted = () => DEFAULT_SETTINGS.summaryAcceptBytes): Compressor {
+  onUsage: (message: AssistantMessage) => void = () => {}, accepted = () => DEFAULT_SETTINGS.summaryAcceptBytes,
+  prefixSource: () => RequestPrefix = () => ({ system: { role: 'system', content: commonPrompt(), toolsAdded: [], timestamp: 0 }, runtime: '' })): Compressor {
   const gate = primeFirst();
   return async (input, signal) => {
     const selected = choice();
     const model = registry.find(selected.provider, selected.model);
     if (!model) throw new Error(`Compactor model unavailable: ${selected.provider}/${selected.model}. Use /optchat model.`);
     const thinking = reasoningFor(model, selected.thinking);
+    const shared = structuredClone(prefixSource()), acceptedBytes = accepted();
+    const auth = await registry.getApiKeyAndHeaders(model);
+    if (!auth.ok) throw new Error(auth.error);
     const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}${compaction(input)}`;
     // OpenAI joins text blocks with nothing between them, so the task starts its own paragraph after the view.
-    const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: `\n\n${step}` }], timestamp: Date.now() }];
+    const messages: Message[] = [shared.system, { role: 'user', content: [{ type: 'text', text: input.context },
+      ...shared.runtime ? [{ type: 'text' as const, text: `\n\n${shared.runtime}` }] : [], { type: 'text', text: `\n\n${step}` }], timestamp: Date.now() }];
     const view = splitView(input.context);
-    const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
+    const domain = createHash('sha256').update(JSON.stringify([model.provider, model.id, model.api, auth.baseUrl ?? model.baseUrl, thinking, auth, shared.system])).digest('hex');
+    const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${domain}\n${view.slice(0, -1).join('')}` : undefined;
     const tries: string[] = [];
     for (let attempt = 0; attempt < 5; attempt++) {
       const warmed = prefix ? await gate(prefix, signal) : () => {};
       let reply: AssistantMessage;
       try {
-        const stream = registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
+        const stream = registry.streamSimple(auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model, { messages }, {
           // A shared session id is the OpenAI prompt-cache key; SSE because over a websocket Codex would chain unrelated parallel calls on one cached connection.
           sessionId: 'optchat-compactor', transport: 'sse',
           reasoning: thinking, signal, cacheRetention: 'short',
+          apiKey: auth.apiKey, headers: auth.headers, env: auth.env,
           onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload) : payload,
         });
         // The cache entry is usable once the model starts answering.
@@ -79,7 +88,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       if (!line) throw new Error('Compactor returned no text.');
       tries.push(line);
       // A merge of two short lines can come back nearly as big as both, so a line must also shrink what it replaces.
-      if (bytes(line) <= accepted() && bytes(line) < bytes(input.source)) break;
+      if (bytes(line) <= acceptedBytes && bytes(line) < bytes(input.source)) break;
       messages.push(reply);
       const cut = Buffer.from(line).subarray(0, NODE).toString('utf8').replace(/\uFFFD$/, '');
       messages.push({ role: 'user', content: tooLong(bytes(line), cut), timestamp: Date.now() });

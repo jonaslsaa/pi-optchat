@@ -9,7 +9,7 @@ import { TuiMainScreen, type Terminal } from '@earendil-works/pi-tui';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { textContent } from '../src/transcript.ts';
-import { COMPACT } from '../src/prompts.ts';
+import { isCompaction } from './request-fixture.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { removeDir } from './support.ts';
 
@@ -32,7 +32,7 @@ async function start(dir: string, ui: Partial<ExtensionUIContext>) {
     models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
     streamSimple(model, context, options) {
       const last = context.messages.at(-1), text = textContent(last && 'content' in last ? last.content : '');
-      const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT), child = text.includes('\n\nYour task:\n');
+      const compression = isCompaction(context), child = text.includes('\n\nYour task:\n');
       const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'Summary.' : 'ok' }],
         timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
       if (!compression && !child && text.endsWith('Spawn one.')) {

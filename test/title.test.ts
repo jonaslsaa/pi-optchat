@@ -8,7 +8,7 @@ import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { mainTitle, statusState, TabTitle, windowTitle, type StatusState } from '../src/title.ts';
-import { COMPACT } from '../src/prompts.ts';
+import { isCompaction } from './request-fixture.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
 import { removeDir } from './support.ts';
@@ -74,7 +74,7 @@ test('the main window title follows the real Pi session: profile, working, runni
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context) {
-        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+        const compression = isCompaction(context);
         const last = context.messages.at(-1);
         const text = textContent(last?.content);
         const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'Summary.' : 'Done.' }],

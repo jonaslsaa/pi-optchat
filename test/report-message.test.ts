@@ -10,7 +10,7 @@ import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { registerReportRenderer, reportParts } from '../src/report-message.ts';
 import { REPORT_TYPE, textContent, withoutFullChat } from '../src/transcript.ts';
-import { COMPACT } from '../src/prompts.ts';
+import { isCompaction } from './request-fixture.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { removeDir } from './support.ts';
 
@@ -63,7 +63,7 @@ test('a report reaches an idle or busy main agent as a user message to the model
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context) {
-        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+        const compression = isCompaction(context);
         const text = textContent(context.messages.at(-1)?.content);
         if (!compression) {
           const snapshot = structuredClone(context);
@@ -152,7 +152,7 @@ test('reports a crash held back with unfinished siblings are delivered at the ne
       baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context) {
-        if (!context.messages.some(m => m.role === 'system' && m.content === COMPACT)) asked.push(textContent(context.messages.at(-1)?.content));
+        if (!isCompaction(context)) asked.push(textContent(context.messages.at(-1)?.content));
         const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'ok' }], timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
         const stream = createAssistantMessageEventStream();
         queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end(); });
@@ -207,7 +207,7 @@ test('a report steered into a running turn reaches the main agent once, even whe
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context, options) {
         const last = context.messages.at(-1), text = textContent(last && 'content' in last ? last.content : '');
-        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT), child = text.includes('\n\nYour task:\n');
+        const compression = isCompaction(context), child = text.includes('\n\nYour task:\n');
         if (!compression && !child) main.push(withoutFullChat(text));
         const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: compression ? 'Summary.' : child ? 'Child done.' : 'ok' }],
           timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };

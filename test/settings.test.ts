@@ -1,3 +1,4 @@
+import { isCompaction } from './request-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -11,7 +12,7 @@ import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { createProfile, defaults, loadConfig, profilePath, saveConfig, type ProfileConfig } from '../src/profiles.ts';
 import { settingsPage } from '../src/settings-page.ts';
-import { COMPACT, SEARCH_DOC } from '../src/prompts.ts';
+import { SEARCH_DOC } from '../src/prompts.ts';
 import { REPORT_TYPE, textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { removeDir } from './support.ts';
@@ -151,7 +152,7 @@ test('the previous exchange can be turned off, and its size limit is the profile
   process.env.OPTCHAT_HOME = dir;
   const turns: Context[] = [];
   const { runtime } = await fixture(dir, context => {
-    if (context.messages.some(m => m.role === 'system' && m.content === COMPACT)) return 'summary';
+    if (isCompaction(context)) return 'summary';
     turns.push(structuredClone(context));
     const asked = textContent(context.messages.at(-1)?.content).split('</chat>').at(-1)?.trim() ?? '';
     return asked === 'Long answer please.' ? 'x'.repeat(3000) : `Answer to: ${asked}`;
@@ -219,7 +220,7 @@ test('turning Previous exchange off also reaches a turn that a subagent report s
   process.env.OPTCHAT_HOME = dir;
   const systems: string[] = [];
   const { runtime } = await fixture(dir, context => {
-    if (context.messages.some(m => m.role === 'system' && m.content === COMPACT)) return 'summary';
+    if (isCompaction(context)) return 'summary';
     systems.push(JSON.stringify(context.messages.find(m => m.role === 'system')));
     return 'ok';
   });
@@ -264,7 +265,7 @@ test('Memory search turned on and off in /optchat settings adds and removes the 
   process.env.OPTCHAT_HOME = dir;
   const turns: Context[] = [];
   const { runtime } = await fixture(dir, context => {
-    if (context.messages.some(m => m.role === 'system' && m.content === COMPACT)) return 'summary';
+    if (isCompaction(context)) return 'summary';
     turns.push(context);
     return 'ok';
   });
