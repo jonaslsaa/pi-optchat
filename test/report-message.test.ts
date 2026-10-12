@@ -104,11 +104,12 @@ test('a report reaches an idle or busy main agent as a user message to the model
     assert.equal(systems.at(-1), systems[0], 'the report run reuses the main system prompt');
     assert.ok(systems[0].length > 0);
 
-    // The next question sees the report as the previous exchange's request.
+    // The next question sees the report only through the view in the base path.
     await session.prompt('What did it say?');
     const next = captured.at(-1)!.messages;
-    assert.deepEqual(next.map(m => m.role), ['user', 'assistant', 'user']);
-    assert.ok(textContent(next[0].content).endsWith('step 1 done'));
+    assert.deepEqual(next.map(m => m.role), ['user']);
+    assert.ok(textContent(next[0].content).split('</chat>')[0].includes('step 1 done'));
+    assert.ok(!textContent(next[0].content).split('</chat>').at(-1)!.includes('step 1 done'));
 
     // Busy: the report is steered into the running turn.
     const running = session.prompt('Long task.');

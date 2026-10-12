@@ -4,6 +4,7 @@ import { defaults, THINKING, type ProfileConfig } from './profiles.ts';
 import { invalid, isNumberKey, percent, SETTING_KEYS, SETTINGS, type NumberKey, type SettingKey } from './settings.ts';
 import type { ModelChoice } from './compactor.ts';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
+import { contextPolicy } from './transcript.ts';
 
 type Role = 'compactor' | 'subagent';
 const ROLES: Record<Role, { label: string; description: string; applies: string }> = {
@@ -132,11 +133,14 @@ export function frame(theme: Theme, title: string, profile: string | undefined, 
 export function settingsPage(theme: Theme, o: Options, close: () => void, redraw = () => {}) {
   const { config } = o;
   const notice = new Text('', 2, 0);
+  const policy = new Text('', 1, 0);
+  const showPolicy = () => policy.setText(theme.fg('dim', `Saved as you change them · v2 defaults; existing explicit choices are preserved.\n${contextPolicy(config)}`));
+  showPolicy();
   const marker = (same: boolean, fallback: string) => theme.fg('dim', same ? '  default' : `  default ${fallback}`);
   const value = (key: SettingKey, current: number | boolean) => `${show(key, current)}${marker(current === SETTINGS[key].default, show(key, SETTINGS[key].default))}`;
   const apply = (patch: Partial<ProfileConfig>, what: string, applies: string) => {
     const problem = update(o, patch);
-    if (!problem) notice.setText(theme.fg('success', `Saved ${what}. `) + theme.fg('muted', applies));
+    if (!problem) { notice.setText(theme.fg('success', `Saved ${what}. `) + theme.fg('muted', applies)); showPolicy(); }
     return problem;
   };
   const models = (['compactor', 'subagent'] as const).map((role): SettingItem => {
@@ -173,7 +177,7 @@ export function settingsPage(theme: Theme, o: Options, close: () => void, redraw
     if (problem) { list.updateValue(key, value(key, config[key])); notice.setText(theme.fg('error', problem)); }
   }, close);
   const page = frame(theme, 'OptChat settings', o.profile, [
-    new Text(theme.fg('dim', 'Saved as you change them · Victor\'s recipe by default, except Previous exchange, Summary size tolerance and Group subagent reports'), 1, 0),
+    policy,
     new Spacer(1), list, notice]);
   return Object.assign(page, { handleInput: (data: string) => { notice.setText(''); list.handleInput(data); redraw(); } });
 }

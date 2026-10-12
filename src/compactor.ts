@@ -1,7 +1,7 @@
 import { clampThinkingLevel, type Api, type AssistantMessage, type Message, type Model } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
-import { compaction, IMPORT_GUIDANCE, tooLong } from './prompts.ts';
+import { compaction, tooLong } from './prompts.ts';
 import { bytes, NODE, type Compressor } from './memory.ts';
 import { cachePayload, record } from './cache.ts';
 import { cacheGate, cachePlan, cacheRoute, type CacheRelease } from './cache-gate.ts';
@@ -14,6 +14,13 @@ export const reasoningFor = (model: Model<Api>, level: ThinkingLevel) => {
   const thinking = clampThinkingLevel(model, level);
   return thinking === 'off' ? undefined : thinking;
 };
+/** State the requested and effective effort separately when the SDK must clamp it. Never silently replace a model. */
+export function describeChoice(registry: Pick<ModelRegistry, 'find'>, choice: ModelChoice) {
+  const name = `${choice.provider}/${choice.model}`, model = registry.find(choice.provider, choice.model);
+  if (!model) return `${name} (${choice.thinking} requested; model unavailable)`;
+  const effective = clampThinkingLevel(model, choice.thinking);
+  return `${name} (${effective === choice.thinking ? effective : `${choice.thinking} requested; using ${effective}`})`;
+}
 /** The model is asked for 512 bytes; `accepted` is the longest line kept without a retry (the profile's summary size tolerance). */
 export function createCompressor(registry: ModelRegistry, choice: () => ModelChoice,
   onUsage: (message: AssistantMessage) => void = () => {}, accepted = () => DEFAULT_SETTINGS.summaryAcceptBytes,
@@ -26,7 +33,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const shared = structuredClone(prefixSource()), acceptedBytes = accepted();
     const auth = await registry.getApiKeyAndHeaders(model);
     if (!auth.ok) throw new Error(auth.error);
-    const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}${compaction(input)}`;
+    const step = compaction(input);
     // OpenAI joins text blocks with nothing between them, so the task starts its own paragraph after the view.
     const messages: Message[] = [shared.system, { role: 'user', content: [{ type: 'text', text: input.context },
       ...shared.runtime ? [{ type: 'text' as const, text: `\n\n${shared.runtime}` }] : [], { type: 'text', text: `\n\n${step}` }], timestamp: Date.now() }];
@@ -59,7 +66,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
       if (reply.stopReason === 'length' || reply.content.some(c => c.type === 'toolCall')) continue;
       // The compactions' view shows each line under its id+n| head, which a line can copy.
       const line = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim().replace(/^\d+\+\d+\|\s*/, '');
-      if (!line) throw new Error('Compactor returned no text.');
+      if (!line) continue;
       tries.push(line);
       // A merge of two short lines can come back nearly as big as both, so a line must also shrink what it replaces.
       if (bytes(line) <= acceptedBytes && bytes(line) < bytes(input.source)) break;

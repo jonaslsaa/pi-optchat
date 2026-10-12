@@ -17,8 +17,8 @@ let sentReasoning: string | undefined;
 let sentStep = '';
 let sentRetry = '';
 /** A fake model whose first reply is `first` bytes long and whose retries fit. */
-async function attempts(first: number, { source = 'user: ' + 'a long message '.repeat(70), merge = false, accepted, first: text = 'x', firstEnd, ends = 1 }:
-  { source?: string; merge?: boolean; accepted?: number; first?: string; firstEnd?: 'length' | 'toolUse'; ends?: number } = {}) {
+async function attempts(first: number, { source = 'user: ' + 'a long message '.repeat(70), merge = false, accepted, first: text = 'x', firstEnd, ends = 1, replies }:
+  { source?: string; merge?: boolean; accepted?: number; first?: string; firstEnd?: 'length' | 'toolUse'; ends?: number; replies?: string[] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-size-'));
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
   let calls = 0;
@@ -34,7 +34,8 @@ async function attempts(first: number, { source = 'user: ' + 'a long message '.r
       sentRetry = context.messages.length > 1 && last?.role === 'user' && typeof last.content === 'string' ? last.content : '';
       const stream = createAssistantMessageEventStream();
       const end = calls < ends ? firstEnd ?? 'stop' : 'stop';
-      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: calls++ ? 'x'.repeat(400) : text.repeat(first) },
+      const response = replies ? replies[calls] ?? '' : calls ? 'x'.repeat(400) : text.repeat(first); calls++;
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: response },
         ...end === 'toolUse' ? [{ type: 'toolCall' as const, id: 'call-1', name: 'zoom', arguments: { id: 0 } }] : []], api: model.api,
         provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: end, usage: emptyUsage() };
       queueMicrotask(() => { stream.push({ type: 'done', reason: end, message }); stream.end(); });
@@ -45,13 +46,20 @@ async function attempts(first: number, { source = 'user: ' + 'a long message '.r
     const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }), undefined,
       accepted === undefined ? undefined : () => accepted);
     const line = await compress({ context: '<chat>\n</chat>', source, part: merge ? { l: 1, i: 0 } : { l: 0, i: 0 } }, new AbortController().signal);
-    return { calls, bytes: line.length };
+    return { calls, bytes: bytes(line) };
   } finally { removeDir(dir); }
 }
 
-test('a summary up to 640 bytes is kept; one over 640 is retried', async () => {
-  assert.deepEqual(await attempts(640), { calls: 1, bytes: 640 });
-  assert.deepEqual(await attempts(641), { calls: 2, bytes: 400 });
+test('the base threshold keeps 512 bytes and retries 513 bytes', async () => {
+  assert.deepEqual(await attempts(512), { calls: 1, bytes: 512 });
+  assert.deepEqual(await attempts(513), { calls: 2, bytes: 400 });
+  assert.deepEqual(await attempts(180, { first: '€' }), { calls: 2, bytes: 400 }, '540 UTF-8 bytes, despite only 180 characters');
+});
+
+test('five shortening attempts retain the shortest valid line, including a small final overrun', async () => {
+  assert.deepEqual(await attempts(0, { replies: [600, 530, 900, 513, 700].map(n => 'x'.repeat(n)) }), { calls: 5, bytes: 513 });
+  assert.deepEqual(await attempts(0, { replies: ['x'.repeat(530), '', 'x'.repeat(513), '', ''] }), { calls: 5, bytes: 513 });
+  await assert.rejects(attempts(0, { replies: ['', '', '', '', ''] }), /no whole line in 5 tries/);
 });
 
 test('a reply cut off at the token limit, or one that calls a tool, is no summary: it is asked again', async () => {
@@ -73,7 +81,7 @@ test('a thinking level the model can\'t take is clamped like Pi does, not sent a
 test('a merge that is not smaller than the two lines it replaces is retried', async () => {
   const children = ['a'.repeat(280), 'b'.repeat(280)].join('\n'); // 561 bytes
   assert.deepEqual(await attempts(590, { source: children, merge: true }), { calls: 2, bytes: 400 });
-  assert.deepEqual(await attempts(590, { source: 'c'.repeat(1000), merge: true }), { calls: 1, bytes: 590 });
+  assert.deepEqual(await attempts(590, { source: 'c'.repeat(1000), merge: true, accepted: 640 }), { calls: 1, bytes: 590 });
 });
 
 test('the task is the recipe\'s, with a 512-dash ruler for the size, and a merge names its lines and messages', () => {

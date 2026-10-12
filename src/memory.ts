@@ -19,8 +19,7 @@ export interface ViewSelection { parts: [number, number][]; batch: boolean }
 /** One atomic checkpoint; later log entries are replayed as appends to both selections. */
 export interface SavedViews { version: 1; count: number; chat: ViewSelection; compaction: ViewSelection }
 export interface Summary extends Part { text: string; size: number }
-/** `part` is the node to build: a message's leaf, or the merge of its two halves. `call` is the tool call a tool result's leaf
- * answers, raw, since its own line is often not built yet (#153). */
+/** `part` is a leaf or the merge of its two halves. Legacy `call` inputs are ignored; compaction uses only source and built context. */
 export interface Compression { context: string; source: string; part: Part; historical?: boolean; call?: { i: number; text: string } }
 export type Compressor = (input: Compression, signal: AbortSignal) => Promise<string>;
 const key = ({ l, i }: Part) => l * 2 ** 40 + i;
@@ -178,12 +177,11 @@ export class Memory {
   private readonly events = new EventEmitter();
   private readonly controller = new AbortController();
   private readonly busy = new Map<number, Promise<void>>();
-  private readonly retryAt = new Map<number, number>();
+  private readonly failedNodes = new Set<number>();
   private readonly reported = new Set<number>();
   /** Messages without their node, and merges whose halves are built, oldest first, so the scheduler never scans the tree for work (recipe §4). */
   private readonly unbuilt = new Set<number>();
   private readonly merges = new Map<number, Part>();
-  private retryTimer?: ReturnType<typeof setTimeout>;
   /** The most summaries owed at once since none were last owed. */
   private peak = 0;
   private scheduled = false;
@@ -211,7 +209,7 @@ export class Memory {
    * waits behind. Chat keeps 8; imports pass the "Import: summaries at once" setting. */
   constructor(source: string | { directory: string; store: Store; saved: Saved }, private readonly compress: Compressor,
     private readonly warn: (s: string) => void = console.error,
-    readonly budget = VIEW, private readonly jobs = 8, private readonly retryMs = 10_000) {
+    readonly budget = VIEW, private readonly jobs = 8) {
     this.chat = new Sawtooth(budget, budget / 2, part => this.node(part));
     this.compaction = new Sawtooth(budget / 4, budget / 8, part => this.node(part));
     let saved: Saved;
@@ -236,9 +234,10 @@ export class Memory {
     for (let i = loaded; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
     this.fit(); this.save(); this.schedule();
   }
-  append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string, origin?: Origin, chunkId?: string) {
+  append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string, origin?: Origin, chunkId?: string, wakeFailed = true) {
     if (this.stopped) throw new Error('Memory is closed.');
     if (this.failed) throw new Error(`Memory could not be saved: ${this.failed}`);
+    if (wakeFailed) this.retryFailed();
     const entries = messageEntries(this.root.length, kind, text, date, receipt, origin, chunkId);
     if (entries.length > 1) this.writeMessage(() => this.store.savePending(entries));
     for (const entry of entries) {
@@ -362,14 +361,18 @@ export class Memory {
   }
   get view(): readonly Part[] { return this.chat.parts; }
   render() { return this.chat.render(); }
-  get ready() { return this.view.every(p => this.node(p)); }
+  get ready() { return this.unbuilt.size === 0 && this.view.every(p => this.node(p)); }
   get pending() { return this.unbuilt.size; }
   get active() { return this.busy.size; }
   get size() { return this.chat.size; }
-  /** Summaries built out of the backlog since it was last empty, and when the next failed one is retried. */
-  progress(now = Date.now()) {
-    const due = Math.min(...[...this.retryAt.values()].filter(t => t > now));
-    return { done: this.peak - this.owed(), total: this.peak, retryIn: Number.isFinite(due) ? due - now : undefined };
+  /** Summaries built out of the backlog. Failed work retries on the next message, never on a timer. */
+  progress(): { done: number; total: number; retryIn: number | undefined } {
+    return { done: this.peak - this.owed(), total: this.peak, retryIn: undefined };
+  }
+  /** A new input must wake failed history before the turn waits for it; logging that input happens later. */
+  retryFailed() {
+    if (!this.failedNodes.size || this.stopped) return;
+    this.failedNodes.clear(); this.reported.clear(); this.lastError = undefined; this.schedule();
   }
   private owed() { return this.expectedNodes() - this.tree.size; }
   onChange(listener: () => void) { this.events.on('change', listener); return () => { this.events.off('change', listener); }; }
@@ -392,17 +395,14 @@ export class Memory {
   }
   private pump() {
     if (this.stopped) return;
-    // One clock reading: skipping a part and arming its retry timer must agree on what is due.
-    const now = Date.now();
     const run = (part: Part) => {
       const id = key(part);
-      if (this.busy.has(id) || (this.retryAt.get(id) ?? 0) > now) return;
+      if (this.busy.has(id) || this.failedNodes.has(id)) return;
       const promise = this.build(part).catch(error => {
         if (this.stopped) return;
         this.lastError = error instanceof Error ? error.message : String(error);
         if (!this.reported.has(id)) { this.reported.add(id); this.warn(`Compactor ${start(part)}+${2 ** part.l}: ${this.lastError}`); }
-        this.retryAt.set(id, Date.now() + this.retryMs);
-        if (!this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.schedule(); }, this.retryMs);
+        this.failedNodes.add(id);
       // Schedule before telling waiters, so a turn never mistakes the gap before the next pump for a stall.
       }).finally(() => { this.busy.delete(id); this.schedule(); this.events.emit('change'); });
       this.busy.set(id, promise);
@@ -418,75 +418,60 @@ export class Memory {
       if (this.busy.size >= this.jobs) return;
       run(part);
     }
-    // A later failure can have a later deadline than the timer installed by the first.
-    const deadlines = [...this.retryAt.values()].filter(t => t > now);
-    if (deadlines.length && !this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.schedule(); }, Math.max(1, Math.min(...deadlines) - now));
     if (this.stalled) this.events.emit('change');
   }
   /** Nothing is being built, nothing more can start, and something failed: only a retry can make progress. */
-  private get stalled() { return this.busy.size === 0 && !this.scheduled && this.retryAt.size > 0; }
+  private get stalled() { return this.busy.size === 0 && !this.scheduled && this.failedNodes.size > 0; }
   private async build(part: Part) {
     const source = part.l === 0 ? `${this.root[part.i].kind}: ${this.root[part.i].text}`
       : [0, 1].map(offset => this.text({ l: part.l - 1, i: 2 * part.i + offset })).join('\n');
     const mergeSource = part.l > 0 ? [0, 1].map(offset => flat(this.text({ l: part.l - 1, i: 2 * part.i + offset }))).join('\n') : source;
-    const call = part.l === 0 ? this.callOf(part.i) : undefined;
     const text = bytes(source) <= NODE ? source : (await this.compress({ context: this.compactionView(part), source: mergeSource, part,
-      historical: this.root.slice(start(part), end(part)).some(entry => !!entry.origin),
-      ...(call ? { call: { i: call.i, text: cap(`tool: ${call.text}`, 4000) } } : {}) }, this.controller.signal)).trim();
+      historical: this.root.slice(start(part), end(part)).some(entry => !!entry.origin) }, this.controller.signal)).trim();
     if (this.stopped) return;
     if (!text) throw new Error('Compactor returned an empty summary.');
     const node = { ...part, text, size: bodyBytes(text) };
     // A failed node write fails the build, which is retried.
     const written = this.enqueue(() => this.store.appendNode(node), error => { throw error; });
     if (written) await written;
-    this.tree.set(key(part), node); this.retryAt.delete(key(part)); this.merges.delete(key(part)); this.queueParent(part);
+    this.tree.set(key(part), node); this.failedNodes.delete(key(part)); this.merges.delete(key(part)); this.queueParent(part);
     if (!part.l) { this.unbuilt.delete(part.i); this.chat.built(part.i); this.compaction.built(part.i); }
-    if (!this.retryAt.size) this.lastError = undefined;
+    if (!this.failedNodes.size) this.lastError = undefined;
     if (this.fit()) this.save();
   }
-  /** The tool call a result answers: a run of calls is followed by their results in the same order. A result that doesn't
-   * start with the call's tool name (an `Agent error`, an odd import) has none. */
-  private callOf(i: number) {
-    if (this.root[i].kind !== 'echo') return;
-    let results = i;
-    while (this.root[results - 1]?.kind === 'echo') results--;
-    let calls = results;
-    while (this.root[calls - 1]?.kind === 'tool') calls--;
-    const logical: Entry[] = [];
-    for (let at = calls; at < results;) {
-      const entry = this.root[at], count = entry.chunk?.count ?? 1;
-      logical.push({ ...entry, text: this.root.slice(at, at + count).map(e => e.text).join('') });
-      at += count;
-    }
-    const call = logical[i - results];
-    return call && this.root[i].text.startsWith(`${call.text.split(' ', 1)[0]}:`) ? call : undefined;
-  }
-  /** The compactions' view up to the node. A line still being built shows as a placeholder instead of ending the view: an A/B on
-   * real turns (#101) found that cutting there also hid the built lines after it, such as an echo's own tool call. */
+  /** The contiguous built prefix, ending before a leaf or through a merge, never past an unfinished original. */
   private compactionView(part: Part) {
-    const boundary = part.l === 0 ? start(part) : end(part), lines: string[] = [];
-    for (const p of this.compaction.parts) { if (end(p) > boundary) break; lines.push(renderLine(p, this.text(p))); }
+    const firstUnbuilt = this.unbuilt.values().next().value ?? this.root.length;
+    const boundary = Math.min(part.l === 0 ? start(part) : end(part), firstUnbuilt), lines: string[] = [];
+    for (const p of this.compaction.parts) {
+      if (end(p) > boundary) break;
+      const node = this.node(p); if (!node) break;
+      lines.push(renderLine(p, node.text));
+    }
     return renderView(lines);
   }
   private queueParent({ l, i }: Part) {
     const parent = { l: l + 1, i: Math.floor(i / 2) };
     if (!this.node(parent) && this.node({ l, i: i % 2 ? i - 1 : i + 1 })) this.merges.set(key(parent), parent);
   }
-  /** A 'turn' waits until every part of the view is built, or until everything pending has failed: it then goes on with placeholders
-   * for the missing lines, `lastError` says why, and the failed nodes are still retried in the background. 'tree' waits for every
-   * node, through failures. As in the recipe, the view may run over budget until pending merges land.
+  /** A 'turn' requires every prior original and selected view line to be summarized. 'tree' requires every node.
+   * An exhausted failure exits visibly; a new message wakes failed work before waiting again.
    * 'ahead' (imports) waits until a new message's node would start at once. Due merges count too: messages go first, so a steady
    * stream of them would otherwise take every worker and the views could never merge. */
   async settle(signal?: AbortSignal, until: 'turn' | 'tree' | 'ahead' = 'turn'): Promise<void> {
     const done = () => until === 'tree' ? this.ready && this.busy.size === 0 && this.tree.size === this.expectedNodes()
       : until === 'ahead' ? this.unbuilt.size + this.merges.size < this.jobs
-      : this.ready || this.stalled;
+      : this.ready;
     if (done()) return;
     if (this.stopped || signal?.aborted) throw new Error('Memory wait cancelled.');
     await new Promise<void>((resolve, reject) => {
       const cleanup = () => { this.events.off('change', check); signal?.removeEventListener('abort', abort); };
       const abort = () => { cleanup(); reject(new Error('Memory wait cancelled.')); };
-      const check = () => { if (this.stopped) abort(); else if (done()) { cleanup(); resolve(); } };
+      const check = () => {
+        if (this.stopped) abort();
+        else if (done()) { cleanup(); resolve(); }
+        else if (this.stalled) { cleanup(); reject(new Error(`OptChat summaries failed: ${this.lastError ?? 'compactor unavailable'}. Check /optchat model and send another message to retry.`)); }
+      };
       this.events.on('change', check); signal?.addEventListener('abort', abort, { once: true }); check();
     });
   }
@@ -539,7 +524,7 @@ export class Memory {
     return new Date(this.root[id].date).toString();
   }
   async close() {
-    this.stopped = true; this.controller.abort(); clearTimeout(this.retryTimer);
+    this.stopped = true; this.controller.abort();
     this.events.emit('change'); await Promise.allSettled(this.busy.values()); await this.writing;
   }
 }

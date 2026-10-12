@@ -45,22 +45,24 @@ test('tree covers all history, fits incrementally, and exact originals survive r
   } finally { await memory.close(); removeDir(dir); }
 });
 
-test('a turn waits for pending summaries, goes on once they have all failed, and failures keep retrying', async () => {
+test('a turn refuses failed history, retries on the next input, and stays cancellable', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')); let attempts = 0;
   let release = () => {};
   const retrying = new Promise<void>(resolve => { release = resolve; });
   const memory = new Memory(dir, async () => {
     if (++attempts === 1) throw new Error('model unavailable');
     await retrying; return 'user: retained decision';
-  }, () => {}, 128000, 8, 100);
+  }, () => {}, 128000, 8);
   try {
     memory.append('user', 'large message '.repeat(100));
-    await memory.settle(AbortSignal.timeout(2000));
-    assert.ok(!memory.ready, 'the turn goes on with a placeholder');
+    await assert.rejects(memory.settle(AbortSignal.timeout(2000)), /model unavailable.*send another message/);
+    assert.ok(!memory.ready, 'failed history cannot pass the turn gate');
     assert.match(memory.render(), /not summarized yet/);
     assert.equal(memory.lastError, 'model unavailable');
-    for (const deadline = Date.now() + 2000; attempts < 2 && Date.now() < deadline;) await new Promise(r => setTimeout(r, 10));
-    assert.equal(attempts, 2, 'retried after the delay');
+    await new Promise(resolve => setTimeout(resolve, 30)); assert.equal(attempts, 1, 'no background retry');
+    memory.retryFailed();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(attempts, 2, 'new input wakes failed work before it is logged');
     // AbortSignal.timeout doesn't keep the event loop alive, and nothing else would while the retry hangs.
     const stop = new AbortController(); const timer = setTimeout(() => stop.abort(), 20);
     await assert.rejects(memory.settle(stop.signal), /cancelled/, 'a retry in flight is waited for');
@@ -71,13 +73,14 @@ test('a turn waits for pending summaries, goes on once they have all failed, and
   } finally { release(); await memory.close(); removeDir(dir); }
 });
 
-test('a tree wait (imports) keeps waiting through failures', async () => {
+test('tree and turn waits expose exhausted failures instead of hanging or using raw prefixes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
-  const memory = new Memory(dir, async () => { throw new Error('down'); }, () => {}, 128000, 8, 60_000);
+  const memory = new Memory(dir, async () => { throw new Error('down'); }, () => {}, 128000, 8);
   try {
     memory.append('user', 'large message '.repeat(100));
-    await assert.rejects(memory.settle(AbortSignal.timeout(100), 'tree'), /cancelled/);
-    await memory.settle(AbortSignal.timeout(100));
+    await assert.rejects(memory.settle(AbortSignal.timeout(100), 'tree'), /summaries failed: down/);
+    await assert.rejects(memory.settle(AbortSignal.timeout(100)), /summaries failed: down/);
+    assert.equal(memory.tree.size, 0, 'failure never becomes a source-prefix summary');
   } finally { await memory.close(); removeDir(dir); }
 });
 
@@ -388,7 +391,7 @@ test('a message\'s node starts once fewer than 8 lines before it are unbuilt, so
   } finally { calls.forEach(c => c.release()); await memory.close(); removeDir(dir); }
 });
 
-test('a summary sees the built lines after one still being built, such as an echo\'s own tool call', async () => {
+test('an unfinished earlier leaf stops compaction context before later built lines and raw calls', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-gaps-'));
   const calls: { input: Compression; release: () => void }[] = [];
   const memory = new Memory(dir, input => new Promise(resolve => calls.push({ input, release: () => resolve('s'.repeat(300)) })), () => {});
@@ -398,9 +401,27 @@ test('a summary sees the built lines after one still being built, such as an ech
     memory.append('echo', `contents ${'.'.repeat(600)}`);
     await new Promise(resolve => setTimeout(resolve, 20));
     const echo = calls.find(c => c.input.part.i === 2)!.input.context;
-    assert.match(echo, /^0\+1\|\(not summarized yet: zoom it\)$/m);
-    assert.match(echo, /^1\+1\|tool: read src\/memory\.ts$/m);
+    assert.equal(echo, '<chat>\n\n</chat>');
+    assert.equal(calls.find(c => c.input.part.i === 2)!.input.call, undefined);
+    assert.equal(calls.length, 2, 'the echo still builds in parallel with the earlier leaf');
   } finally { calls.forEach(c => c.release()); await memory.close(); removeDir(dir); }
+});
+
+test('merge context stops at an earlier hole, then ends exactly at each merge boundary', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-merge-boundary-')), calls: Compression[] = [];
+  let release = () => {};
+  const held = new Promise<string>(resolve => { release = () => resolve('s'.repeat(300)); });
+  const memory = new Memory(dir, async input => { calls.push(input); return input.part.l === 0 && input.part.i === 0 ? held : 's'.repeat(300); }, () => {});
+  try {
+    memory.append('user', 'FIRST '.repeat(120));
+    for (let i = 1; i <= 3; i++) memory.append('user', `${i} ${'x'.repeat(290)}`);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls.find(c => c.part.l === 1 && c.part.i === 1)?.context, '<chat>\n\n</chat>', 'built messages 2 and 3 cannot skip unfinished message 0');
+    release(); await memory.settle(undefined, 'tree');
+    const lines = (l: number, i: number) => calls.find(c => c.part.l === l && c.part.i === i)!.context.match(/^\d+\+\d+\|/gm);
+    assert.deepEqual(lines(1, 0), ['0+1|', '1+1|'], 'left merge includes its own children and nothing later');
+    assert.deepEqual(lines(2, 0), ['0+1|', '1+1|', '2+1|', '3+1|'], 'top merge includes its complete range');
+  } finally { release(); await memory.close(); removeDir(dir); }
 });
 
 test('a view that cannot be saved only warns, since the log stays authoritative', async () => {
@@ -469,33 +490,35 @@ test('incremental view size and pending count match the rendered view across fai
     return input.source.slice(0, 120 + input.source.length % 200);
   };
   const measured = (memory: Memory) => bytes(memory.render());
-  let memory = new Memory(dir, compress, () => {}, 4000, 8, 10);
+  let memory = new Memory(dir, compress, () => {}, 4000, 8);
   try {
     for (let i = 0; i < 120; i++) {
       memory.append(i % 3 ? 'echo' : 'user', `${i} ${'detail '.repeat(i % 7 ? 90 : 2)}`);
       assert.equal(memory.size, measured(memory), `size after append ${i}`);
     }
-    await memory.settle(AbortSignal.timeout(5000), 'tree');
+    await assert.rejects(memory.settle(AbortSignal.timeout(5000), 'tree'), /transient/);
+    memory.retryFailed(); await memory.settle(AbortSignal.timeout(5000), 'tree');
     assert.equal(memory.pending, 0);
     assert.equal(memory.size, measured(memory));
     await memory.close();
-    memory = new Memory(dir, compress, () => {}, 4000, 8, 10);
+    memory = new Memory(dir, compress, () => {}, 4000, 8);
     assert.equal(memory.pending, 0);
     assert.equal(memory.size, measured(memory));
   } finally { await memory.close(); removeDir(dir); }
 });
 
-test('a retry that falls due while the compactor is scheduling still runs', async () => {
-  // Each clock reading advances, so a retry can fall due between deciding to skip it and arming its timer.
+test('wall-clock changes never trigger a retry; the next message does', async () => {
   const now = Date.now;
   for (const step of [1, 2, 3]) {
     const dir = mkdtempSync(join(tmpdir(), 'oc-due-'));
     let failures = 1, clock = now();
-    const memory = new Memory(dir, async ({ source }) => { if (failures-- > 0) throw new Error('transient'); return source.slice(0, 100); }, () => {}, 4000, 8, 10);
+    const memory = new Memory(dir, async ({ source }) => { if (failures-- > 0) throw new Error('transient'); return source.slice(0, 100); }, () => {}, 4000, 8);
     try {
       Date.now = () => (clock += step);
       memory.append('user', 'x'.repeat(600));
-      // A ref'd timer keeps the process alive, so a hang fails here instead of draining the event loop.
+      await assert.rejects(memory.settle(undefined, 'tree'), /transient/);
+      clock += 60_000; await new Promise(resolve => setImmediate(resolve)); assert.equal(failures, 0);
+      memory.append('user', 'retry now');
       let timer: ReturnType<typeof setTimeout> | undefined;
       const result = await Promise.race([memory.settle(undefined, 'tree').then(() => 'settled'),
         new Promise(resolve => { timer = setTimeout(resolve, 1000, 'hung'); })]);
@@ -553,7 +576,8 @@ test('a new message is summarized without rescanning every built node', async ()
 test('merges that keep failing are queued, so a new message never scans their level of the tree', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-queue-'));
   // Each 300-byte message is its own line, and merging two needs the compactor, which refuses. The budget keeps the view from merging.
-  const memory = new Memory(dir, async () => { throw new Error('refused'); }, () => {}, 10_000_000, 8, 60_000);
+  let attempts = 0, contextLines = 0;
+  const memory = new Memory(dir, async input => { attempts++; contextLines += (input.context.match(/^\d+\+\d+\|/gm) ?? []).length; throw new Error('refused'); }, () => {}, 10_000_000, 8);
   const idle = async () => { while (memory.pending || memory.active) await new Promise(resolve => setTimeout(resolve, 5)); };
   try {
     for (let i = 0; i < 200; i++) memory.append('user', `${i} ${'.'.repeat(300)}`);
@@ -561,16 +585,18 @@ test('merges that keep failing are queued, so a new message never scans their le
     const get = memory.tree.get;
     let lookups = 0;
     memory.tree.get = function (this: typeof memory.tree, key) { lookups++; return get.call(this, key); };
+    contextLines = 0;
     memory.append('user', `one more ${'.'.repeat(300)}`);
     await idle();
-    assert.ok(lookups < 100, `${lookups} tree lookups for one new message, with all 100 merges failing`);
+    assert.equal(attempts, 200, 'the new message retries the 100 failed queued merges once');
+    assert.ok(lookups - contextLines < 1000, `${lookups} lookups, including ${contextLines} context lines; scheduling stays proportional to queued retries`);
   } finally { await memory.close(); removeDir(dir); }
 });
 
 test('a message whose node keeps failing is queued, so later messages never scan the leaves after it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-stuck-leaf-'));
   // Message 0 needs the compactor, which refuses it; every later message is its own line and their merges succeed.
-  const memory = new Memory(dir, async input => { if (input.part.l === 0) throw new Error('refused'); return 's'.repeat(100); }, () => {}, 10_000_000, 8, 60_000);
+  const memory = new Memory(dir, async input => { if (input.part.l === 0) throw new Error('refused'); return 's'.repeat(100); }, () => {}, 10_000_000, 8);
   const idle = async () => { while (memory.pending > 1 || memory.active) await new Promise(resolve => setTimeout(resolve, 5)); };
   try {
     memory.append('user', `0 ${'.'.repeat(600)}`);
@@ -748,7 +774,7 @@ test('view size counts the flattened text that render emits, for new and reloade
   } finally { await memory.close(); removeDir(dir); }
 });
 
-test("a tool result's summary sees the raw call it answers, paired in order through parallel calls", async () => {
+test('echo summaries use the exact v2 task without a raw-call side channel', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
   const calls: Compression[] = [];
   const memory = new Memory(dir, async input => { calls.push(input); return 'summary'; }, () => {});
@@ -765,9 +791,9 @@ test("a tool result's summary sees the raw call it answers, paired in order thro
     const leaf = (i: number) => calls.find(c => c.part.l === 0 && c.part.i === i)!;
     assert.deepEqual([0, 1, 2, 5].map(i => leaf(i).call), [undefined, undefined, undefined, undefined]);
     assert.equal(leaf(6).call, undefined);
-    assert.deepEqual([leaf(3).call?.i, leaf(4).call?.i], [1, 2]);
+    assert.deepEqual([leaf(3).call, leaf(4).call], [undefined, undefined]);
     const task = compaction(leaf(4));
-    assert.match(task, /message 4 answers \(message 2,[^]*<call>\ntool: bash \{"command":"ls"\}[^]*<\/call>\n<input>\necho: bash: listing/);
+    assert.equal(task, `Compaction: compress message 4 into one line of at most 512 bytes\n(about 70 words), the length of this ruler:\n${'-'.repeat(512)}\n<input>\n${leaf(4).source}\n</input>`);
     assert.doesNotMatch(compaction(leaf(1)), /<call>/);
     assert.doesNotMatch(leaf(4).context, /tool: bash/);
   } finally { await memory.close(); removeDir(dir); }

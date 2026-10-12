@@ -13,7 +13,7 @@ test('/optchat shows the profile status as aligned rows and returns the chosen a
   const lines = menu.render(80).map(line => line.trimEnd());
   assert.ok(lines.includes(' OptChat v1.2.3 · personal'));
   assert.ok(lines.includes(' Memory     5,251 messages · 1 pending'));
-  assert.ok(lines.includes(' Compactor  anthropic/claude-sonnet-5-5 · medium'));
+  assert.ok(lines.includes(' Compactor  anthropic/claude-haiku-4-5 · xhigh'));
   assert.ok(lines.includes(' Summaries failing: Rate limited'));
   menu.handleInput('j'); menu.handleInput('\r');
   menu.handleInput('\x1b');

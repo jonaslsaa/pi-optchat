@@ -72,8 +72,7 @@ test('every non-result writer chunks its history while current input and actual 
       assert.equal(logical[index].text, `${name} ${JSON.stringify(block.arguments)}`);
       const result = logical[index + 2];
       assert.ok(result.text.length <= CAP);
-      assert.equal(calls.find(c => !c.part.l && c.part.i === result.i)?.call?.text.startsWith(`tool: ${name} `), true);
-      assert.equal(calls.find(c => !c.part.l && c.part.i === result.i)?.call?.i, logical[index].i);
+      assert.equal(calls.find(c => !c.part.l && c.part.i === result.i)?.call, undefined, 'no unsummarized call side channel');
     }
     assert.ok(calls.filter(c => !c.part.l && memory.root[c.part.i].kind !== 'echo').every(c => bytes(c.source) <= SOURCE_BYTES + 6));
     assert.equal(memory.root.filter(e => e.receipt === 'input').length, 1);

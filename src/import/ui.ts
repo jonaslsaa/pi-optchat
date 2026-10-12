@@ -83,7 +83,7 @@ export async function showProgress(ctx: { ui: Pick<ExtensionUIContext, 'select' 
   if (outerSignal.aborted) abort();
   const task = run(controller.signal, p => ctx.ui.setWidget('optchat-import', [
     `${job.mode} import · ${p.messages}/${p.total} messages indexed · ${p.summaries} summary nodes`,
-    p.error ? `Retrying: ${clean(p.error)} · you can pause` : 'The original memory stays intact until this finishes.',
+    p.error ? `Summary failed: ${clean(p.error)} · fix the cause and resume this import to retry` : 'The original memory stays intact until this finishes.',
   ]));
   // Attach a rejection handler immediately; UI and model failures can happen independently.
   const outcome = task.then(() => ({ complete: true as const }), error => ({ complete: false as const, error })).finally(() => finished.abort());

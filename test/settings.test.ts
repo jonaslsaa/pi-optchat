@@ -58,8 +58,9 @@ test('a config.json from before settings existed loads with the defaults, and se
   const dir = mkdtempSync(join(tmpdir(), 'optchat-config-'));
   try {
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ compactor: defaults.compactor, subagent: defaults.subagent }));
-    assert.deepEqual(loadConfig(dir), { ...defaults, subagentLevels: 1, maxAgents: 8, previousExchange: true, previousExchangeKB: 16, memorySearch: false, summaryAcceptBytes: 640 });
-    const changed = { ...loadConfig(dir), subagentLevels: 3, maxAgents: 12, previousExchange: false, previousExchangeKB: 4, memorySearch: true, summaryAcceptBytes: 512 };
+    assert.deepEqual(loadConfig(dir), { ...defaults, subagentLevels: 1, maxAgents: 8, previousExchange: false, previousExchangeKB: 16, memorySearch: false, summaryAcceptBytes: 512, refreshAt: 0 });
+    const changed = { ...loadConfig(dir), compactor: { provider: 'anthropic', model: 'claude-sonnet-5-5', thinking: 'medium' as const },
+      subagentLevels: 3, maxAgents: 12, previousExchange: true, previousExchangeKB: 4, memorySearch: true, summaryAcceptBytes: 640, refreshAt: 0.3 };
     saveConfig(dir, changed);
     assert.deepEqual(loadConfig(dir), changed);
     for (const [key, value] of [['subagentLevels', 0], ['maxAgents', -1], ['previousExchangeKB', 1.5], ['subagentLevels', '3'], ['previousExchange', 'yes'], ['summaryAcceptBytes', 511], ['maxAgents', null], ['importJobs', 0], ['importJobs', 65]] as const) {
@@ -201,7 +202,7 @@ test('the settings page saves a valid number and explains an invalid one', () =>
     const page = settingsPage(plain, { profile: 'demo', config, models: [{ name: 'anthropic/claude-sonnet-5-5', thinking: ['low', 'medium'] }], save: next => saveConfig(dir, next) }, () => {});
     const type = (...keys: string[]) => { for (const key of keys) page.handleInput(key); };
     assert.match(page.render(100).join('\n'), /Subagent levels\s+1  default\n/);
-    assert.match(page.render(100).join('\n'), /claude-haiku-4-5 · low  default claude-sonnet-5-5 · medium/, 'a changed model shows its default too');
+    assert.match(page.render(100).join('\n'), /claude-haiku-4-5 · low  default claude-haiku-4-5 · xhigh/, 'a changed model shows its default too');
     type('\x1b[B', '\x1b[B', '\r'); // down to Subagent levels, open it
     type('0', '\r');
     assert.match(page.render(100).join('\n'), /must be a whole number of 1 or more/);
@@ -227,7 +228,7 @@ test('turning Previous exchange off also reaches a turn that a subagent report s
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
     createProfile('fixture');
-    saveConfig(profilePath('fixture'), { ...loadConfig(profilePath('fixture')), compactor: model });
+    saveConfig(profilePath('fixture'), { ...loadConfig(profilePath('fixture')), previousExchange: true, compactor: model });
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
     const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
       noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
@@ -310,7 +311,7 @@ test('Memory search turned on and off in /optchat settings adds and removes the 
 test('the thinking step offers only levels the model takes, so Sonnet 5.5 has no "off" that would run at high effort', () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-page-'));
   try {
-    const config: ProfileConfig = { ...defaults };
+    const config: ProfileConfig = { ...defaults, compactor: { provider: 'anthropic', model: 'claude-sonnet-5-5', thinking: 'medium' } };
     const page = settingsPage(plain, { profile: 'demo', config, save: next => saveConfig(dir, next),
       models: [{ name: 'anthropic/claude-sonnet-5-5', thinking: ['low', 'medium', 'high'] }] }, () => {});
     page.handleInput('\r'); // open Compactor model

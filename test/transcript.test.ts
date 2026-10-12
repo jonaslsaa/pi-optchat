@@ -112,7 +112,7 @@ test('real Pi lifecycle retains one exchange across tool calls and resume, witho
   try {
     createProfile('fixture');
     const config = loadConfig(profilePath('fixture'));
-    saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    saveConfig(profilePath('fixture'), { ...config, previousExchange: true, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
     const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
       modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
     runtime.registerProvider('fixture', {
@@ -246,7 +246,7 @@ test('another extension\'s shown custom message starts a turn and stays in memor
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
     createProfile('fixture');
-    saveConfig(profilePath('fixture'), { ...loadConfig(profilePath('fixture')), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    saveConfig(profilePath('fixture'), { ...loadConfig(profilePath('fixture')), previousExchange: true, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
     const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
       modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
     runtime.registerProvider('fixture', {
@@ -465,11 +465,12 @@ test('an aborted wait for summaries clears the working message', async () => {
   assert.equal(working.length, 2);
 });
 
-test('a failing summarizer says why the turn is waiting, then the turn goes on without the missing summary', async () => {
-  const { seen, asked } = await waitForSummaries('No API key for anthropic', (_, asked) => asked.length > 1);
+test('a failing summarizer says why and refuses to send incomplete history', async () => {
+  const { seen, asked } = await waitForSummaries('No API key for anthropic', working => working.some(w => w?.includes('failing:')) && working.at(-1) === undefined);
   assert.deepEqual(seen.slice(0, 2), ['Waiting for OptChat summaries…', 'Waiting for OptChat summaries… failing: No API key for anthropic (see /optchat model)']);
   assert.equal(seen.at(-1), undefined, 'the message is cleared once the wait gives up');
-  assert.match(asked.at(-1)!, /not summarized yet: zoom it\)[\s\S]*Second question\./);
+  assert.equal(asked.length, 1, 'only the first turn reached the main provider');
+  assert.ok(!asked[0].includes('Second question.'));
 });
 
 // A 1x1 PNG.

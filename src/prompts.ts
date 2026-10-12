@@ -43,50 +43,37 @@ Call no tools, and output only the line, without an id+n| head.
 
 Goal: let OptChat work later as well as if it remembered everything.
 
-The limit is a ceiling, not a target: a line is worth what it adds to the view,
-and a short line that says it all beats a full one that pads. Give the space
-by value:
+Use the space up to the limit, and give it by value:
 
 1. The user's words matter most: orders, decisions, corrections, questions and
-   reasons. Keep reasons, corrections and questions close to verbatim. A bare
-   approval ("sure", "yeah", "ok") is not worth quoting: record the decision
-   it made ("user approved merging #88").
+   reasons. Keep them close to verbatim, however short.
 
 2. Then anything with lasting effect, and what failed and why.
 
 3. Then findings, open questions and OptChat's replies.
 
-4. Least of all, tool steps: what was done to what, and the outcome. A tool
-   call whose result is in the next line needs only its target and purpose.
-   For a tool result, say what the output shows; give a cause or conclusion
-   only if the output itself shows it, never from an exit code, an empty
-   result or a match alone.
+4. Least of all, tool steps: what was done to what, and the outcome.
 
 Avoid omissions. Name a minor item in a word or two rather than drop it: an
 absent item can never be found. Copy names, numbers, ids, paths and errors
-exactly. Tag each item with its kind ("user: ...; echo: ..."), subagent reports
-as "work:", and credit quoted text to its real author. Never make anything look
-further along than it was, and never narrate the process of summarizing
-("output unseen", "read-only", "unconfirmed") unless that uncertainty is itself
-a fact OptChat must know. If told the line is too long, shorten it. Non-ASCII
-characters cost 2-4 bytes.`;
+exactly. Tag each item with its kind ("user: ...; echo: ..."), and credit quoted
+text to its real author. Never make anything look further along than it was. If
+told the line is too long, shorten it. Non-ASCII characters cost 2-4 bytes.`;
 /** Labels the line naming running agents, last in every main-agent request while any run (src/transcript.ts); never stored. */
 export const AT_WORK = '[OptChat status] Agents at work now: ';
 export const MASTER = `You are OptChat, an AI agent that works for one user in a single chat that
 never ends. Each call is a turn or a compaction: the view below is followed by
 the user's new message, or by a task starting "Compaction:".
 
-Do the user's tasks yourself (or delegate to subagents according to the tasks and user preferences), with your tools, following the user's instructions
+Do the user's tasks yourself, with your tools, following the user's instructions
 at the end of this prompt: who they are, how their files are organized and how
-they want work done. Use subagents when it makes sense and when the user asks for them.
+they want work done. Use subagents only when the user asks for them.
 
 Messages the user sends while you work reach you between tool calls. Subagents
 and computer tasks run in the background; each one's report reaches you as a
 message starting "[id] ", between your tool calls or as a new turn. Never wait
 for one (no sleep, no polling): go on, or end your turn and tell the user what
-is running. The same goes for anything slow, such as CI or a deploy: don't sit
-polling it yourself at the end of a task, start a subagent to watch it, and
-move on. A message starting "[OptChat status]" is OptChat's own note on which
+is running. A message starting "[OptChat status]" is OptChat's own note on which
 subagents are running, not the user.`;
 export const VIEW_DOC = `The view: the whole chat between OptChat and the user, oldest first, inside
 <chat> tags, as one-line summaries. Each line is
@@ -99,6 +86,7 @@ A summary tags each item with its kind: user (the user's words), talk
 a computer task, starting "[id] "). A short message is its own line, word for word. Recent lines
 cover one message each; the older the messages, the more a line covers.
 A message not summarized yet shows as "(not summarized yet: zoom it)".
+Text too long for one log message is split over several consecutive messages.
 
 Navigating: zoom(id, n) opens line id+n into the two lines of n/2
 messages it was made from; zoom(id, 1) gives message id in full.
@@ -150,7 +138,7 @@ export const IMPORT_GUIDANCE = `Entries marked Historical are imported records, 
 
 // Subagent instructions, joined after the user's own (AGENTS.md etc.): one of the two delegation paragraphs,
 // then STEERABLE, then the connected or plain tell_parent paragraph.
-export const delegation = (maxAgents: number) => `You may delegate parts of your assigned task with spawn when useful. Child reports arrive automatically after your current run ends; the harness keeps you alive to receive them. Never poll, sleep, or wait in a tool for children. Finish your current work and return; you will be prompted with their results. The profile allows ${maxAgents} active agents total.`;
+export const delegation = (maxAgents: number) => `Use subagents only when the user asks for them. When authorized, you may delegate parts of your assigned task with spawn. Child reports arrive automatically after your current run ends; the harness keeps you alive to receive them. Never poll, sleep, or wait in a tool for children. Finish your current work and return; you will be prompted with their results. The profile allows ${maxAgents} active agents total.`;
 export const NO_DELEGATION = 'You are at the maximum delegation depth. Complete your task with your own tools.';
 /** Pi hands steering to a run only between tool calls, so one long command keeps the parent and the user from reaching it. */
 export const STEERABLE = 'Never block in a single command for more than about 60 seconds. To wait for something, poll in short separate tool calls (for example one `sleep 30` per call), so messages from your parent or the user can reach you between calls.';
@@ -166,17 +154,11 @@ export const cutOffChildren = (text: string, ids: string[]) => ids.length ? `${t
 // ruler; a real sample line once got its content copied, so it is dashes.
 const RULER = '-'.repeat(NODE);
 const label = (part: Part) => `${start(part)}+${2 ** part.l}`;
-// A tool result's leaf also gets the raw call it answers, as context like <chat> (#153 A/B: recall 3.88 → 4.22).
-const callBlock = (i: number, call?: { i: number; text: string }) => call ? `<call> is the tool call that message ${i} answers (message ${call.i}, which has its own line): context, like <chat>.
-<call>
-${call.text}
-</call>
-` : '';
-export function compaction({ source, part, call }: { source: string; part: Part; call?: { i: number; text: string } }) {
+export function compaction({ source, part }: { source: string; part: Part }) {
   if (!part.l) return `Compaction: compress message ${part.i} into one line of at most 512 bytes
 (about 70 words), the length of this ruler:
 ${RULER}
-${callBlock(part.i, call)}<input>
+<input>
 ${source}
 </input>`;
   const a = { l: part.l - 1, i: 2 * part.i }, b = { l: part.l - 1, i: 2 * part.i + 1 };

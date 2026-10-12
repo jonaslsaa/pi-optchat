@@ -46,19 +46,20 @@ export function asUser(message: AgentMessage): AgentMessage {
   if (first?.type === 'text') return { role: 'user', content: [{ ...first, text: tag + first.text }, ...rest], timestamp };
   return { role: 'user', content: [{ type: 'text', text: tag.trimEnd() }, ...content], timestamp };
 }
-export function logMessage(memory: Memory, message: AgentMessage, receipt?: string) {
+export function logMessage(memory: Memory, message: AgentMessage, receipt?: string, wakeFailed = true) {
   const date = new Date(message.timestamp).toISOString();
-  if (message.role === 'user') memory.append(receipt?.startsWith(REPORT_RECEIPT) ? 'work' : 'user', textContent(message.content), date, receipt);
+  const append = (kind: Parameters<Memory['append']>[0], text: string, receipt?: string) => memory.append(kind, text, date, receipt, undefined, undefined, wakeFailed);
+  if (message.role === 'user') append(receipt?.startsWith(REPORT_RECEIPT) ? 'work' : 'user', textContent(message.content), receipt);
   else if (message.role === 'assistant') {
     for (const block of message.content) {
-      if (block.type === 'text' && block.text.trim()) memory.append('talk', block.text, date);
-      if (block.type === 'toolCall') memory.append('tool', `${block.name} ${JSON.stringify(block.arguments)}`, date);
+      if (block.type === 'text' && block.text.trim()) append('talk', block.text);
+      if (block.type === 'toolCall') append('tool', `${block.name} ${JSON.stringify(block.arguments)}`);
     }
     if (message.stopReason === 'error' || message.stopReason === 'aborted')
-      memory.append('echo', `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`, date);
+      append('echo', `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`);
   } else if (message.role === 'toolResult')
     // A zoom's page already names the images it returns.
-    memory.append('echo', cap(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom')}`), date);
+    append('echo', cap(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom')}`));
 }
 export function boundedMessage(message: AgentMessage): AgentMessage {
   if (message.role !== 'toolResult') return message;
@@ -193,6 +194,12 @@ export function messageChars(message: AgentMessage) {
 export function refreshFraction(setting: number, env = process.env.OPTCHAT_REFRESH_AT) {
   const override = env?.trim() ? Number(env) : NaN;
   return Number.isFinite(override) ? override : setting;
+}
+/** Surface an environment override along with the effective continuity policy. Explicit old choices stay optional. */
+export function contextPolicy(config: { previousExchange: boolean; refreshAt: number }, env = process.env.OPTCHAT_REFRESH_AT) {
+  const fraction = refreshFraction(config.refreshAt, env);
+  const override = env?.trim() ? Number.isFinite(Number(env)) ? ' (OPTCHAT_REFRESH_AT override)' : ' (invalid OPTCHAT_REFRESH_AT ignored)' : '';
+  return `Continuity: ${config.previousExchange ? 'previous exchange replay (optional)' : 'view only'}; turn refresh: ${fraction > 0 ? `${Math.round(fraction * 100)}% (optional)` : 'off'}${override}.`;
 }
 /** That share in characters, at ~4 characters a token; none when off or the window is unknown. */
 export function refreshBudget(contextWindow: number | undefined, fraction: number) {

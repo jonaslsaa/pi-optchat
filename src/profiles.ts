@@ -14,7 +14,7 @@ const PIPE_PREFIX = '\\\\.\\pipe\\';
 export const dataHome = () => resolve(process.env.OPTCHAT_HOME ?? join(homedir(), '.optchat'));
 export interface ProfileConfig extends Settings { compactor: ModelChoice; subagent: ModelChoice }
 export const defaults: ProfileConfig = {
-  compactor: { provider: 'anthropic', model: 'claude-sonnet-5-5', thinking: 'medium' },
+  compactor: { provider: 'anthropic', model: 'claude-haiku-4-5', thinking: 'xhigh' },
   subagent: { provider: 'anthropic', model: 'claude-opus-5-5', thinking: 'high' },
   ...DEFAULT_SETTINGS,
 };

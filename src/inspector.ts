@@ -161,12 +161,12 @@ export class Inspector implements Component, Focusable {
   /** Memory as a gauge: how full the view is, whether summaries are catching up, and how many agents run (their list is one Tab away). */
   private activityLines(width: number) {
     const { memory, children, color } = this.options;
-    const { done, total, retryIn } = memory.progress();
+    const { done, total } = memory.progress();
     const list = children.history.list(), agents = list.filter(isRunning).length, paused = list.filter(r => r.state === 'paused').length;
     const filled = total ? Math.floor(10 * done / total) : 0;
     const lines = [`${color('muted', 'Memory')} · ${count(memory.root.length)} messages · view ${Math.round(memory.size / 1000)} KB / ${Math.round(memory.budget / 1000)} KB`,
       total ? `Catching up · ${count(done)} of ${count(total)} summaries  ${color('accent', '█'.repeat(filled))}${color('dim', '░'.repeat(10 - filled))}` : color('dim', 'Settled')];
-    if (memory.lastError) lines.push(color('dim', `${oneLine(memory.lastError)}${retryIn === undefined ? '' : ` · retry in ${elapsed(retryIn)}`}`));
+    if (memory.lastError) lines.push(color('dim', `${oneLine(memory.lastError)} · retry on the next message`));
     lines.push('', `${color('muted', 'Agents')} · ${agents} running${paused ? ` · ${paused} interrupted` : ''}`);
     return lines.flatMap(l => l ? wrapTextWithAnsi(l, width) : ['']);
   }

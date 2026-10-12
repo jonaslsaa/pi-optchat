@@ -8,14 +8,14 @@ import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type Extensi
 import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
-import { createCompressor } from './compactor.ts';
+import { createCompressor, describeChoice } from './compactor.ts';
 import { createProfile, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { IMPORT_GUIDANCE, TURN_REFRESHED } from './prompts.ts';
 import { PrefixTools, requestPrefix } from './prefix.ts';
 import { cachePayload, record } from './cache.ts';
 import { cacheGate, cachePlan, cacheRoute, type CacheRelease } from './cache-gate.ts';
 import { saveImages } from './images.ts';
-import { asUser, boundedMessage, atWork, buildContext, logMessage, previousExchange, refreshedRun, refreshBudget, refreshFraction, refreshPoint, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
+import { asUser, boundedMessage, atWork, buildContext, contextPolicy, logMessage, previousExchange, refreshedRun, refreshBudget, refreshFraction, refreshPoint, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer, type ReportDetails } from './report-message.ts';
 import { memoryTools, result, searchTool } from './tools.ts';
 import { Children, CWD_DOC, loadedBuiltins } from './agents.ts';
@@ -77,6 +77,7 @@ export default function optchat(pi: ExtensionAPI) {
   const prefixTools = new PrefixTools();
   const sharedPrefix = (ctx: ExtensionContext, dir: string, config: ProfileConfig) => requestPrefix(prefixTools.prompt(ctx.getSystemPrompt()), instructions(dir), config, prefixTools.snapshot());
   let runStarted = false;
+  let failedTurn = false;
   let fault: string | undefined;
   /** Reports not yet in memory. `count`: how many subagent reports the text joins. `batch`: held while the rest of that spawn runs, not sent yet.
    * `steered`: last sent into a running turn, where Esc or a dequeue can clear it from Pi's queue unseen. */
@@ -136,7 +137,7 @@ export default function optchat(pi: ExtensionAPI) {
     while (logged < run.length) {
       const message = run[logged];
       const receipt = receipts.get(message);
-      logMessage(a.memory, message, receipt); logged++;
+      logMessage(a.memory, message, receipt, !failedTurn); logged++;
       await a.memory.durable();
       if (receipt && !receipt.startsWith(REPORT_RECEIPT)) a.inbox.acknowledge(receipt);
       receipts.delete(message);
@@ -232,7 +233,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport);
       untitle = children.subscribe(() => showTitle(ctx)); showTitle(ctx);
       status(ctx);
-      ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
+      ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${describeChoice(ctx.modelRegistry, config.compactor)}\n${contextPolicy(config)}`, 'info');
       const queuedReports = [...reports];
       if (!pendingImport(dir)) {
         const recover = (work: Promise<void>, what: string) => work.catch(error => ctx.ui.notify(`${what}: ${errorText(error)}`, 'error'));
@@ -377,7 +378,8 @@ export default function optchat(pi: ExtensionAPI) {
     return { action: 'continue' };
   });
   const startRun = async (ctx: ExtensionContext) => {
-    await flush(); run = []; logged = 0; keep = 0; view = undefined; runtime = undefined; runStarted = true;
+    await flush(); run = []; logged = 0; keep = 0; view = undefined; runtime = undefined; runStarted = true; failedTurn = false;
+    active?.memory.retryFailed();
     const config = active?.config;
     previous = config?.previousExchange ? previousExchange(ctx.sessionManager.getBranch(), config.previousExchangeKB * 1000) : [];
     pi.appendEntry(RUN_BOUNDARY, { state: 'start' });
@@ -472,7 +474,7 @@ export default function optchat(pi: ExtensionAPI) {
       return { messages: buildContext([shared.system], refreshedRun(run, keep, TURN_REFRESHED), view, prompt, previous, atWork(a.children.working), runtime) };
     } catch (error) {
       // Pi catches extension errors. Explicitly abort so it cannot fall back to old context.
-      ctx.abort();
+      failedTurn = true; ctx.abort();
       try { await flush(); } catch (persistenceError) { fault = errorText(persistenceError); }
       ctx.ui.notify(errorText(error), 'error');
       return { messages: [{ role: 'system', content: 'OptChat context unavailable. Stop.', timestamp: 0 }] };
@@ -557,7 +559,7 @@ export default function optchat(pi: ExtensionAPI) {
     const a = required();
     if (ctx.mode !== 'tui') throw new Error('Choosing a model requires interactive Pi. Edit config.json in the profile directory instead.');
     const choice = await showModelPicker(ctx, role, settingsOptions(ctx, a));
-    if (choice) ctx.ui.notify(`${role}: ${choice.provider}/${choice.model} (${choice.thinking}); applies to new calls.`, 'info');
+    if (choice) ctx.ui.notify(`${role}: ${describeChoice(ctx.modelRegistry, choice)}; applies to new calls.`, 'info');
   };
   const inspect = async (ctx: ExtensionContext, page: InspectorPage) => {
     if (inspectorController) return;
@@ -604,7 +606,7 @@ export default function optchat(pi: ExtensionAPI) {
           }
           if (selected !== 'Resume import') return;
         } else {
-          const plan = await chooseImport(ctx, a.name, a.memory, `${a.config.compactor.provider}/${a.config.compactor.model} (${a.config.compactor.thinking})`, signal);
+          const plan = await chooseImport(ctx, a.name, a.memory, describeChoice(ctx.modelRegistry, a.config.compactor), signal);
           if (!plan) return;
           signal.throwIfAborted();
           await flush(); await a.inbox.recover(a.memory); await checkpoints; await a.memory.close(); closed = true;

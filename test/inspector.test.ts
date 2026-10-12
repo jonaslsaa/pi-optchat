@@ -118,7 +118,7 @@ test('Tab cycles Agents, Usage and Activity; Activity is a memory gauge with an 
     assert.deepEqual(page(), ['Memory · 3 messages · view 97 KB / 128 KB', 'Settled', 'Agents · 0 running']);
     progress = { done: 12, total: 40, retryIn: 7_000 }; fake.lastError = '429 rate_limit_error';
     children.history.records.set('run', { id: 'run', task: 'review', cwd: dir, model: 'test', thinking: 'high', parentSession: 'parent', depth: 1, started: Date.now(), state: 'running', guidance: [] });
-    assert.deepEqual(page(), ['Memory · 3 messages · view 97 KB / 128 KB', 'Catching up · 12 of 40 summaries  ███░░░░░░░', '429 rate_limit_error · retry in 7s',
+    assert.deepEqual(page(), ['Memory · 3 messages · view 97 KB / 128 KB', 'Catching up · 12 of 40 summaries  ███░░░░░░░', '429 rate_limit_error · retry on the next message',
       'Agents · 1 running']);
     children.history.records.set('paused', { id: 'paused', task: 'wait', cwd: dir, model: 'test', thinking: 'high', parentSession: 'parent', depth: 1, started: Date.now(), state: 'paused', guidance: [] });
     assert.equal(page().at(-1), 'Agents · 1 running · 1 interrupted', 'an interrupted agent is neither running nor finished');
