@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
-import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
+import { getSupportedThinkingLevels, type ProviderHeaders } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
@@ -13,6 +13,7 @@ import { createProfile, holdProfile, instructions, isWindows, lastProfile, listP
 import { IMPORT_GUIDANCE, TURN_REFRESHED } from './prompts.ts';
 import { PrefixTools, requestPrefix } from './prefix.ts';
 import { cachePayload, record } from './cache.ts';
+import { cacheGate, cachePlan, cacheRoute, type CacheRelease } from './cache-gate.ts';
 import { saveImages } from './images.ts';
 import { asUser, boundedMessage, atWork, buildContext, logMessage, previousExchange, refreshedRun, refreshBudget, refreshFraction, refreshPoint, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer, type ReportDetails } from './report-message.ts';
@@ -71,6 +72,8 @@ export default function optchat(pi: ExtensionAPI) {
   let view: string | undefined;
   let runtime: string | undefined;
   let prompt = '';
+  let requestHeaders: ProviderHeaders | undefined;
+  let releaseCache: CacheRelease = () => {};
   const prefixTools = new PrefixTools();
   const sharedPrefix = (ctx: ExtensionContext, dir: string, config: ProfileConfig) => requestPrefix(prefixTools.prompt(ctx.getSystemPrompt()), instructions(dir), config, prefixTools.snapshot());
   let runStarted = false;
@@ -394,6 +397,7 @@ export default function optchat(pi: ExtensionAPI) {
   });
   const DUPLICATE_REPORT = '(duplicate report, already delivered)';
   pi.on('message_end', async (event, ctx) => {
+    if (event.message.role === 'assistant') releaseCache(false);
     if (!active || !runStarted) return;
     const bounded = boundedMessage(event.message);
     const message = asUser(bounded);
@@ -474,7 +478,27 @@ export default function optchat(pi: ExtensionAPI) {
       return { messages: [{ role: 'system', content: 'OptChat context unavailable. Stop.', timestamp: 0 }] };
     }
   });
-  pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
+  pi.on('before_provider_headers', event => { requestHeaders = event.headers; });
+  pi.on('before_provider_request', async (event, ctx) => {
+    const model = ctx.model;
+    if (model?.api !== 'anthropic-messages') return event.payload;
+    const payload = cachePayload(event.payload);
+    releaseCache(false);
+    const signal = ctx.signal;
+    if (active && signal) {
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+      if (auth.ok) {
+        const route = cacheRoute(model, auth, requestHeaders);
+        try { releaseCache = await cacheGate.acquire(cachePlan(payload, route), route, signal); }
+        catch (error) { ctx.abort(); throw error; }
+      }
+    }
+    return payload;
+  });
+  pi.on('provider_stream_event', event => { if (record(event.data) && event.data.type === 'message_start') releaseCache(true); });
+  pi.on('message_update', event => { if (event.assistantMessageEvent.type !== 'start' && event.assistantMessageEvent.type !== 'error') releaseCache(true); });
+  pi.on('after_provider_response', event => { if (event.status >= 400) releaseCache(false); });
+  pi.on('session_shutdown', () => releaseCache(false));
   pi.on('cache_warming_decision', () => ({ action: 'stop' }));
   pi.on('session_before_compact', (_event, ctx) => {
     ctx.ui.notify('OptChat manages history between turns. Pi compaction is disabled; an exceptionally long single run may require stopping and continuing in a new turn.', 'info');
@@ -486,6 +510,7 @@ export default function optchat(pi: ExtensionAPI) {
   };
   pi.on('turn_end', (_event, ctx) => collectUsage(ctx));
   pi.on('agent_settled', async (_event, ctx) => {
+    releaseCache(false);
     collectUsage(ctx);
     try { await flush(); active?.inbox.dropReturned(); } catch (error) { fault = errorText(error); ctx.ui.notify(fault, 'error'); }
     // A report steered into this run that never reached it (Esc or a dequeue cleared Pi's queue) is sent again, now as its own turn.

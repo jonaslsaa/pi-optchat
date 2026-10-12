@@ -241,7 +241,8 @@ test('the view goes in blocks of 4 lines, with marks on its last whole block, 20
     const view = '<chat>\n' + line.repeat(2000) + (quoted ? '0+1|the summary quotes </chat> in passing\n' : '') + line.repeat(3500) + '</chat>';
     const pieces = splitView(view);
     assert.equal(pieces.join(''), view);
-    assert.ok(pieces.slice(0, -1).every(piece => piece.split('\n').length === 5), 'every block but the last holds 4 lines');
+    assert.equal(pieces[0], '<chat>\n');
+    assert.ok(pieces.slice(1, -1).every(piece => piece.split('\n').length === 5), 'every complete block holds 4 summary lines');
     assert.deepEqual(splitView(view.replace(/<\/chat>$/, line.repeat(3) + '</chat>')).slice(0, pieces.length - 1), pieces.slice(0, -1),
       'a view that grows at its end keeps every whole block');
     const payload = { system: [{ type: 'text', text: 'identity', cache_control: { type: 'ephemeral' } }, { type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
@@ -258,13 +259,13 @@ test('the view goes in blocks of 4 lines, with marks on its last whole block, 20
   }
 });
 
-test('after a turn adds up to 60 blocks of lines, a mark of the next call still finds one of the last call\'s within 20 blocks', () => {
+test('after a turn adds up to 59 blocks of lines, a mark of the next call still finds one of the last call\'s within 20 positions', () => {
   const line = '0+1|summary of a decision\n', marks = (lines: number) => {
     const payload = { messages: [{ role: 'user', content: [{ type: 'text', text: '<chat>\n' + line.repeat(lines) + '</chat>' }] }] };
     return (cachePayload(payload) as typeof payload).messages[0].content.flatMap((b, j) => 'cache_control' in b ? [j] : []);
   };
-  const found = (added: number) => marks(1000 + added).some(next => marks(1000).some(last => next >= last && next - last <= 20));
-  assert.ok([4, 100, 240].every(found), 'a turn that adds 1, 25 or 60 blocks');
+  const found = (added: number) => marks(1000 + added).some(next => marks(1000).some(last => next >= last && next - last < 20));
+  assert.ok([4, 100, 236].every(found), 'a turn that adds 1, 25 or 59 blocks');
   assert.ok(!found(400), 'beyond 60 blocks the last entry is out of reach');
 });
 
