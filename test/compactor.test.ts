@@ -12,7 +12,7 @@ import { textContent } from '../src/transcript.ts';
 /** A fake Anthropic model whose calls answer and finish only when the test says so. */
 async function setup() {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-compactor-'));
-  const calls: { source: string; answer: () => void; finish: () => void; fail: () => void }[] = [];
+  const calls: { source: string; answer: () => void; finish: () => void; fail: (error?: string) => void }[] = [];
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
   runtime.registerProvider('optchat-test', {
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'anthropic-messages',
@@ -24,11 +24,12 @@ async function setup() {
         model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
       stream.push({ type: 'start', partial: message });
       const step = <T>() => { let resolve = (_: T) => {}; return { promise: new Promise<T>(r => { resolve = r; }), resolve }; };
-      const answered = step<boolean>(), finished = step<void>();
-      calls.push({ source, answer: () => answered.resolve(true), fail: () => answered.resolve(false), finish: () => finished.resolve() });
+      const answered = step<string | undefined>(), finished = step<void>();
+      calls.push({ source, answer: () => answered.resolve(undefined), fail: (error = 'invalid request') => answered.resolve(error), finish: () => finished.resolve() });
       void (async () => {
-        if (!await answered.promise) {
-          message.stopReason = 'error'; message.errorMessage = 'overloaded';
+        const error = await answered.promise;
+        if (error) {
+          message.stopReason = 'error'; message.errorMessage = error;
           stream.push({ type: 'error', reason: 'error', error: message }); return stream.end();
         }
         stream.push({ type: 'text_delta', contentIndex: 0, delta: 'summary', partial: message });
@@ -38,7 +39,7 @@ async function setup() {
       return stream;
     },
   });
-  const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }));
+  const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }), undefined, undefined, [0, 0]);
   // Long enough for a cache mark, so the first 50k characters are a shared, cacheable prefix.
   const view = `<chat>\n${'0+1|user: an old remembered line\n'.repeat(2000)}</chat>`;
   // The compactor only sees sources over NODE bytes; the fake model reads just the last line.
@@ -87,7 +88,7 @@ test('a failing primer releases the waiting calls instead of hanging them', { ti
   calls[1].answer();
   await settle();
   calls.slice(1).forEach(c => { c.answer(); c.finish(); });
-  assert.deepEqual(await Promise.all(replies), ['overloaded', 'summary of b', 'summary of c']);
+  assert.deepEqual(await Promise.all(replies), ['invalid request', 'summary of b', 'summary of c']);
 });
 
 test('a waiting call that is cancelled stops at once without ever calling the model', { timeout: 5000 }, async () => {
@@ -100,4 +101,26 @@ test('a waiting call that is cancelled stops at once without ever calling the mo
   calls[0].answer(); calls[0].finish();
   await primer;
   assert.deepEqual(calls.map(c => c.source), ['a']);
+});
+
+test('a dropped connection is asked again quietly instead of failing the summary', { timeout: 5000 }, async () => {
+  const { calls, run, settle } = await setup();
+  const reply = run('a');
+  await settle();
+  calls[0].fail('terminated');
+  await settle();
+  calls[1].answer(); calls[1].finish();
+  assert.equal(await reply, 'summary of a');
+});
+
+test('an error that is not transient surfaces at once, and a transient one after two retries', { timeout: 5000 }, async () => {
+  const { calls, run, settle } = await setup();
+  const invalid = run('a').catch((error: Error) => error.message);
+  await settle();
+  calls[0].fail('invalid request');
+  assert.equal(await invalid, 'invalid request');
+  const dropped = run('b').catch((error: Error) => error.message);
+  for (let i = 1; i <= 3; i++) { await settle(); calls[i].fail('terminated'); }
+  assert.equal(await dropped, 'terminated');
+  assert.equal(calls.length, 4);
 });

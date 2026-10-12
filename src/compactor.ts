@@ -1,4 +1,5 @@
-import { clampThinkingLevel, type Api, type AssistantMessage, type Message, type Model } from '@earendil-works/pi-ai';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { clampThinkingLevel, isRetryableAssistantError, type Api, type AssistantMessage, type Message, type Model } from '@earendil-works/pi-ai';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { COMPACT, compaction, IMPORT_GUIDANCE, tooLong } from './prompts.ts';
@@ -43,7 +44,8 @@ function primeFirst() {
 }
 /** The model is asked for 512 bytes; `accepted` is the longest line kept without a retry (the profile's summary size tolerance). */
 export function createCompressor(registry: ModelRegistry, choice: () => ModelChoice,
-  onUsage: (message: AssistantMessage) => void = () => {}, accepted = () => DEFAULT_SETTINGS.summaryAcceptBytes): Compressor {
+  onUsage: (message: AssistantMessage) => void = () => {}, accepted = () => DEFAULT_SETTINGS.summaryAcceptBytes,
+  retryDelays: readonly number[] = [1000, 2000]): Compressor {
   const gate = primeFirst();
   return async (input, signal) => {
     const selected = choice();
@@ -56,9 +58,8 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
     const tries: string[] = [];
-    for (let attempt = 0; attempt < 5; attempt++) {
+    const ask = async () => {
       const warmed = prefix ? await gate(prefix, signal) : () => {};
-      let reply: AssistantMessage;
       try {
         const stream = registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
           // A shared session id is the OpenAI prompt-cache key; SSE because over a websocket Codex would chain unrelated parallel calls on one cached connection.
@@ -68,9 +69,20 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
         });
         // The cache entry is usable once the model starts answering.
         for await (const event of stream) if (event.type !== 'start') { warmed(event.type !== 'error'); break; }
-        reply = await stream.result();
+        return await stream.result();
       } finally { warmed(false); }
-      onUsage(reply);
+    };
+    // Pi's agent loop retries a dropped connection itself; streamSimple doesn't, so a transient error is asked again before it surfaces.
+    const answer = async () => {
+      for (let retry = 0; ; retry++) {
+        const reply = await ask();
+        onUsage(reply);
+        if (retry >= retryDelays.length || !isRetryableAssistantError(reply)) return reply;
+        await sleep(retryDelays[retry], undefined, { signal });
+      }
+    };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const reply = await answer();
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
       // A reply cut off at the token limit, or one that calls a tool, is no summary: ask again.
       if (reply.stopReason === 'length' || reply.content.some(c => c.type === 'toolCall')) continue;
