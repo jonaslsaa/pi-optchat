@@ -558,25 +558,62 @@ test('append activates only after complete indexing, retains original summaries,
   } finally { await old.close(); await activated?.close(); removeDir(dir); }
 });
 
-test('paused imports retain completed summaries, resume from disk, and preserve prior generation through rebuild', async () => {
+test('paused imports retain completed summaries, resume from disk, and preserve native IDs despite older incoming dates', async () => {
   const dir = temp(); const old = new Memory(dir, short);
   let current: Memory | undefined;
   try {
-    old.append('user', 'native later', '2026-06-01T00:00:00.000Z'); await old.settle(undefined, 'tree'); await old.close();
-    prepareImport(dir, old, [entry('a'), entry('b', date, 'large '.repeat(200))], 'rebuild');
+    old.append('user', 'native later', '2026-06-01T00:00:00.000Z');
+    old.append('talk', 'native reply', '2026-06-01T00:01:00.000Z');
+    await old.settle(undefined, 'tree'); await old.close();
+    const references = (m: Memory) => ({ zoom: [m.zoom(0, 1), m.zoom(1, 1), m.zoom(0, 2)], dates: [m.date(0), m.date(1)],
+      nodes: [m.node({ l: 0, i: 0 }), m.node({ l: 0, i: 1 }), m.node({ l: 1, i: 0 })] });
+    const before = references(old);
+    prepareImport(dir, old, [entry('a'), entry('b', date, 'large '.repeat(200))], 'append');
     await assert.rejects(runImport(dir, async (_input, signal) => {
       await new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
       return '';
     }, AbortSignal.timeout(50)));
     assert.equal(memoryDirectory(dir), dir); assert.ok(pendingImport(dir));
     const staged = new Memory(join(dir, pendingImport(dir)!.target), short); const saved = staged.tree.size; await staged.close();
+    assert.deepEqual(references(staged), before, 'interrupted staging retains existing references');
     assert.ok(saved >= 1);
     await runImport(dir, short, AbortSignal.timeout(5000));
     current = new Memory(memoryDirectory(dir), short);
-    assert.equal(current.root[0].receipt, 'import:a'); assert.equal(current.root.at(-1)?.text, 'native later');
+    assert.equal(current.root[2].receipt, 'import:a'); assert.equal(current.root[0].text, 'native later');
+    assert.deepEqual(references(current), before);
+    await current.close(); current = new Memory(memoryDirectory(dir), short);
+    assert.deepEqual(references(current), before, 'activation and restart preserve permanent references');
     assert.ok(current.tree.size >= saved);
     assert.ok(readFileSync(join(dir, 'main', localDay() + '.jsonl'), 'utf8').includes('native later'));
   } finally { await old.close(); await current?.close(); removeDir(dir); }
+});
+
+test('pending legacy rebuilds cannot activate; an already activated legacy job only finishes cleanup', async () => {
+  const dir = temp(), old = new Memory(dir, short);
+  let active: Memory | undefined;
+  try {
+    old.append('user', 'permanent original', '2026-06-01T00:00:00.000Z');
+    await old.settle(undefined, 'tree'); await old.close();
+    const job = prepareImport(dir, old, [entry('older')])!;
+    const journal = join(dir, 'imports', 'pending.json');
+    writeFileSync(journal, JSON.stringify({ ...job, mode: 'rebuild' }));
+    assert.equal(pendingImport(dir)?.mode, 'rebuild', 'the legacy intent is preserved for inspection/discard');
+    await assert.rejects(runImport(dir, short, AbortSignal.timeout(5000)), /Discard the staged import and start an append import/);
+    assert.equal(memoryDirectory(dir), dir);
+    active = new Memory(dir, short);
+    assert.equal(active.zoom(0, 1), old.zoom(0, 1)); await active.close();
+    discardImport(dir);
+    const appended = prepareImport(dir, old, [entry('older')])!;
+    await runImport(dir, short, AbortSignal.timeout(5000));
+    active = new Memory(memoryDirectory(dir), short);
+    const originals = structuredClone(active.root), nodes = [...active.tree.values()]; await active.close();
+    // A previous version already switched the pointer; cleanup must not reinterpret or reorder that generation.
+    writeFileSync(journal, JSON.stringify({ ...appended, mode: 'rebuild' }));
+    await runImport(dir, short, AbortSignal.timeout(5000));
+    assert.equal(pendingImport(dir), undefined);
+    active = new Memory(memoryDirectory(dir), short);
+    assert.deepEqual(active.root, originals); assert.deepEqual([...active.tree.values()], nodes);
+  } finally { await old.close(); await active?.close(); removeDir(dir); }
 });
 
 test('discard leaves original memory active and a completed pointer swap can finish recovery idempotently', async () => {
@@ -621,7 +658,7 @@ for (const jobs of [undefined, 3, 16]) test(`an import summarizes ${jobs ?? '8 (
   } finally { removeDir(dir); }
 });
 
-test('append keeps the saved view with the tree, so the old view stays cached; rebuild starts without one', async () => {
+test('append keeps the saved view and tree, while a new chronological rebuild is refused', async () => {
   const dir = temp(), old = new Memory(dir, short);
   try {
     old.append('user', 'original'); await old.settle(undefined, 'tree'); await old.close();
@@ -629,8 +666,8 @@ test('append keeps the saved view with the tree, so the old view stays cached; r
     const appended = prepareImport(dir, old, [entry('a')], 'append'); assert.ok(appended);
     assert.equal(readFileSync(join(dir, appended.target, 'view.json'), 'utf8'), '[[0,0]]');
     discardImport(dir);
-    const rebuilt = prepareImport(dir, old, [entry('b')], 'rebuild'); assert.ok(rebuilt);
-    assert.equal(existsSync(join(dir, rebuilt.target, 'view.json')), false);
+    assert.throws(() => prepareImport(dir, old, [entry('b')], 'rebuild'), /permanent message IDs/);
+    assert.equal(pendingImport(dir), undefined);
   } finally { removeDir(dir); }
 });
 
@@ -654,7 +691,7 @@ test('a staged plan with an invalid entry, or missing lines, is refused before a
   } finally { removeDir(dir); }
 });
 
-test('chronological rebuild keeps imported conversations and native turns together', () => {
+test('chronological ordering keeps incoming conversations together', () => {
   const first = entry('conversation', date), later = { ...entry('conversation', '2026-12-01T00:00:00.000Z'), receipt: 'import:second' };
   const native: ImportedEntry = { kind: 'user', text: 'native', date: '2026-06-01T00:00:00.000Z' };
   assert.deepEqual(chronological([native, first, later]).map(e => e.text), [first.text, later.text, native.text]);

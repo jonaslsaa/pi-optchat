@@ -7,6 +7,7 @@ import { record } from '../cache.ts';
 import { copyKey, type ImportedEntry } from './sources.ts';
 import { DEFAULT_SETTINGS } from '../settings.ts';
 
+/** `rebuild` is read only for legacy journals; new imports always append. */
 export type ImportMode = 'append' | 'rebuild';
 export interface ImportJob {
   id: string; mode: ImportMode; previous: string; target: string; created: string;
@@ -65,27 +66,26 @@ export function chronological(entries: readonly ImportedEntry[]) {
   return [...groups.values()].sort((a, b) => a.date.localeCompare(b.date)).flatMap(g => g.entries);
 }
 /** Call only while holding the profile lock, after closing its old Memory worker. */
-export function prepareImport(dir: string, old: Memory, incoming: readonly ImportedEntry[], mode: ImportMode): ImportJob | undefined {
+export function prepareImport(dir: string, old: Memory, incoming: readonly ImportedEntry[], mode: ImportMode = 'append'): ImportJob | undefined {
   if (pendingImport(dir)) throw new Error('Resume or discard the pending import first.');
+  if (mode !== 'append') throw new Error('Chronological rebuild would reassign permanent message IDs. Start an append import instead.');
   const { added, skipped } = deduplicate(old.root, incoming);
   if (!added.length) return undefined;
   const id = randomUUID(), target = `memories/${id}`, path = generationPath(dir, target);
-  // Append copies existing summaries without changing their indices. Rebuild regenerates every node.
-  const all = mode === 'rebuild' ? chronological([...logicalEntries(old.root), ...added]) : chronological(added);
-  const entries: Entry[] = mode === 'append' ? [...old.root] : [];
+  // Dates order only the incoming conversations. Existing originals, IDs and nodes are immutable.
+  const all = chronological(added);
+  const entries: Entry[] = [...old.root];
   for (const e of all) entries.push(...messageEntries(entries.length, e.kind, e.text, e.date, e.receipt, e.origin));
-  const kept = mode === 'append' ? old.root.length : 0;
+  const kept = old.root.length;
   for (const sub of ['main', 'tree']) mkdirSync(join(path, sub), { recursive: true, mode: 0o700 });
   if (kept) atomicWrite(join(path, 'main', '000-import.jsonl'), entries.slice(0, kept).map(e => JSON.stringify(e)).join('\n') + '\n');
   atomicWrite(join(path, STAGED), entries.map(e => JSON.stringify(e)).join('\n') + '\n');
-  if (mode === 'append') {
-    cpSync(join(old.directory, 'tree'), join(path, 'tree'), { recursive: true });
-    // The old messages keep their ids, so their saved view (and its prompt cache) still holds.
-    if (existsSync(join(old.directory, 'view.json'))) cpSync(join(old.directory, 'view.json'), join(path, 'view.json'));
-  }
+  cpSync(join(old.directory, 'tree'), join(path, 'tree'), { recursive: true });
+  // The old messages keep their ids, so both saved views and batch obligations still hold.
+  if (existsSync(join(old.directory, 'view.json'))) cpSync(join(old.directory, 'view.json'), join(path, 'view.json'));
   const job: ImportJob = { id, mode, previous: relative(dir, old.directory).split(sep).join('/') || '.', target,
     created: new Date().toISOString(), added: added.length, skipped, total: entries.length,
-    inputBytes: (mode === 'rebuild' ? entries : added).reduce((n, e) => n + bytes(e.text), 0) };
+    inputBytes: added.reduce((n, e) => n + bytes(e.text), 0) };
   atomicWrite(pendingFile(dir), JSON.stringify(job, null, 2));
   return job;
 }
@@ -103,6 +103,7 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
   const finish = () => { rmSync(join(path, STAGED), { force: true }); rmSync(pendingFile(dir)); };
   // A crash after the pointer swap leaves only the cleanup to do.
   if (memoryDirectory(dir) === path) { finish(); return job; }
+  if (job.mode === 'rebuild') throw new Error('This pending chronological rebuild would reassign permanent message IDs. Discard the staged import and start an append import; the original memory remains active.');
   if (!existsSync(join(path, STAGED))) throw new Error('Import staging data is missing; original memory remains intact.');
   const plan: unknown[] = readFileSync(join(path, STAGED), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
   // Every line must parse, and the plan must be whole and in order, so a damaged plan can't drop messages silently.

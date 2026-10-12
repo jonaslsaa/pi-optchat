@@ -1,6 +1,6 @@
 import type { ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import type { Memory } from '../memory.ts';
-import { bytes } from '../memory.ts';
+import { bytes, splitText } from '../memory.ts';
 import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, type Conversation, type ImportedEntry, type Source } from './sources.ts';
 import { deduplicate, type ImportMode, type ImportJob, type ImportProgress } from './job.ts';
 import { selectMany } from './multi-select.ts';
@@ -66,20 +66,12 @@ export async function chooseImport(ctx: ImportUI, profile: string, memory: Memor
   if (!entries.length) { ctx.ui.notify('No readable messages remain to import. Rescan or choose different conversations.', 'info'); return; }
   const { added, skipped } = deduplicate(memory.root, entries);
   if (!added.length) { ctx.ui.notify(`Nothing new to import (${skipped} messages already present).`, 'info'); return; }
-  let mode: ImportMode = 'append';
-  if (memory.root.length) {
-    const selected = await ctx.ui.select('How should this history join your memory?', [
-      `Append · keep ${memory.tree.size} existing summaries`,
-      `Rebuild by conversation start date · recompress ${memory.root.length + added.length} messages`,
-    ], { signal });
-    if (!selected) return;
-    mode = selected.startsWith('Rebuild') ? 'rebuild' : 'append';
-  }
-  const affected = mode === 'rebuild' ? [...memory.root, ...added] : added;
-  const inputBytes = affected.reduce((n, e) => n + bytes(e.text), 0);
+  const mode = 'append';
+  const inputBytes = added.reduce((n, e) => n + bytes(e.text), 0);
+  const addedChunks = added.reduce((n, e) => n + (e.kind === 'echo' ? 1 : splitText(e.text).length), 0);
   let nodes = 0;
-  for (let n = memory.root.length + added.length; n > 0; n = Math.floor(n / 2)) nodes += n;
-  if (mode === 'append') nodes -= memory.tree.size;
+  for (let n = memory.root.length + addedChunks; n > 0; n = Math.floor(n / 2)) nodes += n;
+  nodes -= memory.tree.size;
   const preview = `${profile} · ${mode}\n${source === 'claude-memory' ? 'Each memory file as one dated historical note; MEMORY.md indexes excluded.' : 'Historical user messages and final replies; tool activity excluded.'}\n${conversations.length} ${unit} selected · ${added.length} new ${source === 'claude-memory' ? 'notes' : 'messages'} · ${skipped} duplicates skipped\n${size(inputBytes)} text to index (~${Math.ceil(inputBytes / 4).toLocaleString()} source tokens; rough estimate)\nCompactor: ${model}\nUp to ${nodes} new summary nodes; small nodes need no model call. A big import costs about 3x the source tokens in compactor input, plus cached context and retries.\nChatting in this profile pauses until completion or discard. You can pause and resume compression. The previous memory is retained.`;
   if (!await ctx.ui.confirm('Start import?', preview, { signal })) return;
   return { entries, mode };
