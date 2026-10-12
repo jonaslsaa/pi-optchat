@@ -15,6 +15,9 @@ export interface Origin { source: 'claude' | 'claude-memory' | 'codex' | 'pi' | 
 export interface Chunk { id: string; index: number; count: number }
 export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin; chunk?: Chunk }
 export interface Part { l: number; i: number }
+export interface ViewSelection { parts: [number, number][]; batch: boolean }
+/** One atomic checkpoint; later log entries are replayed as appends to both selections. */
+export interface SavedViews { version: 1; count: number; chat: ViewSelection; compaction: ViewSelection }
 export interface Summary extends Part { text: string; size: number }
 /** `part` is the node to build: a message's leaf, or the merge of its two halves. `call` is the tool call a tool result's leaf
  * answers, raw, since its own line is often not built yet (#153). */
@@ -120,6 +123,9 @@ export class Sawtooth {
   constructor(private readonly high: number, private readonly low: number, private readonly node: (part: Part) => Summary | undefined) {}
   private lineSize(part: Part) { return renderedLineBytes(part, this.node(part)?.size ?? UNBUILT_BYTES); }
   get size() { return this.measured + (this.parts.length ? 0 : 1); }
+  get batch() { return this.merging; }
+  get selection(): ViewSelection { return { parts: this.parts.map(p => [p.l, p.i]), batch: this.merging }; }
+  resume(batch: boolean) { this.merging = batch; }
   render() { return renderView(this.parts.map(part => renderLine(part, this.node(part)?.text ?? UNBUILT))); }
   push(part: Part) { this.parts.push(part); this.measured += this.lineSize(part); }
   /** The line covering message `at`. The lines tile the log in order, so a binary search finds it. */
@@ -188,6 +194,7 @@ export class Memory {
   private writing?: Promise<void>;
   private failed?: string;
   private durableLength = 0;
+  private viewSaveFailed = false;
   /** Where this memory's local files live: all of it for a FileStore, and the browser page, runs and imports for any store. */
   readonly directory: string;
   readonly store: Store;
@@ -226,8 +233,6 @@ export class Memory {
     for (let i = 0; i < this.root.length; i++) if (!this.node({ l: 0, i })) this.unbuilt.add(i);
     // Refolding the log gives a different view than the live one, and every cache entry would miss, so the view is saved.
     const loaded = this.load(saved.view);
-    for (const part of this.view) this.compaction.push(part);
-    this.compaction.fit(loaded, true);
     for (let i = loaded; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
     this.fit(); this.save(); this.schedule();
   }
@@ -303,30 +308,51 @@ export class Memory {
     this.writing = tail;
     return settled;
   }
-  /** Takes the saved view if it still tiles the log from the start, and returns how many messages it covers. */
+  /** Restores both selections and batch obligations. Pair-array files initialize the previously unsaved compaction view once. */
   private load(view: string | undefined) {
     if (view === undefined) return 0;
     const rebuild = () => { this.warn('Rebuilt the memory view: the saved one does not match the log.'); return 0; };
     let saved: unknown;
     try { saved = JSON.parse(view); } catch { return rebuild(); }
-    if (!Array.isArray(saved)) return rebuild();
-    const parts: Part[] = [];
-    let covered = 0;
-    for (const value of saved) {
-      const [l, i] = Array.isArray(value) ? value : [];
-      const part = { l, i };
-      if (!Number.isSafeInteger(l) || !Number.isSafeInteger(i) || l < 0 || start(part) !== covered || end(part) > this.root.length || (l > 0 && !this.node(part)))
-        return rebuild();
-      parts.push(part); covered = end(part);
+    const read = (value: unknown) => {
+      if (!Array.isArray(value)) return;
+      const parts: Part[] = []; let covered = 0;
+      for (const pair of value) {
+        const [l, i] = Array.isArray(pair) && pair.length === 2 ? pair : [];
+        const part = { l, i };
+        if (!Number.isSafeInteger(l) || !Number.isSafeInteger(i) || l < 0 || i < 0 || !Number.isSafeInteger(end(part))
+          || start(part) !== covered || end(part) > this.root.length || (l > 0 && !this.node(part))) return;
+        parts.push(part); covered = end(part);
+      }
+      return { parts, covered };
+    };
+    if (Array.isArray(saved)) {
+      const legacy = read(saved); if (!legacy) return rebuild();
+      for (const part of legacy.parts) { this.chat.push(part); this.compaction.push(part); }
+      this.compaction.fit(legacy.covered, true);
+      return legacy.covered;
     }
-    for (const part of parts) this.chat.push(part);
-    return covered;
+    if (object(saved) && saved.version !== undefined && saved.version !== 1) throw new Error('Unsupported OptChat view version; refusing to replace it.');
+    if (!object(saved) || saved.version !== 1 || !Number.isSafeInteger(saved.count) || !object(saved.chat) || !object(saved.compaction)
+      || typeof saved.chat.batch !== 'boolean' || typeof saved.compaction.batch !== 'boolean') return rebuild();
+    const chat = read(saved.chat.parts), compaction = read(saved.compaction.parts);
+    if (!chat || !compaction || chat.covered !== saved.count || compaction.covered !== saved.count) return rebuild();
+    for (const part of chat.parts) this.chat.push(part);
+    for (const part of compaction.parts) this.compaction.push(part);
+    this.chat.resume(saved.chat.batch); this.compaction.resume(saved.compaction.batch);
+    return chat.covered;
   }
-  /** Saved when it merges: a view that only grew is the saved one plus a line per later message, as `load` replays it.
-   * The log stays authoritative, so a failed save only warns. */
+  /** Save either view's selection/flag change together. Capture before queueing so an asynchronous store gets one coherent boundary.
+   * The log stays authoritative: a failed replacement warns and is retried at the next append or node completion. */
   private save() {
-    const failed = (error: unknown) => { this.warn(`Could not save the memory view: ${error instanceof Error ? error.message : String(error)}`); };
-    try { void this.enqueue(() => this.store.saveView(JSON.stringify(this.view.map(p => [p.l, p.i]))), failed); }
+    const saved: SavedViews = { version: 1, count: this.root.length, chat: this.chat.selection, compaction: this.compaction.selection };
+    const text = JSON.stringify(saved);
+    const failed = (error: unknown) => { this.viewSaveFailed = true; this.warn(`Could not save the memory view: ${error instanceof Error ? error.message : String(error)}`); };
+    try { void this.enqueue(() => {
+      const written = this.store.saveView(text), done = () => { this.viewSaveFailed = false; };
+      if (written) return written.then(done);
+      done(); return undefined;
+    }, failed); }
     catch (error) { failed(error); }
   }
   private push(i: number) {
@@ -349,14 +375,15 @@ export class Memory {
   onChange(listener: () => void) { this.events.on('change', listener); return () => { this.events.off('change', listener); }; }
   /** The view line covering message `at`. */
   covering(at: number) { return this.chat.covering(at); }
-  /** Returns whether the chat's view merged. */
+  /** Preserve Pi's policy of advancing batches on appends and node completions, including after a restart. */
   private fit(total = this.root.length) {
+    const chatBatch = this.chat.batch, compactionBatch = this.compaction.batch;
     const merged = this.chat.fit(total);
-    this.compaction.fit(total, merged);
+    const compactionMerged = this.compaction.fit(total, merged || !chatBatch && this.chat.batch);
     const owed = this.owed();
     this.peak = owed > 0 ? Math.max(this.peak, owed) : 0;
     this.events.emit('change');
-    return merged;
+    return merged || compactionMerged || chatBatch !== this.chat.batch || compactionBatch !== this.compaction.batch || this.viewSaveFailed;
   }
   private schedule() {
     if (this.scheduled || this.stopped) return;

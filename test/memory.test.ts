@@ -326,14 +326,14 @@ test('the view is saved and loaded as it was, and rebuilt only when the saved on
     assert.deepEqual(parts(memory), saved);
     memory.append('user', 'one more');
     assert.deepEqual(parts(memory), [...saved, [0, 16]]);
-    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'view.json'), 'utf8')), saved, 'a line added without a merge is not saved');
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'view.json'), 'utf8')).chat.parts, saved, 'a line added without a merge or batch transition is replayed on load');
     await memory.close();
     const warnings: string[] = [];
     writeFileSync(join(dir, 'view.json'), JSON.stringify([[0, 0], [0, 2]]));
     memory = new Memory(dir, compress, text => warnings.push(text), 3000);
     assert.match(warnings.join('\n'), /Rebuilt the memory view/);
     assert.equal(start(memory.view[0]), 0); assert.equal(end(memory.view.at(-1)!), 17);
-    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'view.json'), 'utf8')), parts(memory));
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'view.json'), 'utf8')).chat.parts, parts(memory));
   } finally { await memory.close(); removeDir(dir); }
 });
 
