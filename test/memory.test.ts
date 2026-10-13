@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, appendFileSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Memory, cap, CAP, start, end, bytes, mostDue, type Compression, type Part } from '../src/memory.ts';
@@ -326,15 +328,67 @@ test('the view is saved and loaded as it was, and rebuilt only when the saved on
     assert.deepEqual(parts(memory), saved);
     memory.append('user', 'one more');
     assert.deepEqual(parts(memory), [...saved, [0, 16]]);
-    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'view.json'), 'utf8')), saved, 'a line added without a merge is not saved');
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'view.json'), 'utf8')), { parts: saved, merging: false }, 'a line added without a merge is not saved');
     await memory.close();
     const warnings: string[] = [];
-    writeFileSync(join(dir, 'view.json'), JSON.stringify([[0, 0], [0, 2]]));
-    memory = new Memory(dir, compress, text => warnings.push(text), 3000);
-    assert.match(warnings.join('\n'), /Rebuilt the memory view/);
-    assert.equal(start(memory.view[0]), 0); assert.equal(end(memory.view.at(-1)!), 17);
-    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'view.json'), 'utf8')), parts(memory));
+    for (const invalid of [[[0, 0], [0, 2]], { version: 99 }, { parts: saved, merging: 'unknown' }]) {
+      warnings.length = 0;
+      writeFileSync(join(dir, 'view.json'), JSON.stringify(invalid));
+      memory = new Memory(dir, compress, text => warnings.push(text), 3000);
+      assert.match(warnings.join('\n'), /Rebuilt the memory view/);
+      assert.equal(start(memory.view[0]), 0); assert.equal(end(memory.view.at(-1)!), 17);
+      assert.deepEqual(JSON.parse(readFileSync(join(dir, 'view.json'), 'utf8')), { parts: parts(memory), merging: false });
+      await memory.close();
+    }
   } finally { await memory.close(); removeDir(dir); }
+});
+
+test('a process killed mid-batch resumes the chat view to the same lines as an uninterrupted run', { timeout: 10000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-resume-'));
+  const script = `
+    import { Memory } from ${JSON.stringify(new URL('../src/memory.ts', import.meta.url).href)};
+    let resume;
+    const paused = new Promise(resolve => { resume = resolve; });
+    process.on('message', () => resume());
+    const memory = new Memory(process.argv[1], async ({ part }) => {
+      if (part.l === 1 && part.i === 1) {
+        setImmediate(() => process.send({ view: memory.view, size: memory.size }));
+        await paused;
+      }
+      return 's'.repeat(300);
+    }, () => {}, 1000);
+    for (let i = 0; i < 4; i++) memory.append('user', 'x'.repeat(294));
+    await memory.settle(undefined, 'tree');
+    process.send(memory.view);
+    await memory.close();
+    process.disconnect();
+  `;
+  const launch = (name: string) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script, join(dir, name)], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+    return { child, stopped: once(child, 'exit'), paused: once(child, 'message', { signal: AbortSignal.timeout(5000) }) };
+  };
+  const uninterrupted = launch('live'), interrupted = launch('killed');
+  let reopened: Memory | undefined;
+  try {
+    for (const [state] of await Promise.all([uninterrupted.paused, interrupted.paused])) {
+      assert.deepEqual(state.view, [{ l: 1, i: 0 }, { l: 0, i: 2 }, { l: 0, i: 3 }]);
+      assert.ok(state.size > 500 && state.size < 1000, 'the batch is below the trigger but above its target');
+    }
+    interrupted.child.kill('SIGKILL'); await interrupted.stopped;
+    const finished = once(uninterrupted.child, 'message', { signal: AbortSignal.timeout(5000) });
+    uninterrupted.child.send('resume');
+    const [expected] = await finished;
+    await uninterrupted.stopped;
+    reopened = new Memory(join(dir, 'killed'), async () => 's'.repeat(300), () => {}, 1000);
+    await reopened.settle(AbortSignal.timeout(5000), 'tree');
+    assert.deepEqual(reopened.view, expected);
+    assert.deepEqual(reopened.view, [{ l: 2, i: 0 }]);
+    assert.ok(reopened.size <= reopened.budget / 2);
+  } finally {
+    for (const { child } of [uninterrupted, interrupted]) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await Promise.all([uninterrupted.stopped, interrupted.stopped]);
+    await reopened?.close(); removeDir(dir);
+  }
 });
 
 test('compactions get their own view, a quarter of the budget at most, that ends at the node and between its batches only grows', async () => {

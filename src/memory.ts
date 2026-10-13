@@ -51,7 +51,7 @@ export function mostDue(view: readonly Part[], total: number, built: (part: Part
 class Sawtooth {
   readonly parts: Part[] = [];
   private measured = 0;
-  private merging = false;
+  merging = false;
   constructor(private readonly high: number, private readonly low: number, private readonly node: (part: Part) => Summary | undefined) {}
   private lineSize(part: Part) { return this.node(part)?.size ?? UNBUILT_BYTES; }
   get size() { return this.measured; }
@@ -187,6 +187,8 @@ export class Memory {
     const rebuild = () => { this.warn('Rebuilt the memory view: the saved one does not match the log.'); return 0; };
     let saved: unknown;
     try { saved = JSON.parse(view); } catch { return rebuild(); }
+    const merging = object(saved) && saved.merging === true;
+    if (object(saved) && typeof saved.merging === 'boolean') saved = saved.parts;
     if (!Array.isArray(saved)) return rebuild();
     const parts: Part[] = [];
     let covered = 0;
@@ -198,13 +200,14 @@ export class Memory {
       parts.push(part); covered = end(part);
     }
     for (const part of parts) this.chat.push(part);
+    this.chat.merging = merging;
     return covered;
   }
-  /** Saved when it merges: a view that only grew is the saved one plus a line per later message, as `load` replays it.
+  /** Saved when it merges or changes batch state: a view that only grew is the saved one plus later messages, as `load` replays it.
    * The log stays authoritative, so a failed save only warns. */
   private save() {
     const failed = (error: unknown) => { this.warn(`Could not save the memory view: ${error instanceof Error ? error.message : String(error)}`); };
-    try { void this.enqueue(() => this.store.saveView(JSON.stringify(this.view.map(p => [p.l, p.i]))), failed); }
+    try { void this.enqueue(() => this.store.saveView(JSON.stringify({ parts: this.view.map(p => [p.l, p.i]), merging: this.chat.merging })), failed); }
     catch (error) { failed(error); }
   }
   private push(i: number) {
@@ -227,14 +230,15 @@ export class Memory {
   onChange(listener: () => void) { this.events.on('change', listener); return () => { this.events.off('change', listener); }; }
   /** The view line covering message `at`. */
   covering(at: number) { return this.chat.covering(at); }
-  /** Returns whether the chat's view merged. */
+  /** Returns whether the chat's view or batch state changed. */
   private fit(total = this.root.length) {
+    const merging = this.chat.merging;
     const merged = this.chat.fit(total);
     this.compaction.fit(total, merged);
     const owed = this.owed();
     this.peak = owed > 0 ? Math.max(this.peak, owed) : 0;
     this.events.emit('change');
-    return merged;
+    return merged || merging !== this.chat.merging;
   }
   private schedule() {
     if (this.scheduled || this.stopped) return;
