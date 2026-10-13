@@ -1,6 +1,6 @@
 import { NODE, start, type Part } from './memory.ts';
 
-// Prompts from Victor Taelin's OptChat recipe, lightly adapted; README "How it differs from the recipe" lists the changes.
+// Prompts from Victor Taelin's OptChat recipe, lightly adapted; docs/recipe-differences.md lists the changes.
 export const COMPACT = `You are OptChat, an AI agent that works for one user in a single chat that never ends.
 Each call to you is a turn or a compaction:
 the view below is followed by the user's new message, or by a task starting "Compaction:".
