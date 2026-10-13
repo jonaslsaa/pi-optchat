@@ -61,3 +61,14 @@ export function readSettings(value: Record<string, unknown>): Settings {
   })) as Settings;
 }
 export const DEFAULT_SETTINGS = readSettings({});
+
+/** The recipe's memory policies; applying them keeps model choices and resource limits. */
+export const V2_SETTINGS = {
+  previousExchange: DEFAULT_SETTINGS.previousExchange,
+  refreshAt: DEFAULT_SETTINGS.refreshAt,
+  summaryAcceptBytes: DEFAULT_SETTINGS.summaryAcceptBytes,
+  groupReports: DEFAULT_SETTINGS.groupReports,
+  memorySearch: DEFAULT_SETTINGS.memorySearch,
+};
+export const v2SettingChanges = (config: Settings) => (Object.keys(V2_SETTINGS) as (keyof typeof V2_SETTINGS)[])
+  .filter(key => config[key] !== V2_SETTINGS[key]);

@@ -33,7 +33,7 @@ import { joinHeadless, listAttachableAgents, serveWindows } from './window-bridg
 import { openConnectedWindow, registerConnectedRenderer } from './connected-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
-import { showModelPicker, showSettings } from './settings-page.ts';
+import { showModelPicker, showSettings, v2DefaultsHint } from './settings-page.ts';
 import { showMenu } from './menu.ts';
 
 const binding = 'optchat.profile';
@@ -233,7 +233,8 @@ export default function optchat(pi: ExtensionAPI) {
       if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport);
       untitle = children.subscribe(() => showTitle(ctx)); showTitle(ctx);
       status(ctx);
-      ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${describeChoice(ctx.modelRegistry, config.compactor)}\n${contextPolicy(config)}`, 'info');
+      const migrationHint = ctx.mode === 'tui' ? v2DefaultsHint(config) : '';
+      ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${describeChoice(ctx.modelRegistry, config.compactor)}\n${contextPolicy(config)}${migrationHint ? `\n${migrationHint}` : ''}`, 'info');
       const queuedReports = [...reports];
       if (!pendingImport(dir)) {
         const recover = (work: Promise<void>, what: string) => work.catch(error => ctx.ui.notify(`${what}: ${errorText(error)}`, 'error'));

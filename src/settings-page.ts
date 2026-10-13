@@ -1,10 +1,10 @@
 import { Container, fuzzyFilter, getKeybindings, Input, SelectList, SettingsList, Spacer, Text, type Component, type SelectItem, type SettingItem } from '@earendil-works/pi-tui';
 import { DynamicBorder, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
 import { defaults, THINKING, type ProfileConfig } from './profiles.ts';
-import { invalid, isNumberKey, percent, SETTING_KEYS, SETTINGS, type NumberKey, type SettingKey } from './settings.ts';
+import { invalid, isNumberKey, percent, SETTING_KEYS, SETTINGS, V2_SETTINGS, v2SettingChanges, type NumberKey, type SettingKey, type Settings } from './settings.ts';
 import type { ModelChoice } from './compactor.ts';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
-import { contextPolicy } from './transcript.ts';
+import { contextPolicy, refreshFraction } from './transcript.ts';
 
 type Role = 'compactor' | 'subagent';
 const ROLES: Record<Role, { label: string; description: string; applies: string }> = {
@@ -20,6 +20,15 @@ const show = (key: SettingKey, value: number | boolean) => {
   const spec = SETTINGS[key];
   return typeof value === 'boolean' ? value ? 'on' : 'off' : spec.kind === 'percent' ? percent(value) : spec.kind === 'number' && spec.unit ? `${value} ${spec.unit}` : String(value);
 };
+
+const v2RefreshWarning = () => {
+  const fraction = refreshFraction(0);
+  return fraction > 0 ? `OPTCHAT_REFRESH_AT keeps turn refresh at ${percent(fraction)}. Unset it or set it to 0 before starting Pi to use v2 defaults.` : '';
+};
+export function v2DefaultsHint(config: Settings) {
+  return [v2SettingChanges(config).length ? 'Use v2 defaults in /optchat settings to review and apply the recipe settings together.' : '',
+    v2RefreshWarning()].filter(Boolean).join('\n');
+}
 
 interface Options {
   profile: string; config: ProfileConfig;
@@ -134,13 +143,24 @@ export function settingsPage(theme: Theme, o: Options, close: () => void, redraw
   const { config } = o;
   const notice = new Text('', 2, 0);
   const policy = new Text('', 1, 0);
-  const showPolicy = () => policy.setText(theme.fg('dim', `Saved as you change them · v2 defaults; existing explicit choices are preserved.\n${contextPolicy(config)}`));
+  const showPolicy = () => {
+    const hint = v2DefaultsHint(config);
+    policy.setText(theme.fg('dim', `Saved as you change them · existing choices are preserved until you change them.\n${contextPolicy(config)}${hint ? `\n${hint}` : ''}`));
+  };
   showPolicy();
   const marker = (same: boolean, fallback: string) => theme.fg('dim', same ? '  default' : `  default ${fallback}`);
   const value = (key: SettingKey, current: number | boolean) => `${show(key, current)}${marker(current === SETTINGS[key].default, show(key, SETTINGS[key].default))}`;
+  const migrationValue = () => {
+    const count = v2SettingChanges(config).length;
+    return count ? `${count} setting${count === 1 ? '' : 's'} to change` : 'Already set';
+  };
   const apply = (patch: Partial<ProfileConfig>, what: string, applies: string) => {
     const problem = update(o, patch);
-    if (!problem) { notice.setText(theme.fg('success', `Saved ${what}. `) + theme.fg('muted', applies)); showPolicy(); }
+    if (!problem) {
+      notice.setText(theme.fg('success', `Saved ${what}. `) + theme.fg('muted', applies)); showPolicy();
+      for (const key of SETTING_KEYS) list.updateValue(key, value(key, config[key]));
+      list.updateValue('v2-defaults', migrationValue());
+    }
     return problem;
   };
   const models = (['compactor', 'subagent'] as const).map((role): SettingItem => {
@@ -164,7 +184,28 @@ export function settingsPage(theme: Theme, o: Options, close: () => void, redraw
       }, () => done()) };
     return { ...base, currentValue: value(key, config[key]), values: [value(key, true), value(key, false)] };
   });
-  const list = new SettingsList([...models, ...settings], models.length + settings.length, {
+  const migration: SettingItem = {
+    id: 'v2-defaults', label: 'Use v2 defaults', currentValue: migrationValue(),
+    description: 'Review and apply the v2 memory settings together. Models, instructions, history and resource limits are kept.',
+    submenu: (_value, done) => {
+      const changes = v2SettingChanges(config), warning = v2RefreshWarning(), error = new Text('', 0, 0);
+      const preview = changes.length ? changes.map(key => `${SETTINGS[key].label}: ${show(key, config[key])} → ${show(key, V2_SETTINGS[key])}`).join('\n')
+        : 'These settings already use v2 defaults.';
+      const choices = new SelectList([...changes.length ? [{ value: 'apply', label: 'Apply v2 defaults' }] : [],
+        { value: 'back', label: changes.length ? 'Keep current settings' : 'Back' }], 2, listTheme(theme));
+      choices.onCancel = () => done();
+      choices.onSelect = item => {
+        if (item.value === 'back') return done();
+        const problem = apply(V2_SETTINGS, 'v2 defaults', 'Applies to upcoming calls and newly started subagents; existing summaries are retained.');
+        if (problem) error.setText(theme.fg('error', problem));
+        else done();
+      };
+      const page = step(theme, 'Use v2 defaults', `${preview}\n\nModels, instructions, history and resource limits are kept.${warning ? `\n\n${warning}` : ''}`,
+        choices, 'Enter to choose · Esc to go back', [error]);
+      return Object.assign(page, { handleInput: (data: string) => choices.handleInput(data) });
+    },
+  };
+  const list = new SettingsList([...models, ...settings, migration], models.length + settings.length + 1, {
     label: (text, selected) => selected ? theme.fg('accent', text) : text,
     value: (text, selected) => selected ? theme.fg('accent', text) : theme.fg('muted', text),
     description: text => theme.fg('dim', text), cursor: theme.fg('accent', '→ '), hint: text => theme.fg('dim', text),

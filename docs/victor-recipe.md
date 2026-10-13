@@ -30,6 +30,8 @@ Pi exposes rendered instructions and loadout declarations before a canonical req
 
 Previous-exchange replay, mid-turn refresh and a larger summary tolerance are explicit optional departures. The base retains the complete live turn, which can exceed a finite provider window; the rendered view budget is not a whole-request budget. Child working contexts may use Pi compaction while their retained logs remain retrievable. Paging itself is required by local v2 §6.
 
+Existing profiles can adopt the memory defaults through **Use v2 defaults** in `/optchat settings`: preview and save replay off, refresh zero, summary tolerance 512 bytes, grouped reports off and memory search off together. Startup offers a hint when saved settings differ. The action keeps models, instructions, history and resource limits; any `OPTCHAT_REFRESH_AT` override is explained before and after saving. Saved view formats migrate automatically on load, while existing originals and summaries are reused.
+
 Profiles, the inspector, usage ledger, connected windows and source adapters are integration choices. Imports preserve permanent IDs but intentionally retain less than a complete source session. Computer use, distributed storage and always-on hosting are outside this work.
 
 Offline fixtures verify serialization, scheduling, recovery and request coordination. They do not measure live model quality, provider cache-hit rates or billing savings. Atomic-write/restart tests do not simulate every filesystem or power-loss failure. Earlier README experiments are not validation of this implementation.

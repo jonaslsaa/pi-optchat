@@ -73,20 +73,22 @@ Compression and subagents make extra model requests with your provider credentia
 
 ## Settings
 
-`/optchat settings` opens this profile's settings. Each row shows its value and default, the selected row says what it does and when a change applies, and a change is saved right away to the profile's `config.json`. Defaults follow Victor's recipe, except Previous exchange, Summary size tolerance and Group subagent reports, which keep OptChat's earlier behaviour.
+`/optchat settings` opens this profile's settings. Each row shows its value and default, the selected row says what it does and when a change applies, and a change is saved right away to the profile's `config.json`. New profiles use the v2 recipe's memory defaults; existing saved choices are preserved.
+
+**Adopting v2 in an existing profile:** choose **Use v2 defaults** at the bottom of `/optchat settings`. It previews the changes and applies them together: Previous exchange off, Turn refresh 0%, Summary size tolerance 512 bytes, Group subagent reports off, and Memory search off. Models, instructions, history and resource limits are kept. A startup hint appears when these saved settings differ. If `OPTCHAT_REFRESH_AT` enables refresh, the preview explains how to unset it or set it to zero before starting Pi; a profile setting cannot override that environment variable. Saved views migrate automatically when loaded, and existing originals and summaries are reused.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Compactor model | Sonnet 5.5, medium | Same as `/optchat model`. Applies to the next summary. |
+| Compactor model | Haiku 4.5, xhigh requested | Same as `/optchat model`. Pi clamps this to the model's supported effort and startup reports the effective level. Applies to the next summary. |
 | Subagent model | Opus 5.5, high | Same as `/optchat agents model`. Applies to new subagents. |
 | Subagent levels | 1 | 1: only the main agent starts subagents. 2 or more: subagents may start their own, that many levels deep. Applies to subagents started or resumed after the change. |
 | Max active agents | 8 | Subagents running at once in the profile, all levels together, so it also caps how deep a chain can go. |
 | Group subagent reports | off | Off: each subagent reports as soon as it finishes (the recipe). On: the subagents started by one spawn report together, in one message once the last of them finishes. Applies to the next spawn. |
-| Previous exchange | on | Replays your last request and answer in full with the next turn (see below). Off is the recipe. |
+| Previous exchange | off | Optionally replays your last request and answer in full with the next turn (see below). Off uses the memory view for continuity, as in v2. |
 | Previous exchange limit | 16 KB | A larger last exchange is left out. |
 | Memory search | off | Gives the agent, and subagents started or resumed after the change, a `search` tool over your original messages (see below). Off is the recipe: zoom and date only. Applies from the next turn. |
-| Summary size tolerance | 640 bytes | The compactor is always asked for 512-byte lines; a longer line up to this size is kept instead of retried. 512 is the recipe's strict rule. |
-| Turn refresh threshold | 30% | Once the current turn's verbatim messages pass this share of the model's context window, they move into memory and the turn goes on with a fresh window (see Good to know). Type 30, 30% or 0.3. 0% is off, as in the recipe. Applies from the next call. |
+| Summary size tolerance | 512 bytes | Longer summaries are shortened in the same conversation, at most five attempts, then the shortest valid reply is kept. A larger tolerance optionally accepts longer replies earlier. |
+| Turn refresh threshold | 0% (off) | Optionally move the current turn's messages into memory when they pass this share of the model's context window, then continue with a fresh window (see Good to know). Type 30, 30% or 0.3. Applies from the next call. |
 | Import: summaries at once | 8 | Summaries an import builds at once, 1 to 64. With N at once, a summary can see up to N−1 lines not summarized yet before it, so higher is faster but a little less accurate (at 8 that costs about 0.8 points per summary, #108). Higher also hits your provider's rate limits harder (the compactor retries what is refused). Chat always runs 8. Applies to the next import. |
 
 Numbers must be whole numbers of at least 1 (512 for the summary size tolerance, at most 64 for Import: summaries at once); Turn refresh threshold is a percentage from 0% to 90%. Missing keys in an older `config.json` take their defaults.

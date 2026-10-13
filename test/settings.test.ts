@@ -11,7 +11,7 @@ import optchat from '../src/index.ts';
 import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { createProfile, defaults, loadConfig, profilePath, saveConfig, type ProfileConfig } from '../src/profiles.ts';
-import { settingsPage } from '../src/settings-page.ts';
+import { settingsPage, v2DefaultsHint } from '../src/settings-page.ts';
 import { SEARCH_DOC } from '../src/prompts.ts';
 import { REPORT_TYPE, textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
@@ -213,6 +213,145 @@ test('the settings page saves a valid number and explains an invalid one', () =>
     assert.equal(JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')).subagentLevels, 3);
     assert.match(page.render(100).join('\n'), /Subagent levels\s+3  default 1[\s\S]*Saved subagent levels 3/);
   } finally { removeDir(dir); }
+});
+
+test('v2 settings preview can be cancelled, saves the whole migration once, and keeps unrelated choices', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-v2-settings-'));
+  try {
+    const config: ProfileConfig = { ...defaults, compactor: model, subagent: model, previousExchange: true, refreshAt: 0.3,
+      summaryAcceptBytes: 640, groupReports: true, memorySearch: true, subagentLevels: 3, maxAgents: 12, previousExchangeKB: 9, importJobs: 4 };
+    saveConfig(dir, config);
+    const before = structuredClone(config), saved = readFileSync(join(dir, 'config.json'), 'utf8');
+    let writes = 0;
+    const page = settingsPage(plain, { profile: 'demo', config, models: [], save: next => { saveConfig(dir, next); writes++; } }, () => {});
+    const type = (...keys: string[]) => { for (const key of keys) page.handleInput(key); };
+    type('\x1b[A', '\r'); // last row: preview the migration
+    const preview = page.render(120).join('\n');
+    for (const change of ['Previous exchange: on → off', 'Turn refresh threshold: 30% → 0%', 'Summary size tolerance: 640 bytes → 512 bytes',
+      'Group subagent reports: on → off', 'Memory search: on → off']) assert.ok(preview.includes(change), change);
+    type('\x1b'); // Esc closes only the preview
+    type('\r', '\x1b[B', '\r'); // Keep current settings also leaves everything untouched
+    assert.deepEqual(config, before);
+    assert.equal(readFileSync(join(dir, 'config.json'), 'utf8'), saved);
+    assert.equal(writes, 0);
+    type('\r', '\r'); // preview and apply
+    const expected = { ...before, previousExchange: false, refreshAt: 0, summaryAcceptBytes: 512, groupReports: false, memorySearch: false };
+    assert.deepEqual(config, expected);
+    assert.deepEqual(loadConfig(dir), expected);
+    assert.equal(writes, 1);
+    const screen = page.render(120).join('\n');
+    assert.match(screen, /Previous exchange\s+off  default/);
+    assert.match(screen, /Summary size tolerance\s+512 bytes  default/);
+    assert.match(screen, /Use v2 defaults\s+Already set/);
+    type('\r');
+    assert.match(page.render(120).join('\n'), /These settings already use v2 defaults/);
+    type('\r');
+    assert.equal(writes, 1, 'opening an already migrated profile does not write again');
+  } finally { removeDir(dir); }
+});
+
+test('a failed v2 settings save keeps both the live and persisted choices and can be retried', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-v2-save-'));
+  try {
+    const config = { ...defaults, previousExchange: true, summaryAcceptBytes: 900 }, before = structuredClone(config);
+    saveConfig(dir, config);
+    let fail = true;
+    const page = settingsPage(plain, { profile: 'demo', config, models: [], save: next => {
+      if (fail) throw new Error('disk full');
+      saveConfig(dir, next);
+    } }, () => {});
+    for (const key of ['\x1b[A', '\r', '\r']) page.handleInput(key);
+    assert.match(page.render(120).join('\n'), /Could not save: disk full/);
+    assert.deepEqual(config, before);
+    assert.deepEqual(loadConfig(dir), before);
+    fail = false; page.handleInput('\r');
+    assert.equal(config.previousExchange, false);
+    assert.equal(loadConfig(dir).summaryAcceptBytes, 512);
+  } finally { removeDir(dir); }
+});
+
+test('v2 migration explains a refresh environment override before and after saving', () => {
+  const previous = process.env.OPTCHAT_REFRESH_AT;
+  try {
+    process.env.OPTCHAT_REFRESH_AT = '0.3';
+    const config = { ...defaults, refreshAt: 0.4 };
+    const page = settingsPage(plain, { profile: 'demo', config, models: [], save: () => {} }, () => {});
+    page.handleInput('\x1b[A'); page.handleInput('\r');
+    const warning = /OPTCHAT_REFRESH_AT keeps turn refresh at 30%[\s\S]*Unset it or set it to 0/;
+    assert.match(page.render(120).join('\n'), warning);
+    page.handleInput('\r');
+    assert.equal(config.refreshAt, 0);
+    assert.equal(process.env.OPTCHAT_REFRESH_AT, '0.3');
+    assert.match(page.render(120).join('\n'), warning);
+    assert.match(page.render(120).join('\n'), /turn refresh: 30% \(optional\) \(OPTCHAT_REFRESH_AT override\)/);
+    assert.doesNotMatch(v2DefaultsHint(config), /review and apply/, 'matching settings need only the environment advice');
+    for (const value of ['0', '', 'invalid']) {
+      process.env.OPTCHAT_REFRESH_AT = value;
+      assert.equal(v2DefaultsHint(config), '');
+    }
+    delete process.env.OPTCHAT_REFRESH_AT;
+    assert.equal(v2DefaultsHint(config), '');
+  } finally {
+    if (previous === undefined) delete process.env.OPTCHAT_REFRESH_AT; else process.env.OPTCHAT_REFRESH_AT = previous;
+  }
+});
+
+test('startup offers v2 migration without changing a profile, and applying it updates report turns and survives reopening', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-v2-upgrade-'));
+  const oldHome = process.env.OPTCHAT_HOME, oldRefresh = process.env.OPTCHAT_REFRESH_AT;
+  process.env.OPTCHAT_HOME = dir; delete process.env.OPTCHAT_REFRESH_AT;
+  const turns: Context[] = [], notices: string[] = [];
+  const { runtime } = await fixture(dir, context => {
+    if (!isCompaction(context)) turns.push(structuredClone(context));
+    return 'ok';
+  });
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  const close = async () => { await session?.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session?.dispose(); session = undefined; };
+  const open = async () => {
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.inMemory(dir); manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager,
+      sessionManager: manager, tools: ['zoom', 'search'] })).session;
+    const custom = (async (factory: (tui: unknown, theme: Theme, keys: unknown, done: (result: undefined) => void) => Component) => {
+      let closed = false;
+      const page = factory({ requestRender: () => {} }, plain, {}, () => { closed = true; });
+      for (const key of ['\x1b[A', '\r', '\r', '\x1b']) page.handleInput?.(key);
+      assert.ok(closed);
+    }) as unknown as ExtensionUIContext['custom'];
+    await session.bindExtensions({ mode: 'tui', uiContext: { ...session.extensionRunner.getUIContext(), custom, notify: text => { notices.push(text); } } });
+    return session;
+  };
+  try {
+    createProfile('fixture');
+    const profile = profilePath('fixture');
+    const old = { ...loadConfig(profile), compactor: model, previousExchange: true, refreshAt: 0.3, summaryAcceptBytes: 640, groupReports: true, memorySearch: true };
+    saveConfig(profile, old);
+    const before = readFileSync(join(profile, 'config.json'), 'utf8');
+    const s = await open();
+    assert.match(notices.join('\n'), /Use v2 defaults in \/optchat settings/);
+    assert.equal(readFileSync(join(profile, 'config.json'), 'utf8'), before, 'startup only offers migration');
+    await s.prompt('Before migration.');
+    assert.match(JSON.stringify(turns.at(-1)), /immediately preceding completed exchange/);
+    assert.ok(s.getActiveToolNames().includes('search'));
+    await s.prompt('/optchat settings');
+    assert.deepEqual(loadConfig(profile), { ...old, previousExchange: false, refreshAt: 0, summaryAcceptBytes: 512, groupReports: false, memorySearch: false });
+    assert.ok(!s.getActiveToolNames().includes('search'));
+    await s.sendCustomMessage({ customType: REPORT_TYPE, content: '[8964a512] Done after migration.', display: true }, { triggerTurn: true, deliverAs: 'steer' });
+    await s.agent.waitForIdle();
+    assert.doesNotMatch(JSON.stringify(turns.at(-1)?.messages.find(m => m.role === 'system')), /immediately preceding completed exchange|search\(text\)/);
+    await close(); notices.length = 0;
+    await open();
+    assert.doesNotMatch(notices.join('\n'), /Use v2 defaults in \/optchat settings/);
+    assert.match(notices.join('\n'), /Continuity: view only; turn refresh: off/);
+  } finally {
+    await close();
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    if (oldRefresh === undefined) delete process.env.OPTCHAT_REFRESH_AT; else process.env.OPTCHAT_REFRESH_AT = oldRefresh;
+    removeDir(dir);
+  }
 });
 
 test('turning Previous exchange off also reaches a turn that a subagent report starts while idle', async () => {
