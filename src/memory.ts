@@ -26,6 +26,7 @@ export const flat = (s: string) => s.replace(/[\r\n]+/g, ' ');
 const lineBytes = (s: string) => bytes(flat(s));
 const notice = (omitted: number) => `\n[${omitted} characters omitted; head and tail retained]\n`;
 const VIEW_OPEN = '<chat>\n';
+const VIEW_FRAME_BYTES = bytes(`${VIEW_OPEN}</chat>`);
 export const isView = (text: string) => text.startsWith(VIEW_OPEN);
 export function cap(text: string, limit = CAP) {
   if (text.length <= limit) return text;
@@ -53,8 +54,8 @@ class Sawtooth {
   private measured = 0;
   private merging = false;
   constructor(private readonly high: number, private readonly low: number, private readonly node: (part: Part) => Summary | undefined) {}
-  private lineSize(part: Part) { return this.node(part)?.size ?? UNBUILT_BYTES; }
-  get size() { return this.measured; }
+  private lineSize(part: Part) { return bytes(`${start(part)}+${2 ** part.l}|\n`) + (this.node(part)?.size ?? UNBUILT_BYTES); }
+  get size() { return VIEW_FRAME_BYTES + this.measured + (this.parts.length ? 0 : 1); } // render() keeps a blank line in an empty view.
   push(part: Part) { this.parts.push(part); this.measured += this.lineSize(part); }
   /** The line covering message `at`. The lines tile the log in order, so a binary search finds it. */
   covering(at: number): Part | undefined {
@@ -66,17 +67,17 @@ class Sawtooth {
     }
   }
   /** A message got its node. Its line is usually still shown, but after a damaged tree file a saved parent can already hide it. */
-  built(i: number) { if (this.covering(i)?.l === 0) this.measured += this.lineSize({ l: 0, i }) - UNBUILT_BYTES; }
+  built(i: number) { if (this.covering(i)?.l === 0) this.measured += this.node({ l: 0, i })!.size - UNBUILT_BYTES; }
   /** Returns whether any lines merged. */
   fit(total: number, force = false) {
     const lines = this.parts.length;
-    if (force || this.measured > this.high) this.merging = true;
-    for (let best: number; this.merging && this.measured > this.low && (best = mostDue(this.parts, total, part => !!this.node(part))) >= 0;) {
+    if (force || this.size > this.high) this.merging = true;
+    for (let best: number; this.merging && this.size > this.low && (best = mostDue(this.parts, total, part => !!this.node(part))) >= 0;) {
       const a = this.parts[best], b = this.parts[best + 1], parent = { l: a.l + 1, i: a.i / 2 };
       this.measured += this.lineSize(parent) - this.lineSize(a) - this.lineSize(b);
       this.parts.splice(best, 2, parent);
     }
-    if (this.measured <= this.low) this.merging = false;
+    if (this.size <= this.low) this.merging = false;
     return this.parts.length < lines;
   }
 }

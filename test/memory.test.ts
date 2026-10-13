@@ -353,7 +353,7 @@ test('compactions get their own view, a quarter of the budget at most, that ends
         assert.ok(view.some(p => start(p) === id && 2 ** p.l <= n), `${id}+${n} is the chat's view merged further`);
       }
       // A batch that waits on a merge still being built can leave it a line or two over.
-      const size = bytes(lines.map(line => line.split('|')[1]).join(''));
+      const size = bytes(context);
       assert.ok(size <= 8000 + 600, `at most a quarter of the budget, not ${size}`);
       if (part.i > 100) total += size;
       if (k && view.length < leaves[k - 1].view.length) { chatBatches++; assert.ok(size <= 4000 + 600, `a batch of the chat's view merges it down to an eighth, not ${size}`); }
@@ -467,8 +467,7 @@ test('incremental view size and pending count match the rendered view across fai
     if (failures-- > 0) throw new Error('transient');
     return input.source.slice(0, 120 + input.source.length % 200);
   };
-  const measured = (memory: Memory) => memory.render().split('\n').slice(1, -1)
-    .reduce((n, line) => n + bytes(line.slice(line.indexOf('|') + 1)), 0);
+  const measured = (memory: Memory) => bytes(memory.render());
   let memory = new Memory(dir, compress, () => {}, 4000, 8, 10);
   try {
     for (let i = 0; i < 120; i++) {
@@ -609,8 +608,7 @@ test('rebuilding a leaf that a saved parent already hides does not inflate the v
   writeFileSync(join(dir, 'main', `${localDay()}.jsonl`), texts.map((text, i) => JSON.stringify({ i, kind: 'user', text, date })).join('\n') + '\n');
   const nodes = [{ l: 0, i: 1 }, { l: 0, i: 2 }, { l: 0, i: 3 }, { l: 1, i: 0 }, { l: 1, i: 1 }];
   writeFileSync(join(dir, 'tree', `${localDay()}.jsonl`), nodes.map(n => JSON.stringify({ ...n, text: `summary ${n.l}:${n.i} padded to twenty` })).join('\n') + '\n{damaged\n');
-  const measured = (memory: Memory) => memory.render().split('\n').slice(1, -1)
-    .reduce((n, line) => n + bytes(line.slice(line.indexOf('|') + 1)), 0);
+  const measured = (memory: Memory) => bytes(memory.render());
   const memory = new Memory(dir, async () => 'top', () => {}, 80);
   try {
     assert.ok(memory.view.every(p => p.l > 0), 'the unbuilt leaf 0 is hidden by its saved parent');
@@ -734,10 +732,27 @@ test('cap never cuts a surrogate pair in half', () => {
   }
 });
 
+test('labels and framing trigger a batch even when the line bodies fit the budget', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-budget-'));
+  const memory = new Memory(dir, async () => 'résumé', () => {}, 1000);
+  try {
+    assert.equal(memory.size, bytes(memory.render()), 'empty framing');
+    for (let i = 0; i < 4; i++) {
+      memory.append('user', 'é'.repeat(119) + '\nx');
+      assert.equal(memory.size, bytes(memory.render()), 'placeholder labels and newlines');
+      await memory.settle(AbortSignal.timeout(2000), 'tree');
+      assert.equal(memory.size, bytes(memory.render()), 'built and merged lines');
+      if (i < 3) assert.equal(memory.view.length, i + 1);
+    }
+    // Four 246-byte bodies fit in 1,000 bytes; their full rendered lines take 1,018.
+    assert.deepEqual(memory.view, [{ l: 2, i: 0 }]);
+    assert.ok(memory.size <= memory.budget / 2);
+  } finally { await memory.close(); removeDir(dir); }
+});
+
 test('view size counts the flattened text that render emits, for new and reloaded summaries', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-flat-'));
-  const measured = (memory: Memory) => memory.render().split('\n').slice(1, -1)
-    .reduce((n, line) => n + bytes(line.slice(line.indexOf('|') + 1)), 0);
+  const measured = (memory: Memory) => bytes(memory.render());
   let memory = new Memory(dir, async () => 'x');
   try {
     memory.append('user', 'a\r\n\r\n\r\nb\n\n\nc');
