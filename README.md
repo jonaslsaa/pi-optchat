@@ -45,7 +45,8 @@ Details, errors and join rules: [docs/connected-windows.md](docs/connected-windo
 
 ## How it works
 
-- Every message is logged, then summarized by a compactor model into a binary tree of 512-byte lines: recent lines cover one message each, older lines cover more.
+- Every message is logged and becomes one line: a short one (up to 512 bytes) word for word, a longer one summarized by the compactor model to about 512 bytes (up to 640 with the default Summary size tolerance).
+- Pairs of lines merge into a binary tree of summaries: recent lines cover one message each, older lines cover more.
 - Each turn starts from a fresh context: the memory view (the tree's lines, up to 128,000 bytes), your previous exchange, and your new message.
 - When the view passes 128,000 bytes, lines merge in one batch down to 64,000, so between merges it only grows at the end and each turn reads the last one's view from the cache.
 - The agent reads originals with `zoom` (open a line into the two it was made from, or a message in full) and `date`.
@@ -177,7 +178,7 @@ Each profile is locked to one Pi process. Open the same profile in a second term
 - Your first message starts a subagent in the second window's working directory; later messages continue it. The window looks like a normal Pi chat.
 - The subagent runs inside the original process, which stays the only writer of memory.
 - `/tell-main <message>` messages the main agent. `/complete` ends the conversation and the compactor writes a handoff for the main agent; closing the window also produces one, marked **interrupted**.
-- Text only. The connection is a local socket restricted to your OS user; no daemon or server.
+- Text only. The connection is a local socket restricted to your OS user (on Windows a named pipe, without that restriction; see [Windows](#windows)); no daemon or server.
 
 To open an existing background agent instead, pick it from the menu, or pass its ID:
 
@@ -236,7 +237,7 @@ Pipe names and permissions: [docs/storage.md](docs/storage.md#windows-difference
 
 ## How it differs from the recipe
 
-OptChat keeps the recipe's numbers: 512-byte lines, binary merges, the 128,000 → 64,000-byte view, 8 compression workers, 5 shortening attempts, a 30,000-character tool output cap. The differences below that change behaviour are [settings](#settings). Prompt-by-prompt detail: [docs/recipe-differences.md](docs/recipe-differences.md).
+OptChat keeps the recipe's numbers: 512-byte lines, binary merges, the 128,000 → 64,000-byte view, 8 compression workers, 5 shortening attempts, a 30,000-character tool output cap. The ones you can turn off or tune are [settings](#settings). Prompt-by-prompt detail: [docs/recipe-differences.md](docs/recipe-differences.md).
 
 | Area | Recipe | OptChat | Why |
 | --- | --- | --- | --- |

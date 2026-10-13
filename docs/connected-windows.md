@@ -11,7 +11,7 @@ If you open the same profile in a second terminal, Pi offers to connect it to th
 - The subagent runs inside the original process, which stays the only writer of memory. It appears in the original window's inspector and takes one of the profile's active agent slots (Max active agents, 8 by default). While it is open, the original window can't switch profile or import.
 - The main agent is told when the conversation starts. Use `/tell-main <message>` to message it yourself; the subagent can use `tell_parent`, and the main agent replies with `tell`. Routine turns don't wake the main agent.
 - Text only. For images, give the agent a file path.
-- The connection is a local socket restricted to your OS user. No daemon or server.
+- The connection is a local socket restricted to your OS user. No daemon or server. On Windows it is a machine-wide named pipe without file permissions, so it has no such restriction (see [storage.md](storage.md#windows-differences)).
 
 ### Ending a conversation
 
@@ -45,7 +45,7 @@ This opens that **same agent's session** as a normal Pi chat: its task, previous
 For headless use (`pi -p`, `--mode rpc`, other extensions' runners), pass `--optchat-profile work`.
 
 - Without it, and without a saved profile in a resumed session, a headless run is plain Pi with no OptChat memory.
-- If the requested profile can't open (misspelled, deleted, or open in another Pi), the run reports the error and doesn't answer.
+- If the requested profile can't open (misspelled, deleted, or busy and not joinable, see below), the run reports the error and doesn't answer.
 
 In RPC and SDK hosts that create sessions themselves (Pi Web), send `/optchat profile work` as the first message of a new session. A profile is open in one session at a time, so a second session on it gets "Profile already running".
 
