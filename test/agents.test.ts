@@ -862,7 +862,7 @@ async function quickChildren(dir: string, memory = new Memory(join(dir, 'profile
     async () => {}, () => {}, join(dir, 'profile'), { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
 }
 
-test('a task may name its own model and thinking level, kept when tell resumes it; a model Pi does not know starts no child', async () => {
+test('a task may name its own model and thinking level, kept when tell resumes it; a model Pi does not know starts no child, and models() lists the known ones', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-task-model-')), asked: string[] = [];
   const children = await quickChildren(dir, undefined, asked);
   try {
@@ -878,6 +878,9 @@ test('a task may name its own model and thinking level, kept when tell resumes i
     await assert.rejects(children.spawn([{ task: 'fine' }, { task: 'typo', model: 'optchat-test/dep' }], dir),
       /Subagent model unavailable: optchat-test\/dep\. Models you can use: optchat-test\/child, optchat-test\/deep\./);
     assert.equal(children.history.records.size, 3, 'the refused spawn started none of its tasks');
+    assert.equal(children.models(), 'optchat-test/child  (subagent default, thinking minimal)\noptchat-test/deep', 'models() is what a task may name, with the profile\'s choice marked');
+    assert.equal(children.models('optchat-test'), children.models());
+    assert.throws(() => children.models('nope'), /No models for provider nope\. Providers: optchat-test\./);
   } finally { await children.close(); removeDir(dir); }
 });
 

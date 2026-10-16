@@ -71,6 +71,11 @@ export const TASKS = Type.Array(Type.Object({ task: Type.String(), cwd: Type.Opt
   model: Type.Optional(Type.String({ description: 'Model as provider/id, such as anthropic/claude-sonnet-5-5. Set it only when the user asks for one; otherwise the profile\'s subagent model runs.' })),
   thinking: Type.Optional(StringEnum(THINKING, { description: 'Thinking level. Set it only when the user asks for one; otherwise the profile\'s subagent level applies.' })) }), { minItems: 1 });
 export type Task = Static<typeof TASKS>[number];
+/** The tool beside spawn that lists what a task's `model` may be. */
+export const modelsTool = (children: () => Children) => ({ name: 'models', label: 'List models',
+  description: 'The models a spawn task may name, as provider/id, with the profile\'s subagent default marked. provider narrows the list to one provider.',
+  parameters: Type.Object({ provider: Type.Optional(Type.String()) }),
+  execute: async (_id: string, args: { provider?: string }) => result(children().models(args.provider)) });
 const isOptchat = (path: string) => packageName(path) === 'pi-optchat';
 
 // Pi's CLI adds its built-in extensions (MCP, codemode, tool search) to its own session; SDK sessions such as
@@ -121,6 +126,14 @@ export class Children {
   private get settings(): Settings { return { ...DEFAULT_SETTINGS, ...this.options.settings?.() }; }
   private full(extra: number) { return this.running.size + this.launching + extra > this.settings.maxAgents; }
   /** A model named `provider/id`, as runs record it. */
+  /** The models a task may name, one `provider/id` per line: every model Pi is logged in to, the profile's subagent choice marked. */
+  models(provider?: string) {
+    const profile = this.choice(), fallback = `${profile.provider}/${profile.model}`;
+    const available = this.registry.getAvailable();
+    const names = available.filter(m => !provider || m.provider === provider).map(m => `${m.provider}/${m.id}`).sort();
+    if (!names.length) throw new Error(provider ? `No models for provider ${provider}. Providers: ${[...new Set(available.map(m => m.provider))].sort().join(', ') || 'none'}.` : 'No models available.');
+    return names.map(name => name === fallback ? `${name}  (subagent default, thinking ${profile.thinking})` : name).join('\n');
+  }
   private find(name: string) { const slash = name.indexOf('/'); return slash > 0 ? this.registry.find(name.slice(0, slash), name.slice(slash + 1)) : undefined; }
   get ids() { return [...this.running.keys()]; }
   get active() { return this.completions.size > 0 || this.launching > 0 || this.settling > 0; }
@@ -274,8 +287,8 @@ export class Children {
     await loader.reload();
     const { session } = await (this.options.createSession ?? createAgentSession)({ cwd: directory, resourceLoader: loader, settingsManager,
       model: o.model, thinkingLevel: o.thinking, sessionManager: o.sessionManager,
-      customTools: [...memoryTools(() => this.memory, run => this.transcript(run, id)), ...(memorySearch ? [searchTool(() => this.memory)] : []), ...(delegates ? this.delegationTools(id, directory, subagentLevels, maxAgents) : []), this.parentTool(id, parentId, connected)],
-      excludeTools: delegates ? [] : ['spawn', 'tell'],
+      customTools: [...memoryTools(() => this.memory, run => this.transcript(run, id)), ...(memorySearch ? [searchTool(() => this.memory)] : []), ...(delegates ? [...this.delegationTools(id, directory, subagentLevels, maxAgents), modelsTool(() => this)] : []), this.parentTool(id, parentId, connected)],
+      excludeTools: delegates ? [] : ['spawn', 'tell', 'models'],
     });
     // Callers track the session only after this returns: clean up here if its extensions fail to start.
     try { await session.bindExtensions({}); }
@@ -283,7 +296,7 @@ export class Children {
     return session;
   }
   private delegationTools(parentId: string, cwd: string, levels: number, maxAgents: number) {
-    return [{ name: 'spawn', label: 'Delegate task', description: `Delegate parts of your task. Results arrive automatically after this run; never poll or sleep waiting. Maximum depth ${levels} and ${maxAgents} active agents per profile.`,
+    return [{ name: 'spawn', label: 'Delegate task', description: `Delegate parts of your task. Results arrive automatically after this run; never poll or sleep waiting. models() lists the ids a task's model may name. Maximum depth ${levels} and ${maxAgents} active agents per profile.`,
       parameters: Type.Object({ tasks: TASKS }),
       execute: async (_id: string, args: { tasks: Task[] }, signal?: AbortSignal) => result(await this.start(args.tasks, cwd, signal, parentId)),
     }, { name: 'tell', label: 'Guide child', description: 'Send guidance to one of your direct children. A finished child is resumed with its earlier conversation, and its new report arrives automatically.',

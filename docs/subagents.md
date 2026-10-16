@@ -19,6 +19,7 @@ Your MCP servers (`~/.pi/agent/mcp.json`, the project's `.pi/mcp.json`) work in 
 Each task runs the profile's subagent model (`/optchat agents model`), unless the spawn sets that task's `model` (`provider/id`, as in `/model`) or `thinking`. The agent sets them only when you ask for them.
 
 - What a task leaves out comes from the profile: a model alone runs at the profile's thinking level, or the nearest level that model takes.
+- The `models` tool (`provider` optional) lists what a task may name, with the profile's default marked. The agent is told to call it when you name a family without a version ("Opus"), since the newest ids may postdate its training.
 - A model Pi doesn't know refuses the whole spawn before any child starts, and the error lists the models you can use.
 - A resumed child keeps the model and level it ran with.
 
