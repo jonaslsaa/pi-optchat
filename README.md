@@ -113,12 +113,13 @@ Ask in plain words, for example: "Spawn an agent to investigate this repository 
 
 - **What they get**: the profile's memory view (frozen at launch) and instructions, read-only `zoom`/`date`, normal coding tools, your installed extensions, and your MCP servers.
 - **Reports**: each child reports when it finishes, as one message starting `[id]`, shown in a dark grey `↳ subagent <id>` box. Turn on **Group subagent reports** to get one message per spawn instead.
+- **Model**: children run the profile's subagent model. Ask for another in your request ("review it with anthropic/claude-haiku-5-5 at low") and the agent sets that task's `model` and `thinking`.
 - **Talking**: the parent sends guidance with `tell`; the child messages its parent mid-run with `tell_parent`. `tell` to a finished child resumes it with its saved transcript.
 - **Limits**: by default only the main agent starts subagents. **Subagent levels** lets them delegate further, and **Max active agents** (8) caps how many run at once; going over returns an error, there is no queue.
 - **Stopping**: stopping an agent stops its whole subtree. Agents run inside the Pi process, so closing Pi stops them.
 - **Restarts**: agents cut off by a close, crash or `/reload` resume when the profile next opens in interactive Pi, and the main agent is told which. Ones you stopped or paused stay stopped.
 
-More (MCP inheritance, report formats, the "agents at work" status line, resume rules): [docs/subagents.md](docs/subagents.md).
+More (MCP inheritance, per-task models, report formats, the "agents at work" status line, resume rules): [docs/subagents.md](docs/subagents.md).
 
 ## Agents, usage and activity inspector
 

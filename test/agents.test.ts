@@ -843,12 +843,15 @@ test('a connected run whose handoff has not been delivered is kept', async () =>
   } finally { await children.close(); removeDir(dir); }
 });
 
-async function quickChildren(dir: string, memory = new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {})) {
+/** Children whose model answers at once; `asked` gets each request's model and thinking level. */
+async function quickChildren(dir: string, memory = new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), asked: string[] = []) {
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider('optchat-test', {
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
-    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple: model => {
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 },
+      { id: 'deep', name: 'Synthetic reasoning child', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple: (model, _context, options) => {
+      asked.push(`${model.id} ${options?.reasoning ?? 'off'}`);
       const stream = createAssistantMessageEventStream();
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
       queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
@@ -858,6 +861,28 @@ async function quickChildren(dir: string, memory = new Memory(join(dir, 'profile
   return new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
     async () => {}, () => {}, join(dir, 'profile'), { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
 }
+
+test('a task may name its own model and thinking level, kept when tell resumes it; a model Pi does not know starts no child, and models() lists the known ones', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-task-model-')), asked: string[] = [];
+  const children = await quickChildren(dir, undefined, asked);
+  try {
+    // The profile's choice is optchat-test/child at minimal, which that model can't take: it runs with thinking off.
+    const [plain, deep, model] = await children.spawn([{ task: 'plain' }, { task: 'deep', model: 'optchat-test/deep', thinking: 'high' }, { task: 'model only', model: 'optchat-test/deep' }], dir);
+    await until(() => !children.active);
+    const runs = [plain, deep, model].map(id => children.history.records.get(id)!);
+    assert.deepEqual(runs.map(run => `${run.model} ${run.thinking}`), ['optchat-test/child off', 'optchat-test/deep high', 'optchat-test/deep minimal']);
+    assert.deepEqual(asked.toSorted(), ['child off', 'deep high', 'deep minimal']);
+    await children.tell(deep, 'Once more.');
+    await until(() => !children.active);
+    assert.equal(asked.at(-1), 'deep high', 'the resumed child keeps its own model and level');
+    await assert.rejects(children.spawn([{ task: 'fine' }, { task: 'typo', model: 'optchat-test/dep' }], dir),
+      /Subagent model unavailable: optchat-test\/dep\. Models you can use: optchat-test\/child, optchat-test\/deep\./);
+    assert.equal(children.history.records.size, 3, 'the refused spawn started none of its tasks');
+    assert.equal(children.models(), 'optchat-test/child  (subagent default, thinking minimal)\noptchat-test/deep', 'models() is what a task may name, with the profile\'s choice marked');
+    assert.equal(children.models('optchat-test'), children.models());
+    assert.throws(() => children.models('nope'), /No models for provider nope\. Providers: optchat-test\./);
+  } finally { await children.close(); removeDir(dir); }
+});
 
 test('close() does not wait for a spawn that is still waiting for memory to be summarized', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-close-settling-'));

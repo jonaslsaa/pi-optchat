@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, getAgentDir, type AgentSession, type AgentSessionEvent, type ExtensionAPI, type InlineExtension, type ModelRegistry } from '@earendil-works/pi-coding-agent';
 import * as sdk from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { Api, Model } from '@earendil-works/pi-ai';
+import { StringEnum, type Api, type Model } from '@earendil-works/pi-ai';
 import { allowSearch, CONNECTED, cutOffChildren, delegation, NO_DELEGATION, NOT_CONNECTED, RESTARTED, SEARCH_DOC, STEERABLE, SUBAGENT, VIEW_DOC } from './prompts.ts';
 import { memoryTools, searchTool } from './tools.ts';
 import { VIEW, type Memory } from './memory.ts';
@@ -14,10 +14,11 @@ import { cachePayload } from './cache.ts';
 import { CUT_OFF, RunHistory, isRunning, transition, sessionMessages, type RunInfo, type RunState, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { fullChat, refreshFraction, textContent } from './transcript.ts';
-import { Type } from 'typebox';
+import { Type, type Static } from 'typebox';
 import { result } from './tools.ts';
 import type { HandoffEvidence } from './handoff.ts';
 import { DEFAULT_SETTINGS, type Settings } from './settings.ts';
+import { THINKING } from './profiles.ts';
 
 export interface LiveRun {
   session: AgentSession; info: RunInfo; updated: number; streaming?: AgentMessage;
@@ -64,7 +65,17 @@ const packageName = (path: string): string | undefined => {
 /** A task's cwd may start with `~` and may be relative to the spawning agent's directory. */
 export const taskDirectory = (cwd: string, path = '.', windows = process.platform === 'win32') =>
   resolve(cwd, path.replace(windows ? /^~(?=$|[\\/])/ : /^~(?=$|\/)/, homedir()));
-export const CWD_DOC = 'Project directory the subagent works in (~ allowed); its AGENTS.md files load from there. Defaults to your current directory.';
+const CWD_DOC = 'Project directory the subagent works in (~ allowed); its AGENTS.md files load from there. Defaults to your current directory.';
+/** The spawn tools' tasks. What a task leaves out of model and thinking is the profile's subagent choice. */
+export const TASKS = Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })),
+  model: Type.Optional(Type.String({ description: 'Model as provider/id, such as anthropic/claude-sonnet-5-5. Set it only when the user asks for one; otherwise the profile\'s subagent model runs.' })),
+  thinking: Type.Optional(StringEnum(THINKING, { description: 'Thinking level. Set it only when the user asks for one; otherwise the profile\'s subagent level applies.' })) }), { minItems: 1 });
+export type Task = Static<typeof TASKS>[number];
+/** The tool beside spawn that lists what a task's `model` may be. */
+export const modelsTool = (children: () => Children) => ({ name: 'models', label: 'List models',
+  description: 'The models a spawn task may name, as provider/id, with the profile\'s subagent default marked. provider narrows the list to one provider.',
+  parameters: Type.Object({ provider: Type.Optional(Type.String()) }),
+  execute: async (_id: string, args: { provider?: string }) => result(children().models(args.provider)) });
 const isOptchat = (path: string) => packageName(path) === 'pi-optchat';
 
 // Pi's CLI adds its built-in extensions (MCP, codemode, tool search) to its own session; SDK sessions such as
@@ -114,6 +125,16 @@ export class Children {
   }
   private get settings(): Settings { return { ...DEFAULT_SETTINGS, ...this.options.settings?.() }; }
   private full(extra: number) { return this.running.size + this.launching + extra > this.settings.maxAgents; }
+  /** A model named `provider/id`, as runs record it. */
+  /** The models a task may name, one `provider/id` per line: every model Pi is logged in to, the profile's subagent choice marked. */
+  models(provider?: string) {
+    const profile = this.choice(), fallback = `${profile.provider}/${profile.model}`;
+    const available = this.registry.getAvailable();
+    const names = available.filter(m => !provider || m.provider === provider).map(m => `${m.provider}/${m.id}`).sort();
+    if (!names.length) throw new Error(provider ? `No models for provider ${provider}. Providers: ${[...new Set(available.map(m => m.provider))].sort().join(', ') || 'none'}.` : 'No models available.');
+    return names.map(name => name === fallback ? `${name}  (subagent default, thinking ${profile.thinking})` : name).join('\n');
+  }
+  private find(name: string) { const slash = name.indexOf('/'); return slash > 0 ? this.registry.find(name.slice(0, slash), name.slice(slash + 1)) : undefined; }
   get ids() { return [...this.running.keys()]; }
   get active() { return this.completions.size > 0 || this.launching > 0 || this.settling > 0; }
   live(id: string) { return this.running.get(id); }
@@ -163,16 +184,23 @@ export class Children {
       this.changed();
     } catch (error) { this.warn(`Could not record subagent activity: ${String(error)}`); }
   }
-  async spawn(tasks: { task: string; cwd?: string }[], cwd: string, signal?: AbortSignal, parentId?: string, connected = false) {
+  async spawn(tasks: Task[], cwd: string, signal?: AbortSignal, parentId?: string, connected = false) {
     return (await this.launch(tasks, cwd, signal, parentId, connected)).ids;
   }
   /** The spawn tools' answer, saying how this spawn's reports will come back. */
-  async start(tasks: { task: string; cwd?: string }[], cwd: string, signal?: AbortSignal, parentId?: string) {
+  async start(tasks: Task[], cwd: string, signal?: AbortSignal, parentId?: string) {
     const { ids, grouped } = await this.launch(tasks, cwd, signal, parentId);
     return `Started: ${ids.join(', ')}. ${grouped && ids.length > 1 ? 'Their reports will arrive together, as one message, once all of them have finished.' : 'Reports will arrive automatically.'}`;
   }
-  private async launch(tasks: { task: string; cwd?: string }[], cwd: string, signal: AbortSignal | undefined, parentId: string | undefined, connected = false) {
+  private async launch(tasks: Task[], cwd: string, signal: AbortSignal | undefined, parentId: string | undefined, connected = false) {
     for (const directory of tasks.map(t => taskDirectory(cwd, t.cwd))) if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error(`No such directory: ${directory}`);
+    const profile = this.choice();
+    const runs = tasks.map(task => {
+      const name = task.model ?? `${profile.provider}/${profile.model}`, model = this.find(name);
+      // Like Pi's own setModel: a named model needs auth, so a guess at a provider the user isn't logged in to fails here, not in the child.
+      if (!model || task.model && !this.registry.hasConfiguredAuth(model)) throw new Error(`Subagent model unavailable: ${name}. Models you can use: ${this.registry.getAvailable().map(m => `${m.provider}/${m.id}`).join(', ') || 'none'}.`);
+      return { ...task, model, thinking: task.thinking ?? profile.thinking };
+    });
     if (this.closing) throw new Error('Profile is closing.');
     this.settling++;
     try { await this.memory.settle(signal); } finally { this.settling--; }
@@ -185,10 +213,7 @@ export class Children {
     if (this.closing) throw new Error('Profile is closing.');
     if (this.full(tasks.length)) throw new Error(`Profile limit: at most ${maxAgents} active agents, including parents and descendants. Reduce the batch or continue without delegating.`);
     const view = this.memory.render();
-    const selected = this.choice();
-    const model = this.registry.find(selected.provider, selected.model);
-    if (!model) throw new Error(`Subagent model unavailable: ${selected.provider}/${selected.model}`);
-    const launched = await this.track(this.launchBatch({ tasks, cwd, depth, parentId, connected, selected, model, signal, cancelled }));
+    const launched = await this.track(this.launchBatch({ tasks: runs, cwd, depth, parentId, connected, signal, cancelled }));
     // Grouped, the last child of this spawn to finish delivers every report; otherwise each reports on its own.
     const batch = groupReports && !connected ? { ids: launched.map(c => c.info.id), reports: new Map<string, string>() } : undefined;
     for (const live of launched) {
@@ -208,8 +233,8 @@ export class Children {
     launch.then(done, done);
     return launch;
   }
-  private async launchBatch({ tasks, cwd, depth, parentId, connected, selected, model, signal, cancelled }: { tasks: { task: string; cwd?: string }[]; cwd: string; depth: number; parentId?: string; connected: boolean;
-    selected: ModelChoice; model: Model<Api>; signal?: AbortSignal; cancelled: () => boolean }) {
+  private async launchBatch({ tasks, cwd, depth, parentId, connected, signal, cancelled }: { tasks: { task: string; cwd?: string; model: Model<Api>; thinking: ModelChoice['thinking'] }[]; cwd: string; depth: number;
+    parentId?: string; connected: boolean; signal?: AbortSignal; cancelled: () => boolean }) {
     const launched: LiveRun[] = [];
     let reserved = tasks.length;
     this.launching += reserved;
@@ -218,9 +243,9 @@ export class Children {
         signal?.throwIfAborted();
         if (cancelled()) throw new Error('Parent or profile is stopping.');
         const id = randomUUID().slice(0, 8), directory = taskDirectory(cwd, task.cwd);
-        const session = await this.open({ id, directory, depth, parentId, connected, provider: selected.provider, model, thinking: selected.thinking,
+        const session = await this.open({ id, directory, depth, parentId, connected, model: task.model, thinking: task.thinking,
           sessionManager: SessionManager.create(directory, join(this.profileDirectory, 'runs')) });
-        const info: RunInfo = { id, task: task.task, cwd: directory, model: `${selected.provider}/${selected.model}`, thinking: session.thinkingLevel,
+        const info: RunInfo = { id, task: task.task, cwd: directory, model: `${task.model.provider}/${task.model.id}`, thinking: session.thinkingLevel,
           parentSession: this.options.parentSession ?? '', parentId, depth, sessionFile: session.sessionFile, started: Date.now(), state: 'running', guidance: [], ...(connected ? { connected: true } : {}) };
         const live: LiveRun = { session, info, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [] };
         launched.push(live); this.save(info); this.running.set(id, live);
@@ -243,7 +268,7 @@ export class Children {
     return launched;
   }
   /** Builds a child session with the same prompt, tools and extensions whether it is new or resumed. */
-  private async open(o: { id: string; directory: string; depth: number; parentId?: string; connected: boolean; provider: string; model: Model<Api>;
+  private async open(o: { id: string; directory: string; depth: number; parentId?: string; connected: boolean; model: Model<Api>;
     thinking?: ModelChoice['thinking']; sessionManager: SessionManager }) {
     const { id, directory, depth, parentId, connected } = o;
     const { subagentLevels, maxAgents, memorySearch } = this.settings, delegates = depth < subagentLevels;
@@ -255,8 +280,8 @@ export class Children {
       noPromptTemplates: true,
       extensionsOverride: base => ({ ...base, extensions: base.extensions.filter(e => !isOptchat(e.resolvedPath)) }),
       extensionFactories: [...builtinExtensions(this.options.builtins?.() ?? []), pi => {
-        const provider = this.registry.getRegisteredProviderConfig(o.provider);
-        if (provider) pi.registerProvider(o.provider, provider);
+        const provider = this.registry.getRegisteredProviderConfig(o.model.provider);
+        if (provider) pi.registerProvider(o.model.provider, provider);
         // Same prompt as the main agent (AGENTS.md files, skills, cwd); only the OptChat preamble differs.
         pi.on('before_agent_start', event => {
           event.systemPromptOptions.customPrompt = allowSearch(`${SUBAGENT}\n\n${VIEW_DOC}${memorySearch ? SEARCH_DOC : ''}`, memorySearch);
@@ -268,8 +293,8 @@ export class Children {
     await loader.reload();
     const { session } = await (this.options.createSession ?? createAgentSession)({ cwd: directory, resourceLoader: loader, settingsManager,
       model: o.model, thinkingLevel: o.thinking, sessionManager: o.sessionManager,
-      customTools: [...memoryTools(() => this.memory, run => this.transcript(run, id)), ...(memorySearch ? [searchTool(() => this.memory)] : []), ...(delegates ? this.delegationTools(id, directory, subagentLevels, maxAgents) : []), this.parentTool(id, parentId, connected)],
-      excludeTools: delegates ? [] : ['spawn', 'tell'],
+      customTools: [...memoryTools(() => this.memory, run => this.transcript(run, id)), ...(memorySearch ? [searchTool(() => this.memory)] : []), ...(delegates ? [...this.delegationTools(id, directory, subagentLevels, maxAgents), modelsTool(() => this)] : []), this.parentTool(id, parentId, connected)],
+      excludeTools: delegates ? [] : ['spawn', 'tell', 'models'],
     });
     // Callers track the session only after this returns: clean up here if its extensions fail to start.
     try { await session.bindExtensions({}); }
@@ -277,9 +302,9 @@ export class Children {
     return session;
   }
   private delegationTools(parentId: string, cwd: string, levels: number, maxAgents: number) {
-    return [{ name: 'spawn', label: 'Delegate task', description: `Delegate parts of your task. Results arrive automatically after this run; never poll or sleep waiting. Maximum depth ${levels} and ${maxAgents} active agents per profile.`,
-      parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1 }) }),
-      execute: async (_id: string, args: { tasks: { task: string; cwd?: string }[] }, signal?: AbortSignal) => result(await this.start(args.tasks, cwd, signal, parentId)),
+    return [{ name: 'spawn', label: 'Delegate task', description: `Delegate parts of your task. Results arrive automatically after this run; never poll or sleep waiting. models() lists the ids a task's model may name. Maximum depth ${levels} and ${maxAgents} active agents per profile.`,
+      parameters: Type.Object({ tasks: TASKS }),
+      execute: async (_id: string, args: { tasks: Task[] }, signal?: AbortSignal) => result(await this.start(args.tasks, cwd, signal, parentId)),
     }, { name: 'tell', label: 'Guide child', description: 'Send guidance to one of your direct children. A finished child is resumed with its earlier conversation, and its new report arrives automatically.',
       parameters: Type.Object({ id: Type.String(), message: Type.String() }),
       execute: async (_id: string, args: { id: string; message: string }) => {
@@ -523,14 +548,13 @@ export class Children {
     try { if (run.sessionFile && existsSync(run.sessionFile)) manager = SessionManager.open(run.sessionFile); } catch { manager = undefined; }
     if (!manager?.getEntries().some(e => e.type === 'message')) throw new Error(`The saved transcript of ${id} is missing or unreadable, so it cannot be resumed. Spawn a fresh subagent and give it the context it needs.`);
     if (!existsSync(run.cwd) || !statSync(run.cwd).isDirectory()) throw new Error(`${id}'s directory ${run.cwd} no longer exists, so it cannot be resumed. Spawn a fresh subagent instead.`);
-    const slash = run.model.indexOf('/'), provider = run.model.slice(0, slash);
-    const model = slash > 0 ? this.registry.find(provider, run.model.slice(slash + 1)) : undefined;
+    const model = this.find(run.model);
     if (!model) throw new Error(`${id}'s model ${run.model} is not available, so it cannot be resumed. Spawn a fresh subagent instead.`);
     this.launching++; this.resuming.add(id);
     let reserved = true;
     try {
       // No thinking level: the session restores the one it ran with.
-      const session = await this.open({ id, directory: run.cwd, depth: run.depth, parentId: run.parentId, connected: false, provider, model, sessionManager: manager });
+      const session = await this.open({ id, directory: run.cwd, depth: run.depth, parentId: run.parentId, connected: false, model, sessionManager: manager });
       // stop() cannot see this child until it is registered, so a parent stopped meanwhile must cancel it here.
       const parent = run.parentId ? this.running.get(run.parentId) : undefined;
       if (this.closing || run.parentId && (!parent || !['running', 'waiting', 'paused'].includes(parent.info.state))) {
