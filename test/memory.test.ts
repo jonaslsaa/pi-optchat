@@ -254,10 +254,34 @@ test('the view goes in blocks of 4 lines, with marks on its last whole block, 20
     assert.equal((JSON.stringify(output).match(/cache_control/g) ?? []).length, 4, quoted ? 'a quoted closing tag keeps the marks' : 'plain view');
     assert.ok(output.system.every(b => !('cache_control' in b)) && !('cache_control' in output.tools[0]));
     const blocks = output.messages[0].content;
-    assert.deepEqual(blocks.flatMap((b, j) => 'cache_control' in b ? [j] : []), [pieces.length - 42, pieces.length - 22, pieces.length - 2]);
-    assert.ok(output.cache_control);
+    assert.deepEqual(blocks.flatMap((b, j) => 'cache_control' in b ? [j] : []), [pieces.length - 42, pieces.length - 22, pieces.length - 2, blocks.length - 1]);
+    assert.equal(output.cache_control, undefined, 'no top-level automatic mark');
+    assert.deepEqual(blocks.at(-1)!.cache_control, { type: 'ephemeral' }, 'the end mark sits on the last block');
     assert.equal(blocks.map(b => b.text).join(''), view + 'new question');
   }
+});
+
+test('a request with no status line marks its last block, not the top level, so a 1h block TTL set by a proxy does not clash', () => {
+  const view = '<chat>\n' + '0+1|summary of a decision\n'.repeat(200) + '</chat>';
+  // As a compactor call ends: the view, then the instruction, then Pi's empty settings message.
+  const payload = { messages: [
+    { role: 'user', content: [{ type: 'text', text: view }, { type: 'text', text: 'compress this' }] },
+    { role: 'assistant', content: [{ type: 'thinking', thinking: 'hm' }, { type: 'text', text: 'line' }] },
+    { role: 'user', content: 'again, shorter' },
+    { role: 'system', content: [], output_config: { effort: 'low' } },
+  ] };
+  const output = cachePayload(payload) as { cache_control?: unknown, messages: { content: string | { type: string, cache_control?: unknown }[] }[] };
+  assert.equal(output.cache_control, undefined);
+  assert.deepEqual(output.messages[2].content, [{ type: 'text', text: 'again, shorter', cache_control: { type: 'ephemeral' } }]);
+  // What a proxy that sets 1h on block marks sends on: every mark carries the same TTL, and nothing top-level defaults to 5m.
+  const sent = JSON.parse(JSON.stringify(output).replaceAll('{"type":"ephemeral"}', '{"type":"ephemeral","ttl":"1h"}'));
+  assert.ok(!('cache_control' in sent));
+  assert.ok((JSON.stringify(sent).match(/cache_control/g) ?? []).length <= 4);
+  const thinkingLast = cachePayload({ messages: [
+    { role: 'user', content: [{ type: 'text', text: view }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'ok' }, { type: 'thinking', thinking: 'later' }] },
+  ] }) as { messages: { content: { type: string, cache_control?: unknown }[] }[] };
+  assert.deepEqual(thinkingLast.messages[1].content.map(b => 'cache_control' in b), [true, false], 'thinking blocks are skipped');
 });
 
 test('after a turn adds up to 60 blocks of lines, a mark of the next call still finds one of the last call\'s within 20 blocks', () => {
