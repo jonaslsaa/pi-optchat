@@ -7,7 +7,8 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { Memory } from './memory.ts';
-import { Guidance, guidanceState, GUIDANCE_STATE } from './guidance.ts';
+import { Guidance, guidanceState, GUIDANCE_STATE, type GuidanceState, type GuidanceOptions } from './guidance.ts';
+import { GuidanceRequests, GUIDANCE_REQUEST, withGuidanceRecall, type GuidanceRef } from './guidance-recall.ts';
 import { atomicWrite, storeFor } from './store.ts';
 import { createCompressor } from './compactor.ts';
 import { createProfile, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
@@ -49,7 +50,7 @@ const toggle = (prompt: string, line: string, on: boolean, after: string) => on 
 /** A report run while idle reuses the last built prompt, so Previous exchange and Memory search changes since then are applied here. */
 const promptFor = (prompt: string, { previousExchange, memorySearch }: ProfileConfig) =>
   allowSearch(toggle(toggle(prompt, CONTINUITY, previousExchange, VIEW_DOC), SEARCH_DOC, memorySearch, previousExchange ? VIEW_DOC + CONTINUITY : VIEW_DOC), memorySearch);
-interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; guidance: Guidance; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
+interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; guidance: Guidance; guidanceRequests: GuidanceRequests; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
 /** OptChat's own version, read from the package.json beside src/ (in the checkout and the npm package alike); none if unreadable. */
 export const version = ((): string | undefined => {
@@ -60,7 +61,7 @@ export const version = ((): string | undefined => {
 })();
 const brand = version ? `OptChat v${version}` : 'OptChat';
 
-export default function optchat(pi: ExtensionAPI) {
+export default function optchat(pi: ExtensionAPI, guidanceOptions: GuidanceOptions = { discover: !process.argv.slice(2).some(arg => arg === '--no-context-files' || arg === '-nc') }) {
   let active: Active | undefined;
   let remote: Awaited<ReturnType<typeof openConnectedWindow>> | undefined;
   /** `pi -p` on a profile another Pi owns: the prompt goes to a subagent in that Pi (--optchat-connect). */
@@ -82,6 +83,7 @@ export default function optchat(pi: ExtensionAPI) {
   type Report = (typeof reports)[number];
   let idle = () => true;
   const receipts = new Map<AgentMessage, string>();
+  const guidanceRefs = new Map<AgentMessage, GuidanceRef>();
   let checkpoints = Promise.resolve();
   let importing = false;
   let stopping = false;
@@ -132,7 +134,7 @@ export default function optchat(pi: ExtensionAPI) {
     while (logged < run.length) {
       const message = run[logged];
       const receipt = receipts.get(message);
-      logMessage(active.memory, message, receipt); logged++;
+      logMessage(active.memory, message, receipt, guidanceRefs.get(message)); guidanceRefs.delete(message); logged++;
       if (receipt && !receipt.startsWith(REPORT_RECEIPT)) active.inbox.acknowledge(receipt);
       receipts.delete(message);
       if (message.role === 'user') {
@@ -173,7 +175,7 @@ export default function optchat(pi: ExtensionAPI) {
       await checkpoint(old.dir);
     } finally {
       await old.memory.close(); await old.unlock(); active = undefined;
-      run = []; previous = []; logged = 0; keep = 0; view = undefined; runStarted = false; receipts.clear(); prompt = ''; idle = () => true;
+      run = []; previous = []; logged = 0; keep = 0; view = undefined; runStarted = false; receipts.clear(); guidanceRefs.clear(); prompt = ''; idle = () => true;
       untitle?.(); untitle = undefined; title.clear(); working = false;
     }
   };
@@ -219,7 +221,7 @@ export default function optchat(pi: ExtensionAPI) {
         .filter(r => !loggedReports.has(reportReceipt(r.text)));
       atomicWrite(pending, JSON.stringify(reports));
       rememberProfile(name);
-      active = { name, dir, config, memory, guidance: new Guidance(dir), inbox, children, usage, unlock }; fault = undefined; idle = () => ctx.isIdle();
+      active = { name, dir, config, memory, guidance: new Guidance(dir, guidanceOptions), guidanceRequests: new GuidanceRequests(dir), inbox, children, usage, unlock }; fault = undefined; idle = () => ctx.isIdle();
       if (ctx.mode === 'tui') unmountNavigation = mountNavigation(ctx, children, memory, shortcut, page => { void inspect(ctx, page); });
       // A one-shot run (`pi -p`, JSON) exits after its own prompt, which would end every conversation connected to it.
       if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport);
@@ -371,6 +373,7 @@ export default function optchat(pi: ExtensionAPI) {
   });
   const startRun = (ctx: ExtensionContext) => {
     flush(); run = []; logged = 0; keep = 0; view = undefined; runStarted = true;
+    active?.guidanceRequests.resetPending();
     const config = active?.config;
     previous = config?.previousExchange ? previousExchange(ctx.sessionManager.getBranch(), config.previousExchangeKB * 1000) : [];
     pi.appendEntry(RUN_BOUNDARY, { state: 'start' });
@@ -424,6 +427,8 @@ export default function optchat(pi: ExtensionAPI) {
         }
       } catch (error) { ctx.abort(); fault = errorText(error); ctx.ui.notify(fault, 'error'); }
     }
+    const guidance = message.role === 'user' ? active.guidanceRequests.input() : active.guidanceRequests.latest;
+    if (guidance) guidanceRefs.set(message, guidance);
     run.push(message);
     if (view !== undefined) {
       try { flush(); } catch (error) { ctx.abort(); fault = errorText(error); ctx.ui.notify(fault, 'error'); }
@@ -465,9 +470,15 @@ export default function optchat(pi: ExtensionAPI) {
       }
       // Built on every call, unlike the view, so it is never out of date; it goes last, after everything cached.
       const messages = buildContext(event.messages, refreshedRun(run, keep, TURN_REFRESHED), view, promptFor(prompt, a.config), previous, atWork(a.children.working));
-      return a.guidance.prepare(messages, ctx.cwd, guidanceState(ctx), state => pi.appendEntry(GUIDANCE_STATE, state));
+      let nextGuidance: GuidanceState | undefined;
+      const prepared = a.guidance.prepare(messages, ctx.cwd, guidanceState(ctx), state => { nextGuidance = state; });
+      const request = a.guidanceRequests.prepare(prepared.revision, ctx.sessionManager.getSessionId(), messages);
+      if (nextGuidance) pi.appendEntry(GUIDANCE_STATE, nextGuidance);
+      pi.appendEntry(GUIDANCE_REQUEST, request);
+      return { messages: withGuidanceRecall(prepared.messages, refs => a.guidanceRequests.describe(refs)) };
     } catch (error) {
       // Pi catches extension errors. Explicitly abort so it cannot fall back to old context.
+      if (active) active.guidanceRequests.latest = undefined;
       ctx.abort();
       try { flush(); } catch (persistenceError) { fault = errorText(persistenceError); }
       ctx.ui.notify(errorText(error), 'error');
@@ -501,7 +512,9 @@ export default function optchat(pi: ExtensionAPI) {
   });
   registerConnectedRenderer(pi);
   registerReportRenderer(pi);
-  const [zoom, date] = memoryTools(() => required().memory, id => required().children.transcript(id));
+  const [zoom, date] = memoryTools(() => required().memory, id => required().children.transcript(id), {
+    run: id => required().children.guidanceForTranscript(id),
+  });
   pi.registerTool(zoom); pi.registerTool(date);
   pi.registerTool({ ...searchTool(() => required().memory), defaultActive: false });
   // The tool and its prompt line change together, once per toggle, so the cached prefix is otherwise stable.

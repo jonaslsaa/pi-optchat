@@ -11,7 +11,8 @@
   "scripts": {
     "check": "tsc --noEmit",
     "test": "tsx --import ./test/support.ts --test test/*.test.ts",
-    "test:live": "tsx test/live.ts"
+    "test:live": "tsx test/live.ts",
+    "test:guidance:live": "tsx test/guidance-live.ts"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "1.0.2",

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { Guidance, guidanceState, GUIDANCE_STATE } from './guidance.ts';
+import { Guidance, guidanceState, GUIDANCE_STATE, type GuidanceState } from './guidance.ts';
+import { GuidanceRequests, GUIDANCE_REQUEST, transcriptGuidance, withGuidanceRecall } from './guidance-recall.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -138,6 +139,14 @@ export class Children {
     const tail = live.streaming ?? live.session.messages.at(-1);
     return tail && !retained.includes(tail) ? [...retained, tail] : retained;
   }
+  /** Called only after transcript() has checked visibility. Uses retained request boundaries, including before compaction. */
+  guidanceForTranscript(id: string) {
+    const live = this.running.get(id), file = this.history.records.get(id)?.sessionFile;
+    const entries = live?.session.sessionManager.getEntries() ?? (file ? SessionManager.open(file).getEntries() : []);
+    const retained = entries.flatMap(entry => entry.type === 'message' ? [entry.message] : []);
+    const tail = live?.streaming ?? live?.session.messages.at(-1);
+    return transcriptGuidance(entries, tail && !retained.includes(tail) ? tail : undefined);
+  }
   /** Runs at work now: running, waiting for children, or stopping; not paused. */
   get working() { return [...this.running.values()].filter(live => isRunning(live.info)).map(live => live.info); }
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
@@ -247,7 +256,7 @@ export class Children {
   private async open(o: { id: string; directory: string; depth: number; parentId?: string; connected: boolean; provider: string; model: Model<Api>;
     thinking?: ModelChoice['thinking']; sessionManager: SessionManager }) {
     const { id, directory, depth, parentId, connected } = o;
-    const guidance = new Guidance(this.profileDirectory);
+    const guidance = new Guidance(this.profileDirectory), requests = new GuidanceRequests(this.profileDirectory);
     const { subagentLevels, maxAgents, memorySearch } = this.settings, delegates = depth < subagentLevels;
     const instructions = [this.instructions(), delegates ? delegation(maxAgents) : NO_DELEGATION, STEERABLE, connected ? CONNECTED : NOT_CONNECTED].filter(Boolean).join('\n\n');
     // The user's settings list their installed packages; a copy in memory keeps the child from writing them back.
@@ -266,8 +275,17 @@ export class Children {
           event.systemPromptOptions.sections.instructions = instructions;
         });
         pi.on('context_with_system', (event, ctx) => {
-          try { return guidance.prepare(event.messages, directory, guidanceState(ctx), state => pi.appendEntry(GUIDANCE_STATE, state)); }
+          try {
+            // A failed preparation has its own boundary too, with no prepared snapshot record.
+            pi.appendEntry(GUIDANCE_REQUEST, requests.input());
+            let nextGuidance: GuidanceState | undefined;
+            const prepared = guidance.prepare(event.messages, directory, guidanceState(ctx), state => { nextGuidance = state; });
+            requests.prepare(prepared.revision, ctx.sessionManager.getSessionId(), event.messages);
+            if (nextGuidance) pi.appendEntry(GUIDANCE_STATE, nextGuidance);
+            return { messages: withGuidanceRecall(prepared.messages, refs => requests.describe(refs)) };
+          }
           catch (error) {
+            requests.resetPending();
             ctx.abort(); this.warn(String(error));
             return { messages: [{ role: 'system' as const, content: 'OptChat guidance unavailable. Stop.', timestamp: 0 }] };
           }
@@ -278,7 +296,7 @@ export class Children {
     await loader.reload();
     const { session } = await (this.options.createSession ?? createAgentSession)({ cwd: directory, resourceLoader: loader, settingsManager,
       model: o.model, thinkingLevel: o.thinking, sessionManager: o.sessionManager,
-      customTools: [...memoryTools(() => this.memory, run => this.transcript(run, id)), ...(memorySearch ? [searchTool(() => this.memory)] : []), ...(delegates ? this.delegationTools(id, directory, subagentLevels, maxAgents) : []), this.parentTool(id, parentId, connected)],
+      customTools: [...memoryTools(() => this.memory, run => this.transcript(run, id), { run: run => this.guidanceForTranscript(run) }), ...(memorySearch ? [searchTool(() => this.memory)] : []), ...(delegates ? this.delegationTools(id, directory, subagentLevels, maxAgents) : []), this.parentTool(id, parentId, connected)],
       excludeTools: delegates ? [] : ['spawn', 'tell'],
     });
     // Callers track the session only after this returns: clean up here if its extensions fail to start.

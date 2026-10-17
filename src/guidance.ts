@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
-import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, readSync, lstatSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync, readSync, lstatSync, linkSync, mkdirSync } from 'node:fs';
+import { basename, dirname, join, resolve, relative, isAbsolute } from 'node:path';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { getCurrentSystemMessage, getSystemMessageText } from '@earendil-works/pi-ai';
 import { getAgentDir, loadProjectContextFiles, type ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { atomicWrite } from './store.ts';
+import { isAtWork } from './cache.ts';
 
 export const GUIDANCE_STATE = 'optchat.guidance';
 const LIMIT = 1_000_000;
@@ -15,7 +16,7 @@ const xml = (text: string) => text.replaceAll('&', '&amp;').replaceAll('"', '&qu
 export interface GuidanceSource { path: string; scope: string; content: string; supplied: string; modified: string }
 export interface GuidanceFile { path: string; scope: string; version: string; archive: string; supplied: string }
 export interface GuidanceRevision { id: string; files: GuidanceFile[] }
-interface Transition { before: string; after: string; anchor: string; text: string }
+interface Transition { before: string; after: string; anchor: string; occurrence?: number }
 export interface GuidanceState { revision: GuidanceRevision; transitions: Transition[] }
 
 /** Read once through one handle. Never truncate, silently fall back, or mistake a failed read for deletion. */
@@ -45,17 +46,22 @@ function readSource(path: string, scope: string): GuidanceSource | undefined {
 
 /** Match Pi's candidate priority, global → ancestors → cwd ordering and linked-worktree shadowing.
  * Pi's loader warns and skips unreadable sources; preflight prevents that weaker guarantee here. */
-export function currentGuidance(cwd: string, profile: string, agentDir = getAgentDir()): GuidanceSource[] {
-  const dirs = new Set([resolve(agentDir)]);
-  for (let dir = resolve(cwd); ; dir = dirname(dir)) { dirs.add(dir); if (dirname(dir) === dir) break; }
+export function currentGuidance(cwd: string, profile: string, agentDir = getAgentDir(), discover = true): GuidanceSource[] {
+  const archived = (path: string) => {
+    const part = relative(join(profile, 'guidance', 'sources'), resolve(path));
+    return !isAbsolute(part) && part !== '..' && !part.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`);
+  };
+  const dirs = new Set(discover ? [resolve(agentDir)] : []);
+  if (discover) for (let dir = resolve(cwd); ; dir = dirname(dir)) { dirs.add(dir); if (dirname(dir) === dir) break; }
   const checked = new Map<string, GuidanceSource>();
   for (const dir of dirs) {
+    if (archived(dir)) continue;
     for (const name of CANDIDATES) {
       const source = readSource(join(dir, name), dir === resolve(agentDir) ? 'global' : `project:${dir}`);
       if (source) { checked.set(source.path, source); break; }
     }
   }
-  const files = loadProjectContextFiles({ cwd, agentDir }).map(file => {
+  const files = (discover ? loadProjectContextFiles({ cwd, agentDir }) : []).filter(file => !archived(file.path)).map(file => {
     const source = checked.get(resolve(file.path));
     if (!source || source.supplied !== file.content) throw new Error(`Guidance changed during discovery: ${file.path}; retry the request`);
     return source;
@@ -79,13 +85,19 @@ export class GuidanceArchive {
   preserve(sources: GuidanceSource[]): GuidanceRevision {
     const files = sources.map(source => {
       const version = hash(source.content);
-      const label = source.path.replace(/[^a-zA-Z0-9._-]+/g, '%').slice(-100);
+      const label = source.path.replace(/[^a-zA-Z0-9._-]+/g, '%').slice(-48);
       const dir = join(this.directory, 'sources', `${label}-${hash(source.path).slice(0, 16)}`, version);
       const archive = join(dir, basename(source.path));
       const supplied = source.content === source.supplied ? archive : join(dir, 'supplied.txt');
       const keep = (path: string, text: string) => {
+        const object = join(this.directory, 'contents', `${hash(text)}.txt`);
+        if (existsSync(object)) { if (readFileSync(object, 'utf8') !== text) throw new Error(`Damaged guidance content: ${object}`); }
+        else atomicWrite(object, text);
         if (existsSync(path)) { if (readFileSync(path, 'utf8') !== text) throw new Error(`Damaged guidance archive: ${path}`); }
-        else atomicWrite(path, text);
+        else {
+          mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+          linkSync(object, path); // Same bytes once, with a recognizable name at every original source location.
+        }
       };
       keep(archive, source.content);
       if (supplied !== archive) keep(supplied, source.supplied);
@@ -94,8 +106,9 @@ export class GuidanceArchive {
         captured: new Date().toISOString(), transformation: supplied === archive ? 'none' : 'leading UTF-8 BOM removed', supplied: basename(supplied) }, null, 2));
       return { path: source.path, scope: source.scope, version, archive, supplied };
     });
-    const id = hash(JSON.stringify(files));
-    const file = join(this.directory, 'revisions', `${id}.json`), text = JSON.stringify({ id, files }, null, 2);
+    const stored = files.map(file => ({ ...file, archive: relative(this.directory, file.archive).split('\\').join('/'), supplied: relative(this.directory, file.supplied).split('\\').join('/') }));
+    const id = hash(JSON.stringify(stored));
+    const file = join(this.directory, 'revisions', `${id}.json`), text = JSON.stringify({ id, files: stored }, null, 2);
     if (existsSync(file)) { if (readFileSync(file, 'utf8') !== text) throw new Error(`Damaged guidance revision: ${file}`); }
     else atomicWrite(file, text);
     return { id, files };
@@ -104,7 +117,16 @@ export class GuidanceArchive {
     if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Invalid guidance revision');
     const revision = JSON.parse(readFileSync(join(this.directory, 'revisions', `${id}.json`), 'utf8')) as GuidanceRevision;
     if (revision.id !== id || hash(JSON.stringify(revision.files)) !== id) throw new Error(`Damaged guidance revision: ${id}`);
-    return revision;
+    const locate = (path: string) => {
+      if (isAbsolute(path) || path.split(/[\\/]/).includes('..')) throw new Error(`Invalid guidance archive path: ${path}`);
+      return join(this.directory, path);
+    };
+    const files = revision.files.map(file => ({ ...file, archive: locate(file.archive), supplied: locate(file.supplied) }));
+    for (const file of files) {
+      const raw = readFileSync(file.archive, 'utf8');
+      if (hash(raw) !== file.version || readFileSync(file.supplied, 'utf8') !== normalize(raw)) throw new Error(`Damaged historical guidance: ${file.archive}`);
+    }
+    return { ...revision, files };
   }
 }
 
@@ -125,7 +147,16 @@ function difference(before: GuidanceRevision, after: GuidanceRevision) {
   for (const file of after.files) if (!before.files.some(old => old.path === file.path)) changes.push(`${file.path} now applies`);
   if (JSON.stringify(before.files.map(f => [f.path, f.scope])) !== JSON.stringify(after.files.map(f => [f.path, f.scope])))
     changes.push('the applicable sources, scopes or ordering changed');
-  return `${changes.join('; ')}.`;
+  return `${changes.slice(0, 4).join('; ')}${changes.length > 4 ? `; ${changes.length - 4} additional source/order changes (consult the full revisions)` : ''}.`;
+}
+
+/** Source bytes can change without changing supplied instructions (for example, adding a BOM). */
+function sameEffectiveGuidance(before: GuidanceRevision, after: GuidanceRevision) {
+  return before.files.length === after.files.length && before.files.every((old, index) => {
+    const next = after.files[index];
+    return old.path === next.path && old.scope === next.scope &&
+      (old.version === next.version || readFileSync(old.supplied, 'utf8') === readFileSync(next.supplied, 'utf8'));
+  });
 }
 
 export function guidanceKey(message: AgentMessage) {
@@ -151,6 +182,8 @@ function notice(content: string): AgentMessage {
     content: `<guidance_update>\nHarness-supplied guidance transition, not a new user task.\n${content}\n</guidance_update>`, timestamp: 0 };
 }
 
+export interface GuidanceOptions { agentDir?: string; discover?: boolean }
+
 export class Guidance {
   readonly archive: GuidanceArchive;
   private agentDir = getAgentDir();
@@ -159,36 +192,48 @@ export class Guidance {
     const ancestors = new Set<string>();
     for (let dir = resolve(cwd); ; dir = dirname(dir)) { ancestors.add(dir); if (dir === dirname(dir)) break; }
     const global = files.find(file => !ancestors.has(dirname(resolve(file.path))));
-    if (global) this.agentDir = dirname(resolve(global.path));
+    if (global && !this.options.agentDir) this.agentDir = dirname(resolve(global.path));
   }
-  constructor(readonly profile: string) { this.archive = new GuidanceArchive(profile); }
+  constructor(readonly profile: string, private readonly options: GuidanceOptions = {}) {
+    this.archive = new GuidanceArchive(profile);
+    this.agentDir = options.agentDir ?? getAgentDir();
+  }
+  private transitionText(transition: Transition) {
+    const before = this.archive.revision(transition.before), after = this.archive.revision(transition.after);
+    const paths = before.files.slice(0, 3).map(file => `${file.path} → ${file.supplied}`).join('\n') || '(no previous sources)';
+    const all = before.files.length > 3 ? `\nAll previous sources in order: ${join(this.archive.directory, 'revisions', `${before.id}.json`)}` : '';
+    return `Project guidance has been updated directly in your context; the complete current contents are already supplied, so no manual reread is needed.\n${difference(before, after)}\nThis revision applies from this step onward; earlier work may reflect earlier instructions and may need adaptation, but a difference alone does not establish an earlier instruction violation.\nPrevious guidance (historical copies):\n${paths}${all}\nOpen a previous copy only if needed to understand something relevant to continuing the task; it does not replace current guidance.`;
+  }
   prepare(messages: AgentMessage[], cwd: string, previous: GuidanceState | undefined, save: (state: GuidanceState) => void, agentDir?: string) {
-    const sources = currentGuidance(cwd, this.profile, agentDir ?? this.agentDir), revision = this.archive.preserve(sources);
+    const head = getCurrentSystemMessage(messages);
+    if (!head) throw new Error('Cannot inject guidance without a system prompt');
+    if (previous) previous = { ...previous, revision: this.archive.revision(previous.revision.id) };
+    const sources = currentGuidance(cwd, this.profile, agentDir ?? this.agentDir, this.options.discover), revision = this.archive.preserve(sources);
     let state = previous;
     if (previous?.revision.id !== revision.id) {
-      const transitions = [...previous?.transitions ?? []];
-      if (previous) {
-        const before = this.archive.revision(previous.revision.id);
-        const paths = before.files.map(file => `${file.path} → ${file.supplied}`).join('\n') || '(no previous sources)';
-        const text = `Project guidance has been updated directly in your context; the complete current contents are already supplied, so no manual reread is needed.\n${difference(before, revision)}\nThis revision applies from this step onward; earlier work may reflect earlier instructions and may need adaptation, but a difference alone does not establish an earlier instruction violation.\nPrevious guidance (historical copies):\n${paths}\nOpen a previous copy only if needed to understand something relevant to continuing the task; it does not replace current guidance.`;
-        const last = messages.findLast(message => message.role !== 'system');
-        transitions.push({ before: before.id, after: revision.id, anchor: last ? guidanceKey(last) : '', text });
+      const keys = new Set(messages.filter(message => message.role !== 'system').map(guidanceKey));
+      const earlier = previous?.transitions.findLast(t => !keys.has(t.anchor));
+      const transitions = (previous?.transitions ?? []).filter(t => keys.has(t.anchor) || t === earlier);
+      if (previous && !sameEffectiveGuidance(previous.revision, revision)) {
+        const work = messages.filter(message => message.role !== 'system' && !isAtWork(message));
+        const last = work.at(-1), anchor = last ? guidanceKey(last) : '';
+        transitions.push({ before: previous.revision.id, after: revision.id, anchor, occurrence: work.filter(message => guidanceKey(message) === anchor).length - 1 });
       }
       state = { revision, transitions };
       save(state);
     }
-    const head = getCurrentSystemMessage(messages);
-    if (!head) throw new Error('Cannot inject guidance without a system prompt');
     const output: AgentMessage[] = [{ role: 'system', content: guidancePrompt(getSystemMessageText(head), sources), toolsAdded: head.toolsAdded, timestamp: 0 }];
     const body = messages.filter(message => message.role !== 'system');
     const keys = body.map(guidanceKey);
     // Once a boundary leaves the visible work, retain the latest such transition, explicitly as history.
-    const historical = state!.transitions.findLast(transition => !keys.includes(transition.anchor));
+    const historical = state!.transitions.findLast(transition => keys.filter(key => key === transition.anchor).length <= (transition.occurrence ?? 0));
+    const occurrences = new Map<string, number>();
     for (const [index, message] of body.entries()) {
       output.push(message);
-      if (index === 0 && historical) output.push(notice(`Earlier guidance transition (already applied, not a new change):\n${historical.text}`));
-      for (const transition of state!.transitions) if (transition.anchor === keys[index])
-        output.push(notice(transition.text));
+      if (index === 0 && historical) output.push(notice(`Earlier guidance transition (already applied, not a new change):\n${this.transitionText(historical)}`));
+      const occurrence = occurrences.get(keys[index]) ?? 0; occurrences.set(keys[index], occurrence + 1);
+      for (const transition of state!.transitions) if (transition.anchor === keys[index] && occurrence === (transition.occurrence ?? 0))
+        output.push(notice(this.transitionText(transition)));
     }
     return { messages: output, revision };
   }

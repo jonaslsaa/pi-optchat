@@ -48,3 +48,14 @@ test('a checkpoint whose commit lands resolves even when git cannot pack afterwa
     assert.equal(execFileSync('git', ['-C', dir, 'log', '--format=%s'], { encoding: 'utf8' }).trim(), 'Save OptChat memory');
   } finally { removeDir(dir); }
 });
+
+test('checkpoints retain guidance artifacts beyond the Windows legacy path limit', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-long-checkpoint-'));
+  try {
+    const name = ['guidance', 'sources', 'project-'.repeat(8), 'a'.repeat(64), 'nested-'.repeat(8), 'AGENTS.md'].join('/');
+    const path = join(dir, name); assert.ok(path.length > 260);
+    mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, 'Preserved guidance.');
+    await checkpoint(dir);
+    assert.ok(tracked(dir).includes(name));
+  } finally { removeDir(dir); }
+});

@@ -54,7 +54,10 @@ export function loadConfig(dir: string): ProfileConfig {
   try { return { compactor: value.compactor, subagent: value.subagent, ...readSettings(value) }; }
   catch (error) { throw new Error(`Invalid profile config: ${dir}/config.json: ${error instanceof Error ? error.message : String(error)}`); }
 }
-export function instructions(dir: string) { return readFileSync(join(dir, 'AGENTS.md'), 'utf8'); }
+export function instructions(dir: string) {
+  try { return readFileSync(join(dir, 'AGENTS.md'), 'utf8'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error; }
+}
 export function lastProfile() {
   try { const name = readFileSync(join(dataHome(), 'last-profile'), 'utf8').trim(); return listProfiles().includes(name) ? name : undefined; }
   catch { return undefined; }

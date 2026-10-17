@@ -2,7 +2,8 @@ import { Type, type Static } from 'typebox';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { flat, PAGE, start, type Memory } from './memory.ts';
 import { loadImages } from './images.ts';
-import { runTranscript } from './transcript.ts';
+import { runTranscriptParts } from './transcript.ts';
+import type { GuidanceRef, GuidanceRecallRef } from './guidance-recall.ts';
 export const result = (text: string) => ({ content: [{ type: 'text' as const, text }], details: {} });
 export const SEARCH_PAGE = 20;
 const SNIPPET = 200;
@@ -38,18 +39,36 @@ export function runPage(text: string, offset = 0, limit = PAGE) {
 }
 
 /** `runs` gives a subagent's messages by run id, live or finished; undefined for no such run. */
-export function memoryTools(memory: () => Memory, runs?: (id: string) => readonly AgentMessage[] | undefined) {
+export function memoryTools(memory: () => Memory, runs?: (id: string) => readonly AgentMessage[] | undefined,
+  recall?: { run: (id: string) => Map<number, GuidanceRef> }) {
+  const decorate = (text: string, refs: GuidanceRecallRef[]) => {
+    const details: Record<string, { request: string; work: string }[]> = {};
+    if (refs.length && recall) details.optchatGuidanceRecall = refs.map(({ request, work }) => ({ request, work: work ?? '' }));
+    return { ...result(text), details };
+  };
   return [
-    { name: 'zoom', label: 'Zoom memory', description: `Open the line id+n of the view into the two lines of n/2 under it; n = 1 (the default) gives the message whole. A message over ${PAGE.toLocaleString('en-US')} characters comes in pages; offset and limit (characters) read any part of it, and are not needed for a shorter one. A message's images come back with it. zoom("<run id>") gives a subagent's whole chat so far, in the same pages.`,
+    { name: 'zoom', label: 'Zoom memory', description: `Open the line id+n of the view into the two lines of n/2 under it; n = 1 (the default) gives the message whole. A message over ${PAGE.toLocaleString('en-US')} characters comes in pages; offset and limit (characters) read any part of it, and are not needed for a shorter one. A message's images come back with it. zoom("<run id>") gives a subagent's whole chat so far, in the same pages. Original work includes references to its historical guidance when recorded; these copies do not override current instructions.`,
       parameters: zoomParameters,
       async execute(_id: string, { id, n = 1, offset, limit }: Static<typeof zoomParameters>) {
         if (typeof id === 'string') {
           const messages = runs?.(id);
-          if (messages) return result(runPage(runTranscript(messages), offset, limit));
+          if (messages) {
+            const parts = runTranscriptParts(messages), text = parts.map(part => part.text).join('\n');
+            const page = runPage(text, offset, limit), refs: GuidanceRecallRef[] = [];
+            const associations = recall?.run(id);
+            let at = 0;
+            for (const part of parts) {
+              const end = at + part.text.length, ref = associations?.get(part.index);
+              if (ref && end > (offset ?? 0) && at < (offset ?? 0) + (limit ?? PAGE)) refs.push({ ...ref, work: `run ${id}, characters ${at}-${end}` });
+              at = end + 1;
+            }
+            return decorate(page, refs);
+          }
           // A model may quote a message id; eight digits can be a run id (src/agents.ts), so those never open a message.
           if (!/^\d+$/.test(id) || id.length === 8) throw new Error(`No run ${id}.`);
         }
-        const m = memory(), text = m.zoom(Number(id), n, offset, limit), page = result(text);
+        const m = memory(), text = m.zoom(Number(id), n, offset, limit), ref = m.root[Number(id)]?.guidance;
+        const page = decorate(text, n === 1 && ref ? [{ ...ref, work: `memory message ${id}` }] : []);
         // A message's images come back with its text, as read returns a PNG; summaries stay text.
         return n === 1 ? { ...page, content: [...page.content, ...await loadImages(m.store, text)] } : page;
       } },

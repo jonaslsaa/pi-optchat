@@ -8,7 +8,8 @@ const exec = promisify(execFile);
 const LOOSE_LIMIT_KIB = 16_384;
 
 export async function checkpoint(directory: string) {
-  const git = (args: string[]) => exec('git', ['-C', directory, ...args], { maxBuffer: 1_000_000 });
+  // Source identity plus version can exceed Windows' legacy 260-character path limit.
+  const git = (args: string[]) => exec('git', ['-c', 'core.longpaths=true', '-C', directory, ...args], { maxBuffer: 1_000_000 });
   if (!existsSync(join(directory, '.git'))) await git(['init', '-q', '-b', 'main']);
   if (!existsSync(join(directory, '.gitignore'))) atomicWrite(join(directory, '.gitignore'), '/runs/\n/memory.html\n/usage.jsonl\n*.tmp\n');
   await git(['add', '-A', '--', '.']);

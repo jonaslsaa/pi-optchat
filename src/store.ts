@@ -28,7 +28,7 @@ export interface Lease {
 }
 
 /** Where one memory keeps what travels between machines: its message log, summary nodes, saved view and images. Everything else
- * in a profile (runs, recovery journals, the active-memory pointer and imports, usage, settings, AGENTS.md) stays on the machine.
+ * in a profile (runs, recovery journals, the active-memory pointer and imports, usage, settings, AGENTS.md and its guidance archive) stays on the machine.
  * Memory loads once when it opens, then works in RAM and issues every write in order. */
 export interface Store {
   load(): Maybe<Saved>;

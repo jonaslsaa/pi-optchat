@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { validGuidanceRef, type GuidanceRef } from './guidance-ref.ts';
 import { FileStore, storeFor, type Saved, type Store } from './store.ts';
 
 export const NODE = 512;
@@ -9,7 +10,7 @@ export const PAGE = 25_000;
 export const KINDS = ['user', 'talk', 'tool', 'echo', 'note', 'work'] as const;
 export type Kind = typeof KINDS[number];
 export interface Origin { source: 'claude' | 'claude-memory' | 'codex' | 'pi' | 'chatgpt'; conversation: string; message: string; title: string; project?: string }
-export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin }
+export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin; guidance?: GuidanceRef }
 export interface Part { l: number; i: number }
 export interface Summary extends Part { text: string; size: number }
 /** `part` is the node to build: a message's leaf, or the merge of its two halves. `call` is the tool call a tool result's leaf
@@ -87,7 +88,8 @@ function object(value: unknown): value is Record<string, unknown> {
 export function isEntry(value: unknown): value is Entry {
   return object(value) && Number.isSafeInteger(value.i) && typeof value.kind === 'string'
     && KINDS.some(kind => kind === value.kind)
-    && typeof value.text === 'string' && typeof value.date === 'string';
+    && typeof value.text === 'string' && typeof value.date === 'string'
+    && (value.guidance === undefined || validGuidanceRef(value.guidance));
 }
 function isSummary(value: unknown): value is Summary {
   return object(value) && Number.isSafeInteger(value.l) && Number.isSafeInteger(value.i)
@@ -157,10 +159,10 @@ export class Memory {
     for (let i = loaded; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
     this.fit(); this.save(); this.schedule();
   }
-  append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string, origin?: Origin) {
+  append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string, origin?: Origin, guidance?: GuidanceRef) {
     if (this.stopped) throw new Error('Memory is closed.');
     if (this.failed) throw new Error(`Memory could not be saved: ${this.failed}`);
-    const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}) };
+    const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}), ...(guidance ? { guidance } : {}) };
     void this.enqueue(() => this.store.append(entry), error => {
       this.failed ??= error instanceof Error ? error.message : String(error);
       this.warn(`Memory could not be saved: ${this.failed}`);

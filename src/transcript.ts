@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { GuidanceRef } from './guidance-recall.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { getCurrentSystemMessage, type SystemMessage, type UserMessage } from '@earendil-works/pi-ai';
@@ -46,19 +47,19 @@ export function asUser(message: AgentMessage): AgentMessage {
   if (first?.type === 'text') return { role: 'user', content: [{ ...first, text: tag + first.text }, ...rest], timestamp };
   return { role: 'user', content: [{ type: 'text', text: tag.trimEnd() }, ...content], timestamp };
 }
-export function logMessage(memory: Memory, message: AgentMessage, receipt?: string) {
+export function logMessage(memory: Memory, message: AgentMessage, receipt?: string, guidance?: GuidanceRef) {
   const date = new Date(message.timestamp).toISOString();
-  if (message.role === 'user') memory.append(receipt?.startsWith(REPORT_RECEIPT) ? 'work' : 'user', textContent(message.content), date, receipt);
+  if (message.role === 'user') memory.append(receipt?.startsWith(REPORT_RECEIPT) ? 'work' : 'user', textContent(message.content), date, receipt, undefined, guidance);
   else if (message.role === 'assistant') {
     for (const block of message.content) {
-      if (block.type === 'text' && block.text.trim()) memory.append('talk', block.text, date);
-      if (block.type === 'toolCall') memory.append('tool', `${block.name} ${JSON.stringify(block.arguments)}`, date);
+      if (block.type === 'text' && block.text.trim()) memory.append('talk', block.text, date, undefined, undefined, guidance);
+      if (block.type === 'toolCall') memory.append('tool', `${block.name} ${JSON.stringify(block.arguments)}`, date, undefined, undefined, guidance);
     }
     if (message.stopReason === 'error' || message.stopReason === 'aborted')
-      memory.append('echo', `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`, date);
+      memory.append('echo', `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`, date, undefined, undefined, guidance);
   } else if (message.role === 'toolResult')
     // A zoom's page already names the images it returns.
-    memory.append('echo', cap(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom')}`), date);
+    memory.append('echo', cap(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom')}`), date, undefined, undefined, guidance);
 }
 export function boundedMessage(message: AgentMessage): AgentMessage {
   if (message.role !== 'toolResult') return message;
@@ -132,9 +133,9 @@ const TASK = '\n</chat>\n\nYour task:\n';
 /** Tool calls and results in a run transcript keep their head and tail, so a page holds many steps. */
 const STEP = 1_000;
 /** A subagent's chat for zoom, as `kind|text` lines: its task without the memory view, replies, tool calls and results, and what it was told. */
-export function runTranscript(messages: readonly AgentMessage[]) {
+export function runTranscriptParts(messages: readonly AgentMessage[]) {
   const task = messages.find(message => message.role === 'user');
-  return messages.flatMap(message => {
+  return messages.map((message, index) => ({ index, text: (() => {
     if (message.role === 'user') {
       // Only the task prompt holds the memory view (src/agents.ts): `${view}\n\nYour task:\n${task}`.
       const text = textContent(message.content, false), at = text.indexOf(TASK);
@@ -145,8 +146,9 @@ export function runTranscript(messages: readonly AgentMessage[]) {
     return [...message.content.flatMap(block => block.type === 'text' && block.text.trim() ? [`talk|${block.text}`]
       : block.type === 'toolCall' ? [`tool|${cap(`${block.name} ${JSON.stringify(block.arguments)}`, STEP)}`] : []),
     ...message.stopReason === 'error' || message.stopReason === 'aborted' ? [`echo|Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`] : []];
-  }).join('\n');
+  })().join('\n') })).filter(part => part.text);
 }
+export function runTranscript(messages: readonly AgentMessage[]) { return runTranscriptParts(messages).map(part => part.text).join('\n'); }
 
 /** The status line naming running agents by id and the first words of their task; none while nothing runs. */
 export function atWork(runs: readonly { id: string; task: string }[]) {
