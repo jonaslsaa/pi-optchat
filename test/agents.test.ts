@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
+import { createAssistantMessageEventStream, getSystemMessageText, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { Children, taskDirectory } from '../src/agents.ts';
 import { STEERABLE } from '../src/prompts.ts';
@@ -257,6 +257,8 @@ test('children get the main agent\'s extensions, AGENTS.md files and skills, but
   writeFileSync(join(agentDir, 'settings.json'), JSON.stringify({ packages: [copy] }));
   writeFileSync(join(dir, 'AGENTS.md'), 'REPO_RULES');
   writeFileSync(join(agentDir, 'AGENTS.md'), 'GLOBAL_RULES');
+  const profile = join(dir, 'profile'); mkdirSync(profile);
+  writeFileSync(join(profile, 'AGENTS.md'), 'PROFILE_RULES');
   mkdirSync(join(agentDir, 'skills', 'demo-skill'), { recursive: true });
   writeFileSync(join(agentDir, 'skills', 'demo-skill', 'SKILL.md'), '---\nname: demo-skill\ndescription: Demo skill.\n---\nBody');
   let system = '';
@@ -266,15 +268,15 @@ test('children get the main agent\'s extensions, AGENTS.md files and skills, but
     models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
     streamSimple: (model, context) => {
       const head = context.messages.find(m => m.role === 'system');
-      system = Object.values(head && 'sections' in head ? head.sections ?? {} : {}).join('\n');
+      system = head?.role === 'system' ? getSystemMessageText(head) : '';
       const stream = createAssistantMessageEventStream();
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
       queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
       return stream;
     },
   });
-  const children = new Children(new Memory(dir, async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => 'PROFILE_RULES',
-    async () => {}, () => {}, dir, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  const children = new Children(new Memory(dir, async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => '',
+    async () => {}, () => {}, profile, { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   try {
     const [id] = await children.spawn([{ task: 'inspect tools' }], dir);
     const names = children.live(id)?.session.getAllTools().map(t => t.name) ?? [];

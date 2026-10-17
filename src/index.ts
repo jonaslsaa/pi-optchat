@@ -7,6 +7,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { Memory } from './memory.ts';
+import { Guidance, guidanceState, GUIDANCE_STATE } from './guidance.ts';
 import { atomicWrite, storeFor } from './store.ts';
 import { createCompressor } from './compactor.ts';
 import { createProfile, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
@@ -48,7 +49,7 @@ const toggle = (prompt: string, line: string, on: boolean, after: string) => on 
 /** A report run while idle reuses the last built prompt, so Previous exchange and Memory search changes since then are applied here. */
 const promptFor = (prompt: string, { previousExchange, memorySearch }: ProfileConfig) =>
   allowSearch(toggle(toggle(prompt, CONTINUITY, previousExchange, VIEW_DOC), SEARCH_DOC, memorySearch, previousExchange ? VIEW_DOC + CONTINUITY : VIEW_DOC), memorySearch);
-interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
+interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; guidance: Guidance; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
 /** OptChat's own version, read from the package.json beside src/ (in the checkout and the npm package alike); none if unreadable. */
 export const version = ((): string | undefined => {
@@ -209,7 +210,7 @@ export default function optchat(pi: ExtensionAPI) {
       const inbox = new Inbox(dir);
       const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
       if (recovered) ctx.ui.notify(`Recovered ${recovered} unanswered inputs into ${name}'s memory. Ask to continue them when ready.`, 'info');
-      const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => `${instructions(dir)}\n\n${IMPORT_GUIDANCE}`,
+      const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => IMPORT_GUIDANCE,
         deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, builtins: () => loadedBuiltins(pi), settings: () => config, hold: holdReports,
           summarizeHandoff: createHandoffSummarizer(ctx.modelRegistry, () => config.compactor, message => usage.compression(message, 'compactor', sessionId)) });
       const loggedReports = new Set(memory.root.map(e => e.receipt));
@@ -218,7 +219,7 @@ export default function optchat(pi: ExtensionAPI) {
         .filter(r => !loggedReports.has(reportReceipt(r.text)));
       atomicWrite(pending, JSON.stringify(reports));
       rememberProfile(name);
-      active = { name, dir, config, memory, inbox, children, usage, unlock }; fault = undefined; idle = () => ctx.isIdle();
+      active = { name, dir, config, memory, guidance: new Guidance(dir), inbox, children, usage, unlock }; fault = undefined; idle = () => ctx.isIdle();
       if (ctx.mode === 'tui') unmountNavigation = mountNavigation(ctx, children, memory, shortcut, page => { void inspect(ctx, page); });
       // A one-shot run (`pi -p`, JSON) exits after its own prompt, which would end every conversation connected to it.
       if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport);
@@ -383,10 +384,12 @@ export default function optchat(pi: ExtensionAPI) {
     if (!active) return; // Plain Pi run: leave Pi's own prompt untouched.
     startRun(ctx);
     const a = required();
-    // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
+    // Guidance is loaded once per model request below; Pi must not also inject its cached copy.
     syncSearch(a.config);
     event.systemPromptOptions.customPrompt = allowSearch(`${MASTER}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}${a.config.memorySearch ? SEARCH_DOC : ''}`, a.config.memorySearch);
-    event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
+    a.guidance.configure(event.systemPromptOptions.contextFiles, ctx.cwd);
+    event.systemPromptOptions.contextFiles = [];
+    event.systemPromptOptions.sections.instructions = IMPORT_GUIDANCE;
     prompt = event.systemPrompt;
   });
   const DUPLICATE_REPORT = '(duplicate report, already delivered)';
@@ -461,7 +464,8 @@ export default function optchat(pi: ExtensionAPI) {
         ctx.ui.notify(`OptChat moved ${Math.round(size / 4000)}k tokens of this turn into memory (${((Date.now() - began) / 1000).toFixed(1)}s).`, 'info');
       }
       // Built on every call, unlike the view, so it is never out of date; it goes last, after everything cached.
-      return { messages: buildContext(event.messages, refreshedRun(run, keep, TURN_REFRESHED), view, promptFor(prompt, a.config), previous, atWork(a.children.working)) };
+      const messages = buildContext(event.messages, refreshedRun(run, keep, TURN_REFRESHED), view, promptFor(prompt, a.config), previous, atWork(a.children.working));
+      return a.guidance.prepare(messages, ctx.cwd, guidanceState(ctx), state => pi.appendEntry(GUIDANCE_STATE, state));
     } catch (error) {
       // Pi catches extension errors. Explicitly abort so it cannot fall back to old context.
       ctx.abort();
@@ -626,7 +630,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (action === 'instructions') {
       const a = required();
       const edited = await ctx.ui.editor(`${a.name} · AGENTS.md`, instructions(a.dir));
-      if (edited !== undefined) { atomicWrite(join(a.dir, 'AGENTS.md'), edited); ctx.ui.notify('Saved. Applies to the next turn and newly spawned agents.', 'info'); }
+      if (edited !== undefined) { atomicWrite(join(a.dir, 'AGENTS.md'), edited); ctx.ui.notify('Saved. Applies to each agent’s next model request.', 'info'); }
       return;
     }
     if (action === 'browse') {

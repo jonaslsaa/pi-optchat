@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Guidance, guidanceState, GUIDANCE_STATE } from './guidance.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -246,6 +247,7 @@ export class Children {
   private async open(o: { id: string; directory: string; depth: number; parentId?: string; connected: boolean; provider: string; model: Model<Api>;
     thinking?: ModelChoice['thinking']; sessionManager: SessionManager }) {
     const { id, directory, depth, parentId, connected } = o;
+    const guidance = new Guidance(this.profileDirectory);
     const { subagentLevels, maxAgents, memorySearch } = this.settings, delegates = depth < subagentLevels;
     const instructions = [this.instructions(), delegates ? delegation(maxAgents) : NO_DELEGATION, STEERABLE, connected ? CONNECTED : NOT_CONNECTED].filter(Boolean).join('\n\n');
     // The user's settings list their installed packages; a copy in memory keeps the child from writing them back.
@@ -260,7 +262,15 @@ export class Children {
         // Same prompt as the main agent (AGENTS.md files, skills, cwd); only the OptChat preamble differs.
         pi.on('before_agent_start', event => {
           event.systemPromptOptions.customPrompt = allowSearch(`${SUBAGENT}\n\n${VIEW_DOC}${memorySearch ? SEARCH_DOC : ''}`, memorySearch);
+          event.systemPromptOptions.contextFiles = [];
           event.systemPromptOptions.sections.instructions = instructions;
+        });
+        pi.on('context_with_system', (event, ctx) => {
+          try { return guidance.prepare(event.messages, directory, guidanceState(ctx), state => pi.appendEntry(GUIDANCE_STATE, state)); }
+          catch (error) {
+            ctx.abort(); this.warn(String(error));
+            return { messages: [{ role: 'system' as const, content: 'OptChat guidance unavailable. Stop.', timestamp: 0 }] };
+          }
         });
         pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
       }],
