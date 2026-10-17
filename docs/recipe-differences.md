@@ -29,7 +29,7 @@ The README has the summary table. This page has the detail: what changed in each
 
 Compactions get their own view, as in the 2026-10-08 revision: the memory view merged further, to between 16,000 and 32,000 bytes with the same sawtooth, ending at the line being built.
 
-A message's summary starts once fewer than 8 lines before it are unsummarized, so up to 8 compactions run at once on one cached view. An import logs its messages the same way, waiting only while 8 messages and due merges are unbuilt, so the merges keep up.
+A message's summary starts once fewer than 8 lines before it are unsummarized, so up to 8 compactions run at once on one cached view (the **Summaries at once** setting, 8 by default). An import logs its messages the same way, waiting only while that many messages and due merges are unbuilt, so the merges keep up.
 
 Where the recipe ends a compaction's view at the first line not summarized yet, OptChat shows that line as a placeholder and keeps the lines after it. Cutting there also hid the short lines that follow, such as an echo's own tool call, and an A/B on real turns scored those summaries lower (#101).
 

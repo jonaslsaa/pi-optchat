@@ -204,7 +204,7 @@ export default function optchat(pi: ExtensionAPI) {
       const memory = await Memory.open(memoryDirectory(dir), createCompressor(ctx.modelRegistry, () => config.compactor, message => {
         usage.compression(message, 'compactor', sessionId);
         status(ctx);
-      }, () => config.summaryAcceptBytes), warning => ctx.ui.notify(warning, 'error'));
+      }, () => config.summaryAcceptBytes), warning => ctx.ui.notify(warning, 'error'), undefined, config.jobs);
       openingMemory = memory;
       const inbox = new Inbox(dir);
       const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
@@ -586,7 +586,7 @@ export default function optchat(pi: ExtensionAPI) {
         const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, message => {
           a.usage.compression(message, 'import', ctx.sessionManager.getSessionId());
         }, () => a.config.summaryAcceptBytes);
-        const completed = await showProgress(ctx, job, (signal, progress) => runImport(a.dir, compress, signal, a.config.importJobs, progress), signal);
+        const completed = await showProgress(ctx, job, (signal, progress) => runImport(a.dir, compress, signal, a.config.jobs, progress), signal);
         ctx.ui.notify(completed ? `Imported ${job.added} messages into ${a.name}. Previous memory retained at ${job.previous === '.' ? a.dir : join(a.dir, job.previous)}.`
           : 'Import paused. Use /optchat import to resume. Other profiles remain available.', 'info');
       })();
