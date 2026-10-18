@@ -95,7 +95,7 @@ export function discardImport(dir: string) {
   rmSync(pendingFile(dir)); rmSync(generationPath(dir, job.target), { recursive: true, force: true });
 }
 export interface ImportProgress { messages: number; total: number; summaries: number; error?: string }
-export async function runImport(dir: string, compress: Compressor, signal: AbortSignal, jobs = DEFAULT_SETTINGS.importJobs,
+export async function runImport(dir: string, compress: Compressor, signal: AbortSignal, jobs = DEFAULT_SETTINGS.jobs,
   progress: (state: ImportProgress) => void = () => {}): Promise<ImportJob> {
   const job = pendingImport(dir); if (!job) throw new Error('No pending import.');
   const path = generationPath(dir, job.target);
@@ -113,7 +113,7 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
     if (memory.root.length > plan.length || memory.root.some((e, i) => e.text !== plan[i].text)) throw new Error('Import staging data does not match its log; original memory remains intact.');
     report();
     // Recipe §10: imported messages are compressed like any other. Each is logged once its node can start, as a burst of live
-    // messages is, so up to `jobs` summaries run at once (the "Import: summaries at once" setting). Unlike a turn, an import waits through failures (its progress shows the error).
+    // messages is, so up to `jobs` summaries run at once (the "Summaries at once" setting). Unlike a turn, an import waits through failures (its progress shows the error).
     for (const e of plan.slice(memory.root.length)) { await memory.settle(signal, 'ahead'); memory.append(e.kind, e.text, e.date, e.receipt, e.origin, e.guidance); }
     await memory.settle(signal, 'tree'); signal.throwIfAborted();
     // Close all writers before the single atomic pointer swap. The previous generation stays intact.

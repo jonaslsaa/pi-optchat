@@ -99,9 +99,9 @@ Compression and subagents make extra model requests with your provider credentia
 | Memory search | off | Gives the agent, and subagents started or resumed after the change, a `search` tool over your original messages. Off is the recipe: zoom and date only. Applies from the next turn. |
 | Summary size tolerance | 640 bytes | The compactor is always asked for 512-byte lines; a longer line up to this size is kept instead of retried. 512 is the recipe's strict rule. |
 | Turn refresh threshold | 30% | Once the current turn's verbatim messages pass this share of the model's context window, they move into memory and the turn goes on with a fresh window (see [Good to know](#good-to-know)). Type 30, 30% or 0.3. 0% is off, as in the recipe. Applies from the next call. |
-| Import: summaries at once | 8 | Summaries an import builds at once, 1 to 64. With N at once, a summary can see up to N−1 lines not summarized yet before it, so higher is faster but a little less accurate (at 8 that costs about 0.8 points per summary, #108). Higher also hits your provider's rate limits harder (the compactor retries what is refused). Chat always runs 8. Applies to the next import. |
+| Summaries at once | 8 | Summaries built at once, by chat compaction and by an import, 1 to 64. With N at once, a summary can see up to N−1 lines not summarized yet before it, so higher is faster but a little less accurate (at 8 that costs about 0.8 points per summary, #108). Higher also hits your provider's rate limits harder (the compactor retries what is refused), so if your provider caps parallel requests, set it below that cap so the main turn has room. Applies to the next import, and to chat once the profile opens again. A `config.json` that still says `importJobs` keeps its value. |
 
-Numbers must be whole numbers of at least 1 (512 for the summary size tolerance, at most 64 for Import: summaries at once); Turn refresh threshold is a percentage from 0% to 90%. Missing keys in an older `config.json` take their defaults.
+Numbers must be whole numbers of at least 1 (512 for the summary size tolerance, at most 64 for Summaries at once); Turn refresh threshold is a percentage from 0% to 90%. Missing keys in an older `config.json` take their defaults.
 
 **Upgrading from 0.6.x:** subagent levels used to be fixed at 3 and now default to 1, so subagents no longer start their own subagents until you set Subagent levels to 2 or 3.
 
@@ -113,12 +113,13 @@ Ask in plain words, for example: "Spawn an agent to investigate this repository 
 
 - **What they get**: the profile's memory view (frozen at launch) and instructions, read-only `zoom`/`date`, normal coding tools, your installed extensions, and your MCP servers.
 - **Reports**: each child reports when it finishes, as one message starting `[id]`, shown in a dark grey `↳ subagent <id>` box. Turn on **Group subagent reports** to get one message per spawn instead.
+- **Model**: children run the profile's subagent model. Ask for another in your request ("review it with anthropic/claude-haiku-5-5 at low") and the agent sets that task's `model` and `thinking`.
 - **Talking**: the parent sends guidance with `tell`; the child messages its parent mid-run with `tell_parent`. `tell` to a finished child resumes it with its saved transcript.
 - **Limits**: by default only the main agent starts subagents. **Subagent levels** lets them delegate further, and **Max active agents** (8) caps how many run at once; going over returns an error, there is no queue.
 - **Stopping**: stopping an agent stops its whole subtree. Agents run inside the Pi process, so closing Pi stops them.
 - **Restarts**: agents cut off by a close, crash or `/reload` resume when the profile next opens in interactive Pi, and the main agent is told which. Ones you stopped or paused stay stopped.
 
-More (MCP inheritance, report formats, the "agents at work" status line, resume rules): [docs/subagents.md](docs/subagents.md).
+More (MCP inheritance, per-task models, report formats, the "agents at work" status line, resume rules): [docs/subagents.md](docs/subagents.md).
 
 ## Agents, usage and activity inspector
 

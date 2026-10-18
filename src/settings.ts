@@ -23,9 +23,9 @@ export const SETTINGS = {
   summaryAcceptBytes: { kind: 'number', label: 'Summary size tolerance', default: NODE * 1.25, min: NODE, unit: 'bytes',
     description: `The compactor is always asked for ${NODE}-byte lines; a longer line up to this size is kept instead of retried. ${NODE}: strict, as in Victor's recipe. The default saves retries for a little more view space.`,
     applies: 'Applies to the next summary.' },
-  importJobs: { kind: 'number', label: 'Import: summaries at once', default: 8, min: 1, max: 64, unit: '',
-    description: 'Summaries an import builds at once. With N at once, a summary can see up to N−1 lines not summarized yet before it, so higher is faster but a little less accurate (at 8 that costs about 0.8 points per summary, #108). Higher also hits your provider\'s rate limits harder; the compactor retries what is refused. Chat itself always runs 8.',
-    applies: 'Applies to the next import.' },
+  jobs: { kind: 'number', label: 'Summaries at once', default: 8, min: 1, max: 64, unit: '',
+    description: 'Summaries built at once, by chat compaction and by an import. With N at once, a summary can see up to N−1 lines not summarized yet before it, so higher is faster but a little less accurate (at 8 that costs about 0.8 points per summary, #108). Higher also hits your provider\'s rate limits harder; the compactor retries what is refused. If your provider caps parallel requests, set it below that cap so the main turn has room.',
+    applies: 'Applies to the next import, and to chat once the profile opens again (e.g. after /reload).' },
   refreshAt: { kind: 'percent', label: 'Turn refresh threshold', default: 0.3, min: 0, max: 0.9,
     description: 'Once the current turn\'s messages pass this share of the model\'s context window, they move into memory and the turn goes on with a fresh window: the rebuilt view, the task word for word, and its last tool call and result. 0%: off, as in Victor\'s recipe, and a long turn can run out of window. OPTCHAT_REFRESH_AT (a fraction, e.g. 0.3; 0 is off) overrides it. Subagents use Pi\'s own compaction at about the same point.',
     applies: 'Applies from the next call, and to subagents started or resumed after this.' },
@@ -54,6 +54,8 @@ export function invalid(key: SettingKey, value: unknown) {
 
 /** Missing keys take their defaults, so config files written before a setting existed keep working. */
 export function readSettings(value: Record<string, unknown>): Settings {
+  // "Summaries at once" was `importJobs` while it only covered imports; an older config.json keeps its value.
+  if (!Object.hasOwn(value, 'jobs') && Object.hasOwn(value, 'importJobs')) value = { ...value, jobs: value.importJobs };
   return Object.fromEntries(SETTING_KEYS.map(key => {
     const raw = Object.hasOwn(value, key) ? value[key] : SETTINGS[key].default, problem = invalid(key, raw);
     if (problem) throw new Error(problem);

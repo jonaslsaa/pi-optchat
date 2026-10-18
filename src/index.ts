@@ -18,7 +18,7 @@ import { saveImages } from './images.ts';
 import { asUser, boundedMessage, atWork, buildContext, logMessage, previousExchange, refreshedRun, refreshBudget, refreshFraction, refreshPoint, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer, type ReportDetails } from './report-message.ts';
 import { memoryTools, result, searchTool } from './tools.ts';
-import { Children, CWD_DOC, loadedBuiltins } from './agents.ts';
+import { Children, loadedBuiltins, modelsTool, TASKS } from './agents.ts';
 import { isActiveRun, type RunInfo } from './runs.ts';
 import { exportBrowser } from './browser.ts';
 import { Inbox } from './inbox.ts';
@@ -207,7 +207,7 @@ export default function optchat(pi: ExtensionAPI, guidanceOptions: GuidanceOptio
       const memory = await Memory.open(memoryDirectory(dir), createCompressor(ctx.modelRegistry, () => config.compactor, message => {
         usage.compression(message, 'compactor', sessionId);
         status(ctx);
-      }, () => config.summaryAcceptBytes), warning => ctx.ui.notify(warning, 'error'));
+      }, () => config.summaryAcceptBytes), warning => ctx.ui.notify(warning, 'error'), undefined, config.jobs);
       openingMemory = memory;
       const inbox = new Inbox(dir);
       const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
@@ -524,13 +524,14 @@ export default function optchat(pi: ExtensionAPI, guidanceOptions: GuidanceOptio
     if (tools.includes('search') !== memorySearch) pi.setActiveTools(memorySearch ? [...tools, 'search'] : tools.filter(name => name !== 'search'));
   };
   pi.registerTool({ name: 'spawn', label: 'Spawn background agents',
-    description: 'Start background subagents, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Each receives the current memory view and read-only zoom/date. Whether children may delegate further, and how many agents may run at once, is set per profile. Completion reports arrive automatically; never poll or sleep waiting for them.',
-    parameters: Type.Object({ tasks: Type.Array(Type.Object({ task: Type.String(), cwd: Type.Optional(Type.String({ description: CWD_DOC })) }), { minItems: 1 }) }),
+    description: 'Start background subagents, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. A task names a model only when the user asks for one; models() lists the valid ids. Each receives the current memory view and read-only zoom/date. Whether children may delegate further, and how many agents may run at once, is set per profile. Completion reports arrive automatically; never poll or sleep waiting for them.',
+    parameters: Type.Object({ tasks: TASKS }),
     async execute(_id, args, signal, _update, ctx) {
       const text = await required().children.start(args.tasks, ctx.cwd, signal); status(ctx);
       return result(text);
     },
   });
+  pi.registerTool(modelsTool(() => required().children));
   pi.registerTool({ name: 'tell', label: 'Tell background agent', description: 'Send a message to a subagent. A running one gets it at its next tool boundary. A finished one you started is resumed with its earlier conversation, and its new report arrives automatically.',
     parameters: Type.Object({ id: Type.String(), message: Type.String() }),
     async execute(_id, args) { return result(await required().children.tell(args.id, args.message)); },
@@ -603,7 +604,7 @@ export default function optchat(pi: ExtensionAPI, guidanceOptions: GuidanceOptio
         const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, message => {
           a.usage.compression(message, 'import', ctx.sessionManager.getSessionId());
         }, () => a.config.summaryAcceptBytes);
-        const completed = await showProgress(ctx, job, (signal, progress) => runImport(a.dir, compress, signal, a.config.importJobs, progress), signal);
+        const completed = await showProgress(ctx, job, (signal, progress) => runImport(a.dir, compress, signal, a.config.jobs, progress), signal);
         ctx.ui.notify(completed ? `Imported ${job.added} messages into ${a.name}. Previous memory retained at ${job.previous === '.' ? a.dir : join(a.dir, job.previous)}.`
           : 'Import paused. Use /optchat import to resume. Other profiles remain available.', 'info');
       })();

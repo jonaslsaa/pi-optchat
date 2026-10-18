@@ -30,8 +30,10 @@ function lastBlock(message: Record<string, unknown>) {
   return record(block) ? block : undefined;
 }
 
-/** Anthropic: marks on the view (see MARKS) plus automatic end-of-request caching, so the next call finds the last one's entry
- * and pays only for the lines after it. */
+/** Anthropic: marks on the view (see MARKS) plus a mark at the end of the request, so the next call finds the last one's entry
+ * and pays only for the lines after it. The end mark sits on the last block itself rather than as top-level automatic caching:
+ * a proxy or setting that gives block marks a 1h TTL makes Anthropic refuse a top-level mark, whose TTL defaults to 5m, on the
+ * same block ("Top-level cache_control has ttl='5m' but the target block already has cache_control with ttl='1h'"). */
 export function cachePayload(payload: unknown): unknown {
   if (!record(payload) || !Array.isArray(payload.messages)) return payload;
   const messages = payload.messages;
@@ -60,7 +62,17 @@ export function cachePayload(payload: unknown): unknown {
   // Pi may end the request with an empty system message carrying settings (effort); it holds nothing to cache.
   const [before, last] = messages.filter(message => !record(message) || message.role !== 'system').slice(-2);
   const turn = isAtWork(last) && record(before) && before.role === 'user' ? lastBlock(before) : undefined;
-  if (turn) turn.cache_control = { type: 'ephemeral' };
-  else payload.cache_control = { type: 'ephemeral' };
+  const end = turn ?? endBlock(messages);
+  if (end) end.cache_control = { type: 'ephemeral' };
   return payload;
+}
+
+/** The last block of the last non-system message that can carry a mark (thinking blocks can't). */
+function endBlock(messages: unknown[]) {
+  const message = messages.filter(m => !record(m) || m.role !== 'system').at(-1);
+  if (!record(message)) return undefined;
+  if (typeof message.content === 'string') return lastBlock(message);
+  if (!Array.isArray(message.content)) return undefined;
+  const block: unknown = message.content.findLast((b: unknown) => record(b) && b.type !== 'thinking' && b.type !== 'redacted_thinking');
+  return record(block) ? block : undefined;
 }

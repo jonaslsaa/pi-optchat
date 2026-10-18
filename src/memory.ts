@@ -132,7 +132,7 @@ export class Memory {
     return new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs);
   }
   /** A directory alone opens a FileStore there. `jobs`: summaries built at once, and how many unbuilt lines a new message's node
-   * waits behind. Chat keeps 8; imports pass the "Import: summaries at once" setting. */
+   * waits behind. Chat and imports pass the "Summaries at once" setting. */
   constructor(source: string | { directory: string; store: Store; saved: Saved }, private readonly compress: Compressor,
     private readonly warn: (s: string) => void = console.error,
     readonly budget = VIEW, private readonly jobs = 8, private readonly retryMs = 10_000) {

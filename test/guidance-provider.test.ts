@@ -54,8 +54,13 @@ for (const api of ['anthropic-messages', 'openai-responses', 'openai-completions
       assert.ok(serialized.indexOf('RECENT_WORK') < serialized.indexOf('<guidance_update>'));
       assert.equal(serialized.split('<guidance_update>').length - 1, 1);
       if (api === 'anthropic-messages') {
-        assert.ok(JSON.stringify(changed.messages).includes('cache_control'));
-        assert.deepEqual(changed.cache_control, { type: 'ephemeral' });
+        assert.equal(changed.cache_control, undefined, 'no top-level mark that could conflict with block TTLs');
+        assert.ok(Array.isArray(changed.messages));
+        const last = changed.messages.at(-1);
+        assert.ok(record(last) && Array.isArray(last.content));
+        const end = last.content.at(-1); assert.ok(record(end));
+        assert.match(String(end.text), /<guidance_update>/);
+        assert.deepEqual(end.cache_control, { type: 'ephemeral' }, 'the end mark includes the guidance transition');
         assert.doesNotMatch(head(changed), /cache_control/, 'existing OptChat view cache marks are preserved');
       }
     } finally { removeDir(dir); }
