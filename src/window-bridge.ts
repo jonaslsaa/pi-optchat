@@ -123,7 +123,7 @@ export async function serveWindows(directory: string, children: Children, availa
             if (frame.activeOnly && (!children.live(id) || !['running', 'waiting', 'paused'].includes(info.state)))
               throw new Error(`Subagent ${id} is no longer available in the menu. Refresh and choose a live agent.`);
             const live = children.live(id);
-            const messages = live?.session.messages ?? children.messages(id);
+            const messages = children.retained(id);
             said.add(info.task.trim());
             // This socket borrows the existing session, never its lifetime, slot or report destination.
             // Other views (the main window's Agents page, other terminals) stay open alongside it.
@@ -148,7 +148,7 @@ export async function serveWindows(directory: string, children: Children, availa
             }
             if (frame.action === 'complete') {
               const live = children.live(child);
-              if (live) drainMessages(live.session.messages, live.info.task);
+              if (live) drainMessages(children.retained(child), live.info.task);
               ending = true;
               if (!attached) track(children.finish(child, 'complete').then(() => {}));
               send({ kind: 'event', name: 'finished', text: attached ? 'Detached. The background agent remains with its original parent.'
@@ -167,7 +167,8 @@ export async function serveWindows(directory: string, children: Children, availa
     const drainMessages = (messages: AgentMessage[], task: string) => {
       const displayable = messages.filter(message => message.role === 'user' || message.role === 'assistant' || message.role === 'toolResult');
       // An attachment may replay hours of tool output. Pace the history instead of overflowing the bounded wire
-      // or starving the owner's event loop. The next status tick continues from the same cursor.
+      // or starving the owner's event loop. The next status tick continues from the same cursor, which stays valid because
+      // retained messages are only ever appended (unlike Pi's projection, which compaction and retries replace).
       let batch = 0;
       while (cursor < displayable.length) {
         if (batch++ >= 32 || socket.writableLength > 1_000_000) return false;
@@ -190,7 +191,7 @@ export async function serveWindows(directory: string, children: Children, availa
         send({ kind: 'event', name: 'finished', text: 'This conversation was deleted from the Agents page.' });
         return;
       }
-      if (live) drainMessages(live.session.messages, info.task);
+      if (live) drainMessages(children.retained(child), info.task);
       const preview = live?.streaming && 'content' in live.streaming ? textContent(live.streaming.content).slice(-2000) : '';
       const text = `${info.state === 'waiting' ? 'Awaiting user or child reports' : info.state} · ${info.model}\n${live ? [...live.tools.values()].map(t => t.name).join(', ') : ''}\n${preview}`;
       let state: LiveState = { state: info.state, model: info.model,
@@ -202,7 +203,7 @@ export async function serveWindows(directory: string, children: Children, availa
       const status = JSON.stringify(state);
       if (status !== lastStatus) { lastStatus = status; send({ kind: 'event', name: 'status', text, live: state }); }
       if (!live && (attached && !isActiveRun(info) || info.handoff?.delivered)) {
-        try { if (!drainMessages(finalMessages ??= children.messages(child), info.task)) return; }
+        try { if (!drainMessages(finalMessages ??= children.retained(child), info.task)) return; }
         catch (error) { send({ kind: 'event', name: 'message', text: `Could not read the final transcript: ${errorText(error)}` }); }
         ending = true;
         send({ kind: 'event', name: 'finished', text: attached ? `Agent ${child} is ${info.state}. Its report goes to its original parent; /complete closes only this view.` : info.handoff?.text ?? 'Conversation ended.' });

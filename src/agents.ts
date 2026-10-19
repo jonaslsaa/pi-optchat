@@ -147,13 +147,21 @@ export class Children {
     const file = this.history.records.get(id)?.sessionFile;
     return file ? sessionMessages(file) : [];
   }
+  /**
+   * Every message a run has finalized, in order and never rewritten: Pi's session entries, for a live run too.
+   * `session.messages` is only the model's projection, which compaction and retries replace with a shorter list.
+   */
+  retained(id: string): AgentMessage[] {
+    const live = this.running.get(id);
+    return live ? live.session.sessionManager.getEntries().flatMap(e => e.type === 'message' ? [e.message] : []) : this.messages(id);
+  }
   /** A run's messages for zoom, live or finished; undefined for no such run. A subagent `reader` sees only its own descendants, as with tell. */
   transcript(id: string, reader?: string) {
     const known = reader ? this.history.descendants(reader).some(run => run.id === id) : this.running.has(id) || this.history.records.has(id);
     if (!known) return undefined;
     const live = this.running.get(id);
     if (!live) return this.messages(id);
-    const retained = live.session.sessionManager.getEntries().flatMap(e => e.type === 'message' ? [e.message] : []);
+    const retained = this.retained(id);
     // Pi puts the finalized message in session.messages before message_end listeners run, then persists that same object.
     const tail = live.streaming ?? live.session.messages.at(-1);
     return tail && !retained.includes(tail) ? [...retained, tail] : retained;
