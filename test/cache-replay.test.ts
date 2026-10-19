@@ -103,8 +103,9 @@ test('turns and compactions read nearly all their input from the cache, also aft
   for (let turn = 0; turn < 80; turn++) {
     const steps = turn % 8 === 7 ? 50 + Math.floor(rand() * 11) : Math.floor(rand() * 7);
     await memory.settle();
-    const view = memory.render(), run: AgentMessage[] = [{ role: 'user', content: [{ type: 'text', text: text('user', 40, 1500) }], timestamp: Date.now() }];
-    logMessage(memory, run[0]);
+    const task: Extract<AgentMessage, { role: 'user' }> = { role: 'user', content: [{ type: 'text', text: text('user', 40, 1500) }], timestamp: Date.now() };
+    const view = memory.render(), run: AgentMessage[] = [task];
+    logMessage(memory, task);
     for (let step = 0; ; step++) {
       fake.as(step === 0 && long ? 'turn after a long one' : 'turn');
       const reply = await registry.streamSimple(model, { messages: convertToLlm(buildContext([], run, view, MASTER, previous)) }, { onPayload: cachePayload }).result();
@@ -116,8 +117,8 @@ test('turns and compactions read nearly all their input from the cache, also aft
       const result: AgentMessage = { role: 'toolResult', toolCallId: `t${step}`, toolName: 'zoom', content: [{ type: 'text', text: text('echo', 40, 3000) }], isError: false, timestamp: Date.now() };
       run.push(result); logMessage(memory, result);
     }
-    // The previous exchange, while under the default 16 KB.
-    previous = run.reduce((sum, m) => sum + Buffer.byteLength(textContent('content' in m ? m.content : '')), 0) <= 16_000 ? run : [];
+    // The previous exchange as previousExchange() keeps it: the request as text and the final answer, here always under 16 KB.
+    previous = [{ ...task, content: textContent(task.content) }, run.at(-1)!];
     long = steps >= 50;
   }
   await memory.settle(undefined, 'tree');
@@ -129,7 +130,7 @@ test('turns and compactions read nearly all their input from the cache, also aft
   for (let k = 0; k < 8; k++) memory.append('echo', text('echo', 1000, 3000));
   await memory.settle(undefined, 'tree');
   await memory.close();
-  // Measured: turns read 100% of what they could (97.8% of all they sent), the turn after a long one 98.5% (40.2%: its view has the
+  // Measured: turns read 100% of what they could (98.1% of all they sent), the turn after a long one 98.5% (39.5%: its view has the
   // long turn's lines new), compactions 98.5% (95.5%), the cold burst 99.3% (91.8%). Compactions miss where a line inside their
   // view changes or a view ends before a sibling's (#194). One view mark reads 0% after a long turn; no gate, 52% in the burst.
   for (const [kind, use] of [...Object.entries(replay), ['cold restart', fake.uses.compaction] as const])
