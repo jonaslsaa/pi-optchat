@@ -150,10 +150,8 @@ export class Memory {
     }
     for (const node of this.tree.values()) this.queueParent(node);
     for (let i = 0; i < this.root.length; i++) if (!this.node({ l: 0, i })) this.unbuilt.add(i);
-    // Refolding the log gives a different view than the live one, and every cache entry would miss, so the view is saved.
+    // Refolding the log gives different views than the live ones, and every cache entry would miss, so the views are saved.
     const loaded = this.load(saved.view);
-    for (const part of this.view) this.compaction.push(part);
-    this.compaction.fit(loaded, true);
     for (let i = loaded; i < this.root.length; i++) { this.push(i); this.fit(i + 1); }
     this.fit(); this.save(); this.schedule();
   }
@@ -182,33 +180,43 @@ export class Memory {
     this.writing = tail;
     return settled;
   }
-  /** Takes the saved view if it still tiles the log from the start, and returns how many messages it covers. */
+  /** Takes the saved views if they still tile the log from the start, and returns how many messages they cover. */
   private load(view: string | undefined) {
     if (view === undefined) return 0;
-    const rebuild = () => { this.warn('Rebuilt the memory view: the saved one does not match the log.'); return 0; };
     let saved: unknown;
-    try { saved = JSON.parse(view); } catch { return rebuild(); }
+    try { saved = JSON.parse(view); } catch { saved = undefined; }
+    const chat = this.tiling(saved);
+    if (!chat) { this.warn('Rebuilt the memory view: the saved one does not match the log.'); return 0; }
+    for (const part of chat.parts) this.chat.push(part);
+    this.chat.merging = chat.merging;
+    // An older view.json has only the chat's view: the compactions' is refolded from it, a cold prefix once.
+    const compaction = object(saved) ? this.tiling(saved.compaction) : undefined;
+    if (compaction?.covered === chat.covered) { for (const part of compaction.parts) this.compaction.push(part); this.compaction.merging = compaction.merging; }
+    else { for (const part of chat.parts) this.compaction.push(part); this.compaction.fit(chat.covered, true); }
+    return chat.covered;
+  }
+  /** A saved view, `{ parts, merging }` or an older bare list of parts, if it tiles the log from the start. */
+  private tiling(saved: unknown) {
     const merging = object(saved) && saved.merging === true;
     if (object(saved) && typeof saved.merging === 'boolean') saved = saved.parts;
-    if (!Array.isArray(saved)) return rebuild();
+    if (!Array.isArray(saved)) return;
     const parts: Part[] = [];
     let covered = 0;
     for (const value of saved) {
       const [l, i] = Array.isArray(value) ? value : [];
       const part = { l, i };
       if (!Number.isSafeInteger(l) || !Number.isSafeInteger(i) || l < 0 || start(part) !== covered || end(part) > this.root.length || (l > 0 && !this.node(part)))
-        return rebuild();
+        return;
       parts.push(part); covered = end(part);
     }
-    for (const part of parts) this.chat.push(part);
-    this.chat.merging = merging;
-    return covered;
+    return { parts, merging, covered };
   }
-  /** Saved when it merges or changes batch state: a view that only grew is the saved one plus later messages, as `load` replays it.
-   * The log stays authoritative, so a failed save only warns. */
+  /** Saved when either view merges or changes batch state: a view that only grew is the saved one plus later messages, as `load`
+   * replays it. The log stays authoritative, so a failed save only warns. */
   private save() {
     const failed = (error: unknown) => { this.warn(`Could not save the memory view: ${error instanceof Error ? error.message : String(error)}`); };
-    try { void this.enqueue(() => this.store.saveView(JSON.stringify({ parts: this.view.map(p => [p.l, p.i]), merging: this.chat.merging })), failed); }
+    const saved = ({ parts, merging }: Sawtooth) => ({ parts: parts.map(p => [p.l, p.i]), merging });
+    try { void this.enqueue(() => this.store.saveView(JSON.stringify({ ...saved(this.chat), compaction: saved(this.compaction) })), failed); }
     catch (error) { failed(error); }
   }
   private push(i: number) {
@@ -231,15 +239,15 @@ export class Memory {
   onChange(listener: () => void) { this.events.on('change', listener); return () => { this.events.off('change', listener); }; }
   /** The view line covering message `at`. */
   covering(at: number) { return this.chat.covering(at); }
-  /** Returns whether the chat's view or batch state changed. */
+  /** Returns whether either view, or its batch state, changed. */
   private fit(total = this.root.length) {
-    const merging = this.chat.merging;
+    const merging = [this.chat.merging, this.compaction.merging];
     const merged = this.chat.fit(total);
-    this.compaction.fit(total, merged);
+    const compacted = this.compaction.fit(total, merged);
     const owed = this.owed();
     this.peak = owed > 0 ? Math.max(this.peak, owed) : 0;
     this.events.emit('change');
-    return merged || merging !== this.chat.merging;
+    return merged || compacted || merging[0] !== this.chat.merging || merging[1] !== this.compaction.merging;
   }
   private schedule() {
     if (this.scheduled || this.stopped) return;

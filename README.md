@@ -245,7 +245,7 @@ OptChat keeps the recipe's numbers: 512-byte lines, binary merges, the 128,000 �
 | Prompts | The original and 2026-10-08 prompts | The same, lightly adapted, all in `src/prompts.ts`: reports start `[id]`, a note on `[OptChat status]`, "don't poll slow things", the size limit as a ceiling rather than a target | Fit OptChat's tools; the size wording gave less filler with no recall loss (#129) |
 | Compactor instructions | Gets your instructions | Doesn't | An A/B found they added nothing (#112) |
 | Summary size | Strict 512 bytes | Asked for 512, keeps up to 640 without a retry | Saves retries for a little view space |
-| Memory view | Sawtooth, 128,000 → 64,000 bytes | Same, saved to `view.json` and reloaded as it was | |
+| Memory view | Sawtooth, 128,000 → 64,000 bytes | Same, saved to `view.json` with the compactions' view and reloaded as they were | A restart keeps both prompt prefixes cached |
 | Compaction view | Ends at the first unsummarized line | Shows that line as a placeholder and keeps the lines after it | Cutting there hid short lines like an echo's own tool call; summaries scored lower (#101) |
 | Tool-result summaries | Result only | Also sees the raw tool call | Recall 3.88 → 4.22 (#153) |
 | Cache marks | View in 4-line blocks, one mark on the last whole block | Two more marks, 20 and 40 blocks before it | With one mark, a turn that added over 80 lines made the next turn rewrite the whole view; now up to 240 lines still read from cache |

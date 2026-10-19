@@ -12,7 +12,7 @@ An import builds a new memory generation (`memories/<id>/`) and switches `active
 
 ## The `Store` seam
 
-Memory reaches disk through one seam, `Store` in `src/store.ts`: the log, summary nodes, saved view and images, which is what would travel between machines.
+Memory reaches disk through one seam, `Store` in `src/store.ts`: the log, summary nodes, saved view and images, which is what would travel between machines. The saved view (`view.json`) holds the chat's view and the compactions' view, each with its batch state; an older one without the compactions' view refolds it from the chat's, once.
 
 - Runs, recovery journals, imports and their pointer, usage, settings and `AGENTS.md` stay local files.
 - `FileStore` (the layout in the README) is the only store today. Another, such as Postgres, would implement the same few operations.
