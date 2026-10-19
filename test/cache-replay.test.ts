@@ -35,13 +35,14 @@ const text = (kind: string, min: number, max: number) => `${kind} ${createHash('
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function fakeAnthropic() {
-  const cache = new Map<string, { ready: boolean }>(), sent = new Set<string>(), uses: Record<string, Use> = {};
+  const cache = new Map<string, { ready: boolean }>(), sent = new Set<string>(), uses: Record<string, Use> = {}, refused: string[] = [];
   let kind = 'turn';
   const account = (body: Body) => {
     const compaction = body.system?.[0]?.text === COMPACT;
     const blocks: Block[] = [...body.system ?? [], ...body.messages.flatMap((m): Block[] => typeof m.content === 'string' ? [{ text: m.content }] : m.content.map(b => ({ ...b, role: m.role })))];
     const marks = blocks.flatMap((b, k) => 'cache_control' in b ? [k] : []);
-    assert.ok(marks.length <= 4 && !('cache_control' in body), `${marks.length} marks in one request`);
+    // Noted rather than thrown: a compactor error would only be retried, so the test asserts these at its end.
+    if (marks.length > 4 || 'cache_control' in body) refused.push(`${marks.length} block marks${'cache_control' in body ? ' and a top-level one' : ''}`);
     const keys: string[] = [], ends: number[] = [];
     for (const { cache_control: _, ...block } of blocks) {
       const json = JSON.stringify(block);
@@ -76,7 +77,7 @@ function fakeAnthropic() {
   };
   /** Anthropic's cache expired: nothing earlier is live, and the next requests start counting afresh. */
   const expire = () => { cache.clear(); sent.clear(); for (const key of Object.keys(uses)) delete uses[key]; };
-  return { uses, fetch, expire, as: (next: string) => { kind = next; } };
+  return { uses, refused, fetch, expire, as: (next: string) => { kind = next; } };
 }
 
 /** The memory in RAM: persistence isn't under test, and a file store's fsyncs would take most of the run. */
@@ -99,6 +100,8 @@ test('turns and compactions read nearly all their input from the cache, also aft
   const assistant = (content: Extract<AgentMessage, { role: 'assistant' }>['content']): AgentMessage =>
     ({ role: 'assistant', content, api: model.api, provider: 'fake', model: 'claude', stopReason: 'stop', usage: emptyUsage(), timestamp: Date.now() });
   let memory = await open(), previous: AgentMessage[] = [], long = false;
+  // Whatever fails, the open memory's compactions and retry timers stop with the test.
+  t.after(() => memory.close());
   // As index.ts runs a turn: the view is taken once, when every line of it is built; each step logs into memory as it lands.
   for (let turn = 0; turn < 80; turn++) {
     const steps = turn % 8 === 7 ? 50 + Math.floor(rand() * 11) : Math.floor(rand() * 7);
@@ -133,6 +136,7 @@ test('turns and compactions read nearly all their input from the cache, also aft
   // Measured: turns read 100% of what they could (98.1% of all they sent), the turn after a long one 98.5% (39.5%: its view has the
   // long turn's lines new), compactions 98.5% (95.5%), the cold burst 99.3% (91.8%). Compactions miss where a line inside their
   // view changes or a view ends before a sibling's (#194). One view mark reads 0% after a long turn; no gate, 52% in the burst.
+  assert.deepEqual(fake.refused, [], 'Anthropic takes at most 4 marks, and no top-level one beside block marks');
   for (const [kind, use] of [...Object.entries(replay), ['cold restart', fake.uses.compaction] as const])
     assert.ok(use.read >= 0.95 * use.reusable, `${kind}: read ${use.read} of ${use.reusable} reusable characters (${use.sent} sent)`);
 });
