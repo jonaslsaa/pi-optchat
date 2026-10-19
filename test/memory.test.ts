@@ -47,6 +47,19 @@ test('tree covers all history, fits incrementally, and exact originals survive r
   } finally { await memory.close(); removeDir(dir); }
 });
 
+test('zoom returns the built half when the other is not summarized yet, and a bad line lists the roots', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
+  const memory = new Memory(dir, async () => { throw new Error('model unavailable'); }, () => {}, 128000, 8, 60_000);
+  try {
+    memory.append('user', 'A short question.');
+    memory.append('talk', 'long answer '.repeat(100));
+    memory.append('user', 'Thanks.');
+    await memory.settle(AbortSignal.timeout(2000));
+    assert.equal(memory.zoom(0, 2), '0+1|user: A short question.\n1+1|(not summarized yet: zoom it)');
+    assert.throws(() => memory.zoom(1, 2), /No line 1\+2: .*roots: 0\+2, 2\+1\./);
+  } finally { await memory.close(); removeDir(dir); }
+});
+
 test('a turn waits for pending summaries, goes on once they have all failed, and failures keep retrying', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')); let attempts = 0;
   let release = () => {};

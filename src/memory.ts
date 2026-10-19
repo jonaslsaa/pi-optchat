@@ -349,7 +349,7 @@ export class Memory {
    * Paging a message that fits in one page is allowed, but the page says so. */
   zoom(id: number, n: number, offset?: number, limit?: number) {
     if (!Number.isSafeInteger(id) || id < 0 || !Number.isSafeInteger(n) || n < 1 || !Number.isInteger(Math.log2(n)) || id % n || id + n > this.root.length)
-      throw new Error(`No line ${id}+${n}.`);
+      throw new Error(`No line ${id}+${n}: n is a power of 2, id a multiple of n. The tree's roots: ${this.roots() || 'none, the chat is empty'}.`);
     if (n === 1) {
       const { kind, text } = this.root[id], page = Math.min(limit ?? PAGE, PAGE);
       if (!Number.isSafeInteger(page) || page < 1) throw new Error('limit must be a positive integer.');
@@ -366,11 +366,18 @@ export class Memory {
     }
     if (offset !== undefined) throw new Error('offset and limit page one message: use them with n = 1.');
     const l = Math.log2(n) - 1, i = 2 * id / n;
+    // A half not built yet shows as in the view, so the other half still comes back.
     return [0, 1].map(offset => {
-      const part = { l, i: i + offset }, node = this.node(part);
-      if (!node) throw new Error('This range is not summarized yet.');
-      return `${start(part)}+${2 ** l}|${flat(node.text)}`;
+      const part = { l, i: i + offset };
+      return `${start(part)}+${2 ** l}|${flat(this.text(part))}`;
     }).join('\n');
+  }
+  /** The largest whole lines covering the chat, oldest first: one per power of two in the message count. */
+  private roots() {
+    const lines: string[] = [];
+    for (let id = 0, n = 2 ** Math.floor(Math.log2(this.root.length || 1)); n >= 1; n /= 2)
+      if (id + n <= this.root.length) { lines.push(`${id}+${n}`); id += n; }
+    return lines.join(', ');
   }
   /** Original messages containing `text`, ignoring case, newest first, older than message `before`. Never summaries,
    * nor the logged zoom/search calls and results, which only copy memory. */
