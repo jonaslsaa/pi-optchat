@@ -4,6 +4,8 @@ import { FileStore, storeFor, type Saved, type Store } from './store.ts';
 export const NODE = 512;
 export const VIEW = 128_000;
 export const CAP = 30_000;
+/** The most characters of one message a leaf sends the compactor, so a huge paste can't overflow it; zoom still pages through all of it. */
+export const SOURCE = 100_000;
 /** The most characters one zoom into a message returns, so a page stays under the tool output CAP instead of losing its middle. */
 export const PAGE = 25_000;
 export const KINDS = ['user', 'talk', 'tool', 'echo', 'note', 'work'] as const;
@@ -16,13 +18,19 @@ export interface Summary extends Part { text: string; size: number }
  * answers, raw, since its own line is often not built yet (#153). */
 export interface Compression { context: string; source: string; part: Part; historical?: boolean; call?: { i: number; text: string } }
 export type Compressor = (input: Compression, signal: AbortSignal) => Promise<string>;
+/** A compressor throws this when the model itself gives no line for an input (a refusal, an empty reply, 5 cut-off replies):
+ * asked again it fails alike, so the node keeps the start of its source instead of being retried forever (#193). */
+export class Refused extends Error {}
 const key = ({ l, i }: Part) => l * 2 ** 40 + i;
 const UNBUILT = '(not summarized yet: zoom it)';
+const CLIPPED = '(not summarized: zoom it)';
 export const start = ({ l, i }: Part) => i * 2 ** l;
 export const end = (part: Part) => start(part) + 2 ** part.l;
 export const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
 const UNBUILT_BYTES = bytes(UNBUILT);
 export const flat = (s: string) => s.replace(/[\r\n]+/g, ' ');
+/** The first NODE bytes, without a split character at the end. */
+export const cut = (s: string) => Buffer.from(s).subarray(0, NODE).toString('utf8').replace(/\uFFFD+$/, '');
 const lineBytes = (s: string) => bytes(flat(s));
 const notice = (omitted: number) => `\n[${omitted} characters omitted; head and tail retained]\n`;
 const VIEW_OPEN = '<chat>\n';
@@ -286,11 +294,18 @@ export class Memory {
       : [0, 1].map(offset => this.text({ l: part.l - 1, i: 2 * part.i + offset })).join('\n');
     const mergeSource = part.l > 0 ? [0, 1].map(offset => flat(this.text({ l: part.l - 1, i: 2 * part.i + offset }))).join('\n') : source;
     const call = part.l === 0 ? this.callOf(part.i) : undefined;
-    const text = bytes(source) <= NODE ? source : (await this.compress({ context: this.compactionView(part), source: mergeSource, part,
-      historical: this.root.slice(start(part), end(part)).some(entry => !!entry.origin),
-      ...(call ? { call: { i: call.i, text: cap(`tool: ${call.text}`, 4000) } } : {}) }, this.controller.signal)).trim();
+    let text = source;
+    if (bytes(source) > NODE) try {
+      text = (await this.compress({ context: this.compactionView(part), source: cap(mergeSource, SOURCE), part,
+        historical: this.root.slice(start(part), end(part)).some(entry => !!entry.origin),
+        ...(call ? { call: { i: call.i, text: cap(`tool: ${call.text}`, 4000) } } : {}) }, this.controller.signal)).trim();
+      if (!text) throw new Refused('Compactor returned an empty summary.');
+    } catch (error) {
+      if (!(error instanceof Refused) || this.stopped) throw error;
+      text = cut(`${CLIPPED} ${flat(mergeSource)}`);
+      this.warn(`Compactor ${start(part)}+${2 ** part.l}: ${error.message} (kept its start instead)`);
+    }
     if (this.stopped) return;
-    if (!text) throw new Error('Compactor returned an empty summary.');
     const node = { ...part, text, size: lineBytes(text) };
     // A failed node write fails the build, which is retried.
     const written = this.enqueue(() => this.store.appendNode(node), error => { throw error; });

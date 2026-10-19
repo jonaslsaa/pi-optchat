@@ -23,7 +23,7 @@ The README has the summary table. This page has the detail: what changed in each
 
 - 512-byte summary nodes. By default summaries up to 640 bytes are accepted without a retry, as long as they are smaller than what they replace (setting: Summary size tolerance).
 - A memory view that grows a line per message and, past 128,000 bytes, merges in one batch down to 64,000. Between batches it only grows at its end, so each turn reads the last one's view from the cache. The view is saved and reloaded as it was.
-- Binary merges, 8 compression workers by default (setting: Summaries at once), fixed retry delays, 5 shortening attempts, and a 30,000-character tool output cap.
+- Binary merges, 8 compression workers by default (setting: Summaries at once), fixed retry delays, 5 shortening attempts, and a 30,000-character tool output cap. As in UniiChat, a node the model refuses keeps the first 512 bytes of its source instead (#193), and a summarizer is sent at most 100,000 characters of one message; zoom still pages through all of it.
 
 ## Compaction view and scheduling
 

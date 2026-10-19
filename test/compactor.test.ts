@@ -6,13 +6,14 @@ import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { createCompressor } from '../src/compactor.ts';
+import { Refused } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
 
 /** A fake Anthropic model whose calls answer and finish only when the test says so. */
 async function setup() {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-compactor-'));
-  const calls: { source: string; answer: () => void; finish: () => void; fail: (error?: string) => void }[] = [];
+  const calls: { source: string; answer: () => void; finish: () => void; fail: (error?: string, stop?: string) => void }[] = [];
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
   runtime.registerProvider('optchat-test', {
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'anthropic-messages',
@@ -25,7 +26,7 @@ async function setup() {
       stream.push({ type: 'start', partial: message });
       const step = <T>() => { let resolve = (_: T) => {}; return { promise: new Promise<T>(r => { resolve = r; }), resolve }; };
       const answered = step<string | undefined>(), finished = step<void>();
-      calls.push({ source, answer: () => answered.resolve(undefined), fail: (error = 'invalid request') => answered.resolve(error), finish: () => finished.resolve() });
+      calls.push({ source, answer: () => answered.resolve(undefined), fail: (error = 'invalid request', stop?: string) => { message.rawStopReason = stop; answered.resolve(error); }, finish: () => finished.resolve() });
       void (async () => {
         const error = await answered.promise;
         if (error) {
@@ -123,4 +124,13 @@ test('an error that is not transient surfaces at once, and a transient one after
   for (let i = 1; i <= 3; i++) { await settle(); calls[i].fail('terminated'); }
   assert.equal(await dropped, 'terminated');
   assert.equal(calls.length, 4);
+});
+
+test('a refusal the model itself stops with is final, without asking again', { timeout: 5000 }, async () => {
+  const { calls, run, settle } = await setup();
+  const reply = run('a');
+  await settle();
+  calls[0].fail('The model refused to complete the request', 'refusal');
+  await assert.rejects(reply, Refused);
+  assert.equal(calls.length, 1);
 });
