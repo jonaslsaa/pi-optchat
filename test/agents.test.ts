@@ -283,7 +283,7 @@ test('children get the main agent\'s extensions, AGENTS.md files and skills, but
     await until(() => !children.active);
     assert.ok(system.includes('demo-skill'), 'skills are listed like in the main agent');
     assert.ok(system.includes(STEERABLE), 'children are told not to block steering with long commands');
-    assert.ok(system.includes('Subagents run optchat-test/child at thinking minimal: leave a task's model and thinking unset'), 'a delegating child is told the default, so it leaves model unset instead of guessing an id');
+    assert.ok(system.includes('Subagents run optchat-test/child at thinking minimal: leave a task\'s model and thinking unset'), 'a delegating child is told the default, so it leaves model unset instead of guessing an id');
     const order = ['GLOBAL_RULES', 'REPO_RULES', 'PROFILE_RULES'].map(rule => system.lastIndexOf(rule));
     assert.ok(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), 'global, then repo AGENTS.md, then profile instructions last');
   } finally { removeDir(dir); rmSync(join(agentDir, 'settings.json'), { force: true }); rmSync(join(agentDir, 'AGENTS.md'), { force: true }); removeDir(join(agentDir, 'extensions')); removeDir(join(agentDir, 'skills')); }
