@@ -87,7 +87,8 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     for (let attempt = 0; attempt < 5; attempt++) {
       const reply = await answer();
       // A stop reason means the model answered: a refusal or a content filter, which asking again repeats.
-      if (reply.stopReason === 'error' && reply.rawStopReason !== undefined && !isRetryableAssistantError(reply))
+      // A provider's own 'error' stop (Mistral) is a failure on its side, not an answer: a plain error, tried again later.
+      if (reply.stopReason === 'error' && reply.rawStopReason !== undefined && reply.rawStopReason !== 'error' && !isRetryableAssistantError(reply))
         throw new Refused(reply.errorMessage ?? `Compactor stopped: ${reply.rawStopReason}`);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
       // A reply cut off at the token limit, or one that calls a tool, is no summary: ask again.

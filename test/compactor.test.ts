@@ -140,6 +140,14 @@ test('a provider stop that names a network error is asked again, and never kept 
   assert.equal(calls.length, 5);
 });
 
+test("a provider's own 'error' stop is a plain error, not a refusal", { timeout: 5000 }, async () => {
+  const { calls, run, settle } = await setup();
+  const reply = run('a').catch((error: Error) => error);
+  for (let i = 0; i < 3; i++) { await settle(); calls.at(-1)!.fail('Provider stopped with: error', 'error'); } // what pi-ai's Mistral API reports
+  const error = await reply;
+  assert.ok(error instanceof Error && !(error instanceof Refused), 'the summary is tried again later, not kept raw');
+});
+
 test('a refusal the model itself stops with is final, without asking again', { timeout: 5000 }, async () => {
   const { calls, run, settle } = await setup();
   const reply = run('a');
