@@ -42,10 +42,21 @@ function primeFirst() {
     };
   };
 }
+/** Pi's agent loop retries a dropped connection itself; streamSimple doesn't, so a transient error is asked again before it surfaces. */
+export async function retryTransient(ask: () => Promise<AssistantMessage>, onReply: (reply: AssistantMessage) => void,
+  delays: readonly number[] = [1000, 2000], signal?: AbortSignal) {
+  for (let retry = 0; ; retry++) {
+    const reply = await ask();
+    onReply(reply);
+    if (retry >= delays.length || !isRetryableAssistantError(reply)) return reply;
+    await sleep(delays[retry], undefined, { signal });
+  }
+}
+
 /** The model is asked for 512 bytes; `accepted` is the longest line kept without a retry (the profile's summary size tolerance). */
 export function createCompressor(registry: ModelRegistry, choice: () => ModelChoice,
   onUsage: (message: AssistantMessage) => void = () => {}, accepted = () => DEFAULT_SETTINGS.summaryAcceptBytes,
-  retryDelays: readonly number[] = [1000, 2000]): Compressor {
+  retryDelays?: readonly number[]): Compressor {
   const gate = primeFirst();
   return async (input, signal) => {
     const selected = choice();
@@ -72,15 +83,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
         return await stream.result();
       } finally { warmed(false); }
     };
-    // Pi's agent loop retries a dropped connection itself; streamSimple doesn't, so a transient error is asked again before it surfaces.
-    const answer = async () => {
-      for (let retry = 0; ; retry++) {
-        const reply = await ask();
-        onUsage(reply);
-        if (retry >= retryDelays.length || !isRetryableAssistantError(reply)) return reply;
-        await sleep(retryDelays[retry], undefined, { signal });
-      }
-    };
+    const answer = () => retryTransient(ask, onUsage, retryDelays, signal);
     for (let attempt = 0; attempt < 5; attempt++) {
       const reply = await answer();
       // A stop reason means the model answered: a refusal or a content filter, which asking again repeats.

@@ -1,7 +1,7 @@
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
-import { reasoningFor, type ModelChoice } from './compactor.ts';
+import { reasoningFor, retryTransient, type ModelChoice } from './compactor.ts';
 import { HANDOFF } from './prompts.ts';
 import type { RunInfo } from './runs.ts';
 import { textContent } from './transcript.ts';
@@ -30,7 +30,7 @@ function formatEvidence({ run, messages, transcriptError }: HandoffEvidence) {
 
 /** Summarize in one call when possible; otherwise fold chunks with the prior handoff included in the budget. */
 export function createHandoffSummarizer(registry: ModelRegistry, choice: () => ModelChoice,
-  usage: (message: AssistantMessage) => void) {
+  usage: (message: AssistantMessage) => void, retryDelays?: readonly number[]) {
   return async (run: RunInfo, messages: AgentMessage[], descendants: HandoffEvidence[] = []) => {
     const selected = choice(), model = registry.find(selected.provider, selected.model);
     if (!model) throw new Error('Profile compactor model unavailable');
@@ -50,11 +50,10 @@ export function createHandoffSummarizer(registry: ModelRegistry, choice: () => M
       let end = Math.min(transcript.length, offset + available);
       // Keep multibyte characters intact at chunk boundaries.
       while (end < transcript.length && (transcript[end] & 0xc0) === 0x80) end--;
-      const reply = await registry.streamSimple(model, {
+      const reply = await retryTransient(() => registry.streamSimple(model, {
         systemPrompt: HANDOFF,
         messages: [{ role: 'user', timestamp: Date.now(), content: prefix + transcript.subarray(offset, end).toString('utf8') }],
-      }, { reasoning: reasoningFor(model, selected.thinking), maxTokens, signal: AbortSignal.timeout(300_000) }).result();
-      usage(reply);
+      }, { reasoning: reasoningFor(model, selected.thinking), maxTokens, signal: AbortSignal.timeout(300_000) }).result(), usage, retryDelays);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? reply.stopReason);
       if (reply.stopReason === 'length') throw new Error('Handoff hit the model output limit before finishing');
       summary = textContent(reply.content).trim();
