@@ -1,4 +1,5 @@
-import { test } from 'node:test';
+import { test, beforeEach, afterEach } from 'node:test';
+import { startDiagnostics, stopDiagnostics } from '../src/diagnostics.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +10,9 @@ import { createCompressor } from '../src/compactor.ts';
 import { Refused } from '../src/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
+
+beforeEach(() => { startDiagnostics('0.8.9'); });
+afterEach(() => stopDiagnostics());
 
 /** A fake Anthropic model whose calls answer and finish only when the test says so. */
 async function setup() {

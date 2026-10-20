@@ -1,3 +1,5 @@
+import { signalDiagnosticAttributes } from './diagnostics.ts';
+import { modelDiagnostics } from './model-diagnostics.ts';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
@@ -43,6 +45,7 @@ export function createHandoffSummarizer(registry: ModelRegistry, choice: () => M
     // Account for message framing as well as the actual system/user text below.
     const inputBytes = (inputTokens - 256) * 4;
     let summary = '';
+    let modelAttempt = 0;
     for (let offset = 0; offset < transcript.length;) {
       const prefix = `Ending: ${run.handoff?.reason}\nWorking directory: ${run.cwd}\nPrior handoff:\n${summary}\nNext transcript chunk:\n`;
       const available = inputBytes - Buffer.byteLength(HANDOFF) - Buffer.byteLength(prefix);
@@ -50,10 +53,18 @@ export function createHandoffSummarizer(registry: ModelRegistry, choice: () => M
       let end = Math.min(transcript.length, offset + available);
       // Keep multibyte characters intact at chunk boundaries.
       while (end < transcript.length && (transcript[end] & 0xc0) === 0x80) end--;
-      const reply = await retryTransient(() => registry.streamSimple(model, {
-        systemPrompt: HANDOFF,
-        messages: [{ role: 'user', timestamp: Date.now(), content: prefix + transcript.subarray(offset, end).toString('utf8') }],
-      }, { reasoning: reasoningFor(model, selected.thinking), maxTokens, signal: AbortSignal.timeout(300_000) }).result(), usage, retryDelays);
+      const reply = await retryTransient(async () => {
+        const diagnostic = modelDiagnostics(model, { 'optchat.role': 'handoff', 'optchat.agent.id': run.id, 'optchat.model.attempt': ++modelAttempt, 'gen_ai.request.reasoning.level': selected.thinking });
+        const signal = AbortSignal.timeout(300_000);
+        try {
+          const answer = await registry.streamSimple(model, {
+            systemPrompt: HANDOFF,
+            messages: [{ role: 'user', timestamp: Date.now(), content: prefix + transcript.subarray(offset, end).toString('utf8') }],
+          }, { reasoning: reasoningFor(model, selected.thinking), maxTokens, signal, ...diagnostic.options }).result();
+          diagnostic.finish(answer, false, signal.aborted ? signal.reason : undefined, signalDiagnosticAttributes(signal));
+          return answer;
+        } catch (error) { diagnostic.finish(undefined, false, signal.aborted ? signal.reason : error, signalDiagnosticAttributes(signal)); throw error; }
+      }, usage, retryDelays);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? reply.stopReason);
       if (reply.stopReason === 'length') throw new Error('Handoff hit the model output limit before finishing');
       summary = textContent(reply.content).trim();

@@ -51,10 +51,11 @@ test('subagents use Pi compaction at about the refresh threshold on top of the v
   assert.deepEqual(subagentCompaction(200_000, 0), { enabled: true });
 });
 
-test('a turn past its threshold is sent as the refreshed view, its task verbatim and only its last tool call, and memory logs every step once', async () => {
+for (const diagnosticMode of ['0', '1']) test(`a turn past its threshold preserves context and logs every step once with diagnostics=${diagnosticMode}`, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-refresh-'));
-  const oldHome = process.env.OPTCHAT_HOME, oldBudget = process.env.OPTCHAT_REFRESH_AT;
+  const oldHome = process.env.OPTCHAT_HOME, oldBudget = process.env.OPTCHAT_REFRESH_AT, oldDiagnostics = process.env.OPTCHAT_DIAGNOSTICS;
   process.env.OPTCHAT_HOME = dir;
+  process.env.OPTCHAT_DIAGNOSTICS = diagnosticMode;
   // A 1,000-token window at 100%: 4,000 characters, about four of the zooms below plus the task.
   process.env.OPTCHAT_REFRESH_AT = '1';
   const task = `Zoom message 0 eight times, then answer. ${'Context for the task. '.repeat(38)}`;
@@ -110,10 +111,22 @@ test('a turn past its threshold is sent as the refreshed view, its task verbatim
     const kinds = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n')).map(line => (JSON.parse(line) as { kind: string }).kind);
     assert.deepEqual(kinds, ['user', ...Array.from({ length: 8 }, () => ['tool', 'echo']).flat(), 'talk'], 'each step logged once');
     assert.deepEqual(errors, []);
+    const { diagnostics } = await import('../src/diagnostics.ts');
+    await diagnostics().flush();
+    const diagnosticText = diagnosticMode === '1' ? readdirSync(join(dir, 'diagnostics')).map(f => readFileSync(join(dir, 'diagnostics', f), 'utf8')).join('') : '';
+    if (diagnosticMode === '1') {
+      const records = diagnosticText.trim().split('\n').flatMap(line => JSON.parse(line).resourceLogs.flatMap((r: { scopeLogs: { logRecords: { eventName: string; attributes: { key: string; value: { stringValue?: string } }[] }[] }[] }) => r.scopeLogs.flatMap(s => s.logRecords)));
+      const waits = records.filter((r: { eventName: string }) => r.eventName === 'optchat.memory.wait.completed');
+      assert.equal(waits.length, 3);
+      const turns = waits.map((r: { attributes: { key: string; value: { stringValue?: string } }[] }) => r.attributes.find(a => a.key === 'optchat.turn.id')?.value.stringValue);
+      assert.ok(turns.every(Boolean)); assert.equal(new Set(turns).size, 1);
+      assert.ok(!diagnosticText.includes(task)); assert.ok(!diagnosticText.includes(dir));
+    } else assert.equal(diagnostics().enabled, false);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
     if (oldBudget === undefined) delete process.env.OPTCHAT_REFRESH_AT; else process.env.OPTCHAT_REFRESH_AT = oldBudget;
+    if (oldDiagnostics === undefined) delete process.env.OPTCHAT_DIAGNOSTICS; else process.env.OPTCHAT_DIAGNOSTICS = oldDiagnostics;
     removeDir(dir);
   }
 });

@@ -1,3 +1,4 @@
+import { diagnostics, attributeData, storageEvent, errorAttributes, diagnosticCancelled, signalDiagnosticAttributes, type Attributes } from './diagnostics.ts';
 import { EventEmitter } from 'node:events';
 import { FileStore, storeFor, type Saved, type Store } from './store.ts';
 
@@ -114,6 +115,8 @@ export class Memory {
   private readonly busy = new Map<number, Promise<void>>();
   private readonly retryAt = new Map<number, number>();
   private readonly reported = new Set<number>();
+  private readonly diagnosticIdentity: Attributes;
+  private readonly diagnosticAttempts = new Map<number, number>();
   /** Messages without their node, and merges whose halves are built, oldest first, so the scheduler never scans the tree for work (recipe §4). */
   private readonly unbuilt = new Set<number>();
   private readonly merges = new Map<number, Part>();
@@ -147,6 +150,7 @@ export class Memory {
     let saved: Saved;
     if (typeof source === 'string') { const store = new FileStore(source, warn); this.directory = source; this.store = store; saved = store.load(); }
     else ({ directory: this.directory, store: this.store, saved } = source);
+    this.diagnosticIdentity = diagnostics().enabled ? { ...diagnostics().correlation(), 'optchat.memory.generation.id': diagnostics().opaque('memory', this.directory) } : {};
     const log = saved.entries;
     const entries = log.every(isEntry) ? log.sort((a, b) => a.i - b.i) : undefined;
     if (!entries || entries.some((entry, i) => entry.i !== i)) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
@@ -167,7 +171,7 @@ export class Memory {
     if (this.stopped) throw new Error('Memory is closed.');
     if (this.failed) throw new Error(`Memory could not be saved: ${this.failed}`);
     const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}) };
-    void this.enqueue(() => this.store.append(entry), error => {
+    void this.enqueue(() => storageEvent('memory_log', () => this.store.append(entry), this.diagnosticIdentity), error => {
       this.failed ??= error instanceof Error ? error.message : String(error);
       this.warn(`Memory could not be saved: ${this.failed}`);
     });
@@ -224,7 +228,7 @@ export class Memory {
   private save() {
     const failed = (error: unknown) => { this.warn(`Could not save the memory view: ${error instanceof Error ? error.message : String(error)}`); };
     const saved = ({ parts, merging }: Sawtooth) => ({ parts: parts.map(p => [p.l, p.i]), merging });
-    try { void this.enqueue(() => this.store.saveView(JSON.stringify({ ...saved(this.chat), compaction: saved(this.compaction) })), failed); }
+    try { void this.enqueue(() => storageEvent('memory_view', () => this.store.saveView(JSON.stringify({ ...saved(this.chat), compaction: saved(this.compaction) })), this.diagnosticIdentity), failed); }
     catch (error) { failed(error); }
   }
   private push(i: number) {
@@ -269,7 +273,14 @@ export class Memory {
     const run = (part: Part) => {
       const id = key(part);
       if (this.busy.has(id) || (this.retryAt.get(id) ?? 0) > now) return;
-      const promise = this.build(part).catch(error => {
+      const attempt = (this.diagnosticAttempts.get(id) ?? 0) + 1; if (diagnostics().enabled) this.diagnosticAttempts.set(id, attempt);
+      const identity = this.diagnosticIdentity;
+      const diagnostic = diagnostics().begin('summary.attempt', { ...identity, 'optchat.memory.start_index': start(part), 'optchat.memory.message_count': 2 ** part.l, 'optchat.summary.build_attempt': attempt }, null);
+      const promise = diagnostic.run(() => this.build(part)).then(() => { this.diagnosticAttempts.delete(id); diagnostic.end(this.stopped ? 'cancelled' : 'success', this.stopped ? { 'optchat.cancellation.reason': 'shutdown' } : {}); }, error => {
+        diagnostic.end(this.stopped ? 'cancelled' : 'error', this.stopped ? { 'optchat.cancellation.reason': 'shutdown' } : {}, error);
+        if (!this.stopped) diagnostic.run(() => diagnostics().event('optchat.summary.retry.scheduled', { ...identity, 'optchat.memory.start_index': start(part), 'optchat.memory.message_count': 2 ** part.l, 'optchat.summary.build_attempt': attempt, 'optchat.retry.reason': errorAttributes(error)['error.type'] === 'storage' ? 'storage_error' : 'provider_error', 'optchat.retry.delay': this.retryMs / 1000 }, 'WARN'));
+        throw error;
+      }).catch(error => {
         if (this.stopped) return;
         this.lastError = error instanceof Error ? error.message : String(error);
         if (!this.reported.has(id)) { this.reported.add(id); this.warn(`Compactor ${start(part)}+${2 ** part.l}: ${this.lastError}`); }
@@ -310,12 +321,13 @@ export class Memory {
     } catch (error) {
       if (!(error instanceof Refused) || this.stopped) throw error;
       text = cut(`${CLIPPED} ${flat(mergeSource)}`);
+      diagnostics().event('optchat.summary.fallback', { 'optchat.memory.start_index': start(part), 'optchat.memory.message_count': 2 ** part.l, 'optchat.summary.fallback.reason': 'model_refused' }, 'WARN');
       this.warn(`Compactor ${start(part)}+${2 ** part.l}: ${error.message} (kept its start instead)`);
     }
     if (this.stopped) return;
     const node = { ...part, text, size: lineBytes(text) };
     // A failed node write fails the build, which is retried.
-    const written = this.enqueue(() => this.store.appendNode(node), error => { throw error; });
+    const written = this.enqueue(() => storageEvent('summary_node', () => this.store.appendNode(node), this.diagnosticIdentity), error => { throw error; });
     if (written) await written;
     this.tree.set(key(part), node); this.retryAt.delete(key(part)); this.merges.delete(key(part)); this.queueParent(part);
     if (!part.l) { this.unbuilt.delete(part.i); this.chat.built(part.i); this.compaction.built(part.i); }
@@ -349,7 +361,12 @@ export class Memory {
    * node, through failures. As in the recipe, the view may run over budget until pending merges land.
    * 'ahead' (imports) waits until a new message's node would start at once. Due merges count too: messages go first, so a steady
    * stream of them would otherwise take every worker and the views could never merge. */
-  async settle(signal?: AbortSignal, until: 'turn' | 'tree' | 'ahead' = 'turn'): Promise<void> {
+  async settle(signal?: AbortSignal, until: 'turn' | 'tree' | 'ahead' = 'turn', identity: Attributes = {}): Promise<void> {
+    const diagnostic = diagnostics().begin('memory.wait', attributeData(diagnostics().enabled ? this.diagnosticIdentity : {}, identity, { 'optchat.memory.wait.mode': until, 'optchat.memory.pending': this.pending, 'optchat.memory.in_flight': this.busy.size }));
+    try { await diagnostic.run(() => this.wait(signal, until)); diagnostic.end('success', { 'optchat.memory.wait.result': this.stalled ? 'stalled' : 'ready', 'optchat.memory.pending': this.pending, 'optchat.memory.in_flight': this.busy.size }); }
+    catch (error) { diagnostic.end(this.stopped || diagnosticCancelled(signal) ? 'cancelled' : 'error', { ...signalDiagnosticAttributes(signal), ...(this.stopped ? { 'optchat.cancellation.reason': 'shutdown' } : {}), 'optchat.memory.wait.result': this.stopped || diagnosticCancelled(signal) ? 'cancelled' : 'error' }, signal?.aborted ? signal.reason : error); throw error; }
+  }
+  private async wait(signal?: AbortSignal, until: 'turn' | 'tree' | 'ahead' = 'turn'): Promise<void> {
     const done = () => until === 'tree' ? this.ready && this.busy.size === 0 && this.tree.size === this.expectedNodes()
       : until === 'ahead' ? this.unbuilt.size + this.merges.size < this.jobs
       : this.ready || this.stalled;

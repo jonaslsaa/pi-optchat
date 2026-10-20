@@ -5,6 +5,8 @@ import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { COMPACT, compaction, IMPORT_GUIDANCE, tooLong } from './prompts.ts';
 import { bytes, cut, Refused, type Compressor } from './memory.ts';
 import { cachePayload, splitView } from './cache.ts';
+import { diagnostics, diagnosticCancelled, signalDiagnosticAttributes } from './diagnostics.ts';
+import { modelDiagnostics } from './model-diagnostics.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
 
 export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
@@ -49,6 +51,7 @@ export async function retryTransient(ask: () => Promise<AssistantMessage>, onRep
     const reply = await ask();
     onReply(reply);
     if (retry >= delays.length || !isRetryableAssistantError(reply)) return reply;
+    diagnostics().event('optchat.model.retry.scheduled', { 'optchat.retry.reason': 'provider_error', 'optchat.retry.delay': delays[retry] / 1000 });
     await sleep(delays[retry], undefined, { signal });
   }
 }
@@ -69,19 +72,29 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
     const tries: string[] = [];
+    let modelAttempt = 0;
     const ask = async () => {
-      const warmed = prefix ? await gate(prefix, signal) : () => {};
+      const identity = { 'optchat.role': input.historical ? 'import' : 'compactor', 'optchat.model.attempt': ++modelAttempt };
+      const waiting = diagnostics().begin('cache.wait', identity);
+      let warmed: (ok: boolean) => void;
+      try { warmed = prefix ? await waiting.run(() => gate(prefix, signal)) : () => {}; waiting.end(); }
+      catch (error) { waiting.end(diagnosticCancelled(signal) ? 'cancelled' : 'error', signalDiagnosticAttributes(signal), signal.aborted ? signal.reason : error); throw error; }
+      const diagnostic = modelDiagnostics(model, { ...identity, 'gen_ai.request.reasoning.level': thinking });
       try {
         const stream = registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
           // A shared session id is the OpenAI prompt-cache key; SSE because over a websocket Codex would chain unrelated parallel calls on one cached connection.
           sessionId: 'optchat-compactor', transport: 'sse',
           reasoning: thinking, signal, cacheRetention: 'short',
+          ...diagnostic.options,
           onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload, { end: false }) : payload,
         });
         // The cache entry is usable once the model starts answering.
-        for await (const event of stream) if (event.type !== 'start') { warmed(event.type !== 'error'); break; }
-        return await stream.result();
-      } finally { warmed(false); }
+        for await (const event of stream) { diagnostic.observe(event.type); if (event.type !== 'start') { warmed(event.type !== 'error'); break; } }
+        const reply = await stream.result();
+        diagnostic.finish(reply, diagnosticCancelled(signal), signal.aborted ? signal.reason : undefined, signalDiagnosticAttributes(signal));
+        return reply;
+      } catch (error) { diagnostic.finish(undefined, diagnosticCancelled(signal), signal.aborted ? signal.reason : error, signalDiagnosticAttributes(signal)); throw error; }
+      finally { warmed(false); }
     };
     const answer = () => retryTransient(ask, onUsage, retryDelays, signal);
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -92,13 +105,17 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
         throw new Refused(reply.errorMessage ?? `Compactor stopped: ${reply.rawStopReason}`);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
       // A reply cut off at the token limit, or one that calls a tool, is no summary: ask again.
-      if (reply.stopReason === 'length' || reply.content.some(c => c.type === 'toolCall')) continue;
+      if (reply.stopReason === 'length' || reply.content.some(c => c.type === 'toolCall')) {
+        if (attempt < 4) diagnostics().event('optchat.summary.retry.scheduled', { 'optchat.model.attempt': modelAttempt, 'optchat.retry.reason': reply.stopReason === 'length' ? 'output_limit' : 'unexpected_tool' });
+        continue;
+      }
       // The compactions' view shows each line under its id+n| head, which a line can copy.
       const line = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim().replace(/^\d+\+\d+\|\s*/, '');
       if (!line) throw new Refused('Compactor returned no text.');
       tries.push(line);
       // A merge of two short lines can come back nearly as big as both, so a line must also shrink what it replaces.
       if (bytes(line) <= accepted() && bytes(line) < bytes(input.source)) break;
+      if (attempt < 4) diagnostics().event('optchat.summary.retry.scheduled', { 'optchat.model.attempt': modelAttempt, 'optchat.retry.reason': 'summary_too_large' });
       messages.push(reply);
       messages.push({ role: 'user', content: tooLong(bytes(line), cut(line)), timestamp: Date.now() });
     }
