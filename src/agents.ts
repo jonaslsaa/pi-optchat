@@ -23,7 +23,7 @@ import { THINKING } from './profiles.ts';
 export interface LiveRun {
   session: AgentSession; info: RunInfo; updated: number; streaming?: AgentMessage;
   tools: Map<string, { name: string; args: unknown; output?: unknown; started: number }>;
-  pendingReports: string[]; pendingGuidance: string[]; wake?: () => void; completion?: Promise<void>;
+  pendingReports: string[]; pendingGuidance: string[]; wake?: () => void; completion?: Promise<void>; primed?: Promise<unknown>;
   /** Set by the user's interrupt: the queued guidance the run continues with once its current step is aborted; with none, it pauses. */
   interruption?: RunInfo['guidance'];
   /** Messages being steered back into Pi's queue after it was cleared; other queue changes wait for it. */
@@ -97,6 +97,14 @@ export const builtinExtensions = (names: Iterable<string>): InlineExtension[] =>
 export function subagentCompaction(contextWindow: number, fraction: number) {
   if (!(fraction > 0)) return { enabled: true };
   return { enabled: true, reserveTokens: Math.max(16_384, Math.round(contextWindow * (1 - fraction) - VIEW / 4)) };
+}
+/** Waits for `promise`, or until `signal` aborts. */
+async function abortable(promise: Promise<unknown>, signal?: AbortSignal) {
+  let stop = () => {};
+  const aborted = new Promise<void>(resolve => { stop = resolve; });
+  signal?.addEventListener('abort', stop, { once: true });
+  if (signal?.aborted) stop();
+  try { await Promise.race([promise, aborted]); } finally { signal?.removeEventListener('abort', stop); }
 }
 /** Resolves once the session's model starts answering, or its request ends without an answer. */
 const answering = (session: AgentSession) => new Promise<void>(resolve => {
@@ -231,15 +239,13 @@ export class Children {
     // Grouped, the last child of this spawn to finish delivers every report; otherwise each reports on its own.
     const batch = groupReports && !connected ? { ids: launched.map(c => c.info.id), reports: new Map<string, string>() } : undefined;
     // Siblings on one model and directory send the same system prompt, tools and view. Anthropic can't read a cache entry
-    // still being written, so they wait until the first starts answering and read its entry instead of each writing their own.
-    const [first] = launched, same = (live: LiveRun) => live.info.model === first.info.model && live.info.thinking === first.info.thinking && live.info.cwd === first.info.cwd;
-    let primed: Promise<unknown> | undefined = launched.length > 1 && first.session.model?.api === 'anthropic-messages' ? answering(first.session) : undefined;
+    // still being written, so their first requests wait until the first sibling starts answering and read its entry instead.
+    const [first] = launched, answered = launched.length > 1 && first.session.model?.api === 'anthropic-messages' ? answering(first.session) : undefined;
     for (const live of launched) {
       live.batch = batch;
-      const run = () => this.execute(live, `${view}\n\nYour task:\n${live.info.task}`);
-      const work = (live !== first && primed && same(live) ? primed.then(run) : run()).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
+      const work = this.execute(live, `${view}\n\nYour task:\n${live.info.task}`).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
         .finally(() => { this.completions.delete(work); this.changed(); });
-      if (live === first && primed) primed = Promise.race([primed, work]);
+      if (live === first && answered) for (const sibling of launched.slice(1)) if ((['model', 'thinking', 'cwd'] as const).every(k => sibling.info[k] === first.info[k])) sibling.primed = Promise.race([answered, work]);
       this.completions.add(work);
       live.completion = work;
     }
@@ -307,7 +313,12 @@ export class Children {
           event.systemPromptOptions.customPrompt = allowSearch(`${SUBAGENT}\n\n${VIEW_DOC}${memorySearch ? SEARCH_DOC : ''}`, memorySearch);
           event.systemPromptOptions.sections.instructions = instructions;
         });
-        pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
+        pi.on('before_provider_request', async (event, ctx) => {
+          // Set by launch for a sibling's first request; a stop or an interrupt aborts the request, which ends the wait.
+          const live = this.running.get(id), primed = live?.primed;
+          if (live && primed) { live.primed = undefined; await abortable(primed, ctx.signal); }
+          return ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload;
+        });
       }],
     });
     await loader.reload();
