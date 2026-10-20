@@ -127,15 +127,16 @@ test('turns and compactions read nearly all their input from the cache, also aft
   await memory.settle(undefined, 'tree');
   await memory.close();
   const replay = structuredClone(fake.uses);
-  // A restart after the cache expired: a fresh gate, a cold compactions' view, and a burst of tool results starting 8 at once.
+  // A restart after the cache expired: a fresh gate, a cold compactions' view, and a backlog of tool results, 8 summaries at once.
   fake.expire();
   memory = await open();
-  for (let k = 0; k < 8; k++) memory.append('echo', text('echo', 1000, 3000));
+  for (let k = 0; k < 64; k++) memory.append('echo', text('echo', 1000, 3000));
   await memory.settle(undefined, 'tree');
   await memory.close();
-  // Measured: turns read 100% of what they could (98.1% of all they sent), the turn after a long one 98.5% (39.5%: its view has the
-  // long turn's lines new), compactions 98.5% (95.5%), the cold burst 99.3% (91.8%). Compactions miss where a line inside their
-  // view changes or a view ends before a sibling's (#194). One view mark reads 0% after a long turn; no gate, 52% in the burst.
+  // Measured: turns read 100% of what they could (98.1% of all they sent), the turn after a long one 97.9% (37.3%: its view has the
+  // long turn's lines new), compactions 98.4% (95.3%), the cold backlog 98.4% (95.2%). Compactions miss where a line inside their
+  // view changes or a view ends before a sibling's. One view mark reads 0% after a long turn; no gate, 89% in the backlog; messages
+  // built before merges (#194), 73%.
   assert.deepEqual(fake.refused, [], 'Anthropic takes at most 4 marks, and no top-level one beside block marks');
   for (const [kind, use] of [...Object.entries(replay), ['cold restart', fake.uses.compaction] as const])
     assert.ok(use.read >= 0.95 * use.reusable, `${kind}: read ${use.read} of ${use.reusable} reusable characters (${use.sent} sent)`);

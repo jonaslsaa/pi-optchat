@@ -279,14 +279,13 @@ export class Memory {
       }).finally(() => { this.busy.delete(id); this.schedule(); this.events.emit('change'); });
       this.busy.set(id, promise);
     };
-    // A message's node starts once fewer than `jobs` lines before it are unbuilt; a merge, once both halves are built.
-    let ahead = 0;
-    for (const i of this.unbuilt) {
-      if (ahead++ === this.jobs) break;
-      if (this.busy.size >= this.jobs) return;
-      run({ l: 0, i });
-    }
-    for (const part of this.merges.values()) {
+    // A message's node starts once fewer than `jobs` lines before it are unbuilt; a merge, once both halves are built. They start
+    // in the order of the context they end at, a merge first at a tie, as Unii's do (#194): messages first left the merges waiting
+    // through a backlog, so the views ran over budget and changed at every node built, and compactions read about 60% from the cache.
+    const ready: Part[] = [];
+    for (const i of this.unbuilt) { if (ready.length === this.jobs) break; ready.push({ l: 0, i }); }
+    const at = (part: Part) => part.l ? end(part) : part.i;
+    for (const part of [...ready, ...this.merges.values()].sort((a, b) => at(a) - at(b) || b.l - a.l)) {
       if (this.busy.size >= this.jobs) return;
       run(part);
     }

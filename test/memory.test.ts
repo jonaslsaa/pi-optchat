@@ -496,7 +496,11 @@ test('a message\'s node starts once fewer than 8 lines before it are unbuilt, so
     assert.ok(views.every((view, k) => !k || view.startsWith(views[k - 1])), 'each view extends the one before, so they share a cached prefix');
     calls[1].release();
     await new Promise(resolve => setTimeout(resolve, 20));
-    assert.deepEqual(calls.slice(9).filter(c => !c.input.part.l).map(c => c.input.part.i), [9]);
+    // The free worker goes to the merge of messages 0 and 1, which ends earlier in the chat than message 9 (#194).
+    assert.deepEqual(calls.slice(9).map(c => c.input.part), [{ l: 1, i: 0 }]);
+    calls[9].release();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(calls.slice(10).map(c => c.input.part), [{ l: 0, i: 9 }]);
     calls.forEach(c => c.release());
   } finally { calls.forEach(c => c.release()); await memory.close(); removeDir(dir); }
 });
