@@ -76,7 +76,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
           // A shared session id is the OpenAI prompt-cache key; SSE because over a websocket Codex would chain unrelated parallel calls on one cached connection.
           sessionId: 'optchat-compactor', transport: 'sse',
           reasoning: thinking, signal, cacheRetention: 'short',
-          onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload) : payload,
+          onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload, { end: false }) : payload,
         });
         // The cache entry is usable once the model starts answering.
         for await (const event of stream) if (event.type !== 'start') { warmed(event.type !== 'error'); break; }

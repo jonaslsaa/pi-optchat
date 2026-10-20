@@ -36,11 +36,14 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function fakeAnthropic() {
   const cache = new Map<string, { ready: boolean }>(), sent = new Set<string>(), uses: Record<string, Use> = {}, refused: string[] = [];
+  let taskMarks = 0;
   let kind = 'turn';
   const account = (body: Body) => {
     const compaction = body.system?.[0]?.text === COMPACT;
     const blocks: Block[] = [...body.system ?? [], ...body.messages.flatMap((m): Block[] => typeof m.content === 'string' ? [{ text: m.content }] : m.content.map(b => ({ ...b, role: m.role })))];
     const marks = blocks.flatMap((b, k) => 'cache_control' in b ? [k] : []);
+    // A compaction's task is never sent again, so a mark on it would only write it at 1.25× (#197).
+    if (compaction && marks.at(-1) === blocks.length - 1) taskMarks++;
     // Noted rather than thrown: a compactor error would only be retried, so the test asserts these at its end.
     if (marks.length > 4 || 'cache_control' in body) refused.push(`${marks.length} block marks${'cache_control' in body ? ' and a top-level one' : ''}`);
     const keys: string[] = [], ends: number[] = [];
@@ -77,7 +80,7 @@ function fakeAnthropic() {
   };
   /** Anthropic's cache expired: nothing earlier is live, and the next requests start counting afresh. */
   const expire = () => { cache.clear(); sent.clear(); for (const key of Object.keys(uses)) delete uses[key]; };
-  return { uses, refused, fetch, expire, as: (next: string) => { kind = next; } };
+  return { uses, refused, fetch, expire, as: (next: string) => { kind = next; }, taskMarks: () => taskMarks };
 }
 
 /** The memory in RAM: persistence isn't under test, and a file store's fsyncs would take most of the run. */
@@ -111,7 +114,7 @@ test('turns and compactions read nearly all their input from the cache, also aft
     logMessage(memory, task);
     for (let step = 0; ; step++) {
       fake.as(step === 0 && long ? 'turn after a long one' : 'turn');
-      const reply = await registry.streamSimple(model, { messages: convertToLlm(buildContext([], run, view, MASTER, previous)) }, { onPayload: cachePayload }).result();
+      const reply = await registry.streamSimple(model, { messages: convertToLlm(buildContext([], run, view, MASTER, previous)) }, { onPayload: payload => cachePayload(payload) }).result();
       assert.equal(reply.stopReason, 'stop', reply.errorMessage);
       const next = step < steps ? assistant([{ type: 'toolCall', id: `t${step}`, name: 'zoom', arguments: { query: text('tool', 20, 400) } }])
         : assistant([{ type: 'text', text: text('talk', 100, 2500) }]);
@@ -137,6 +140,7 @@ test('turns and compactions read nearly all their input from the cache, also aft
   // long turn's lines new), compactions 98.5% (95.5%), the cold burst 99.3% (91.8%). Compactions miss where a line inside their
   // view changes or a view ends before a sibling's (#194). One view mark reads 0% after a long turn; no gate, 52% in the burst.
   assert.deepEqual(fake.refused, [], 'Anthropic takes at most 4 marks, and no top-level one beside block marks');
+  assert.equal(fake.taskMarks(), 0, 'no compaction marks its task');
   for (const [kind, use] of [...Object.entries(replay), ['cold restart', fake.uses.compaction] as const])
     assert.ok(use.read >= 0.95 * use.reusable, `${kind}: read ${use.read} of ${use.reusable} reusable characters (${use.sent} sent)`);
 });

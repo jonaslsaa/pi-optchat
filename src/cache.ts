@@ -33,8 +33,9 @@ function lastBlock(message: Record<string, unknown>) {
 /** Anthropic: marks on the view (see MARKS) plus a mark at the end of the request, so the next call finds the last one's entry
  * and pays only for the lines after it. The end mark sits on the last block itself rather than as top-level automatic caching:
  * a proxy or setting that gives block marks a 1h TTL makes Anthropic refuse a top-level mark, whose TTL defaults to 5m, on the
- * same block ("Top-level cache_control has ttl='5m' but the target block already has cache_control with ttl='1h'"). */
-export function cachePayload(payload: unknown): unknown {
+ * same block ("Top-level cache_control has ttl='5m' but the target block already has cache_control with ttl='1h'").
+ * `end: false` leaves the end unmarked: a compaction's task is never sent again, so marking it would only write it at 1.25× (#197). */
+export function cachePayload(payload: unknown, { end: markEnd = true } = {}): unknown {
   if (!record(payload) || !Array.isArray(payload.messages)) return payload;
   const messages = payload.messages;
   const view = new Set<unknown>();
@@ -62,7 +63,7 @@ export function cachePayload(payload: unknown): unknown {
   // Pi may end the request with an empty system message carrying settings (effort); it holds nothing to cache.
   const [before, last] = messages.filter(message => !record(message) || message.role !== 'system').slice(-2);
   const turn = isAtWork(last) && record(before) && before.role === 'user' ? lastBlock(before) : undefined;
-  const end = turn ?? endBlock(messages);
+  const end = markEnd ? turn ?? endBlock(messages) : undefined;
   if (end) end.cache_control = { type: 'ephemeral' };
   return payload;
 }
