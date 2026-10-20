@@ -98,6 +98,12 @@ export function subagentCompaction(contextWindow: number, fraction: number) {
   if (!(fraction > 0)) return { enabled: true };
   return { enabled: true, reserveTokens: Math.max(16_384, Math.round(contextWindow * (1 - fraction) - VIEW / 4)) };
 }
+/** Resolves once the session's model starts answering, or its request ends without an answer. */
+const answering = (session: AgentSession) => new Promise<void>(resolve => {
+  const off = session.subscribe(event => {
+    if (event.type === 'message_update' || event.type === 'agent_end' || event.type === 'message_end' && event.message.role === 'assistant') { off(); resolve(); }
+  });
+});
 export class Children {
   private readonly running = new Map<string, LiveRun>();
   readonly history: RunHistory;
@@ -224,10 +230,16 @@ export class Children {
     const launched = await this.track(this.launchBatch({ tasks: runs, cwd, depth, parentId, connected, signal, cancelled }));
     // Grouped, the last child of this spawn to finish delivers every report; otherwise each reports on its own.
     const batch = groupReports && !connected ? { ids: launched.map(c => c.info.id), reports: new Map<string, string>() } : undefined;
+    // Siblings on one model and directory send the same system prompt, tools and view. Anthropic can't read a cache entry
+    // still being written, so they wait until the first starts answering and read its entry instead of each writing their own.
+    const [first] = launched, same = (live: LiveRun) => live.info.model === first.info.model && live.info.thinking === first.info.thinking && live.info.cwd === first.info.cwd;
+    let primed: Promise<unknown> | undefined = launched.length > 1 && first.session.model?.api === 'anthropic-messages' ? answering(first.session) : undefined;
     for (const live of launched) {
       live.batch = batch;
-      const work = this.execute(live, `${view}\n\nYour task:\n${live.info.task}`).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
+      const run = () => this.execute(live, `${view}\n\nYour task:\n${live.info.task}`);
+      const work = (live !== first && primed && same(live) ? primed.then(run) : run()).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
         .finally(() => { this.completions.delete(work); this.changed(); });
+      if (live === first && primed) primed = Promise.race([primed, work]);
       this.completions.add(work);
       live.completion = work;
     }

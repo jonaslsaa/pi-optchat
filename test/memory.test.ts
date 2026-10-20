@@ -274,6 +274,19 @@ test('the view goes in blocks of 4 lines, with marks on its last whole block, 20
   }
 });
 
+test('a subagent\'s task goes in its own block after the view, so siblings with different tasks mark the same view blocks', () => {
+  const view = '<chat>\n' + '0+1|summary of a decision\n'.repeat(200) + '</chat>';
+  const first = (task: string) => {
+    const payload = { messages: [{ role: 'user', content: [{ type: 'text', text: `${view}\n\nYour task:\n${task}` }] }] };
+    return (cachePayload(payload) as { messages: { content: { text: string, cache_control?: unknown }[] }[] }).messages[0].content;
+  };
+  const [a, b] = [first('Review the PR.\nThen report.\nKeep it short.\nNo merge.\nThanks.'), first('Fix #196.')];
+  const viewMarks = (blocks: typeof a) => blocks.slice(0, -1).map(block => [block.text, 'cache_control' in block]);
+  assert.deepEqual(viewMarks(a), viewMarks(b), 'the same view blocks with the same marks');
+  assert.equal(a.slice(0, -1).map(block => block.text).join(''), view);
+  assert.deepEqual(a.at(-1), { type: 'text', text: '\n\nYour task:\nReview the PR.\nThen report.\nKeep it short.\nNo merge.\nThanks.', cache_control: { type: 'ephemeral' } });
+});
+
 test('a request with no status line marks its last block, not the top level, so a 1h block TTL set by a proxy does not clash', () => {
   const view = '<chat>\n' + '0+1|summary of a decision\n'.repeat(200) + '</chat>';
   // As a compactor call ends: the view, then the instruction, then Pi's empty settings message.

@@ -42,9 +42,12 @@ export function cachePayload(payload: unknown): unknown {
     if (!record(message) || message.role !== 'user' || !Array.isArray(message.content)) continue;
     const at = message.content.findIndex((block: unknown) => record(block) && block.type === 'text' && typeof block.text === 'string' && isView(block.text));
     if (at < 0) continue;
-    const pieces = splitView(message.content[at].text), marked = new Set(MARKS.map(back => pieces.length - 2 - back));
+    // A subagent's task follows the view in the same text. Lines never hold a newline, so the first one before </chat> ends the view;
+    // the task goes in its own block, so the view's marks fall on lines its siblings share and they can read one another's entry.
+    const text: string = message.content[at].text, close = text.indexOf('\n</chat>'), end = close < 0 ? text.length : close + '\n</chat>'.length;
+    const pieces = splitView(text.slice(0, end)), marked = new Set(MARKS.map(back => pieces.length - 2 - back));
     const blocks = pieces.map((text, j) => ({ type: 'text', text, ...(marked.has(j) ? { cache_control: { type: 'ephemeral' } } : {}) }));
-    message.content.splice(at, 1, ...blocks);
+    message.content.splice(at, 1, ...blocks, ...(end < text.length ? [{ type: 'text', text: text.slice(end) }] : []));
     for (const block of blocks) view.add(block);
     break;
   }

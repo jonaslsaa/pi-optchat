@@ -885,6 +885,40 @@ test('a task may name its own model and thinking level, kept when tell resumes i
   } finally { await children.close(); removeDir(dir); }
 });
 
+test('on Anthropic, siblings on the first one\'s model wait until it starts answering, so they read its cache entry instead of each writing one', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-siblings-')), asked: string[] = [];
+  let answer = () => {};
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  const model = (id: string) => ({ id, name: id, reasoning: false, input: ['text' as const], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 });
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'anthropic-messages', models: [model('child'), model('other')],
+    streamSimple: (model, context) => {
+      const task = textContent(context.messages.find(m => m.role === 'user')?.content).split('Your task:\n').at(-1) ?? '';
+      asked.push(task);
+      const stream = createAssistantMessageEventStream();
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
+      void (task === 'first' ? new Promise<void>(resolve => { answer = resolve; }) : Promise.resolve()).then(() => {
+        stream.push({ type: 'start', partial: message });
+        stream.push({ type: 'text_delta', contentIndex: 0, delta: 'done', partial: message });
+        stream.push({ type: 'done', reason: 'stop', message }); stream.end();
+      });
+      return stream;
+    },
+  });
+  const children = new Children(new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime),
+    () => ({ provider: 'optchat-test', model: 'child', thinking: 'off' }), () => '', async () => {}, () => {}, join(dir, 'profile'),
+    { createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  try {
+    await children.spawn([{ task: 'first' }, { task: 'second' }, { task: 'third' }, { task: 'own model', model: 'optchat-test/other' }], dir);
+    await until(() => asked.length >= 2);
+    await new Promise(r => setTimeout(r, 100));
+    assert.deepEqual(asked.toSorted(), ['first', 'own model'], 'a sibling on another model sends a different prefix and starts at once');
+    answer();
+    await until(() => !children.active);
+    assert.deepEqual(asked.toSorted(), ['first', 'own model', 'second', 'third']);
+  } finally { answer(); await children.close(); removeDir(dir); }
+});
+
 test('close() does not wait for a spawn that is still waiting for memory to be summarized', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-close-settling-'));
   // A summary that never lands: a failed one would no longer hold the spawn.
