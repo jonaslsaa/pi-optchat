@@ -6,7 +6,7 @@ import {
 import { Editor, Spacer, compositeTuiLine, matchesKey, truncateToWidth, visibleWidth, type Component, type Focusable, type TUI, type TuiMouseEvent, type TuiMouseEventResult } from '@earendil-works/pi-tui';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Children } from './agents.ts';
-import type { RunInfo } from './runs.ts';
+import { isHandingOff, type RunInfo } from './runs.ts';
 import { textContent } from './transcript.ts';
 import { record } from './cache.ts';
 import { elapsed, fit, oneLine } from './inspector.ts';
@@ -164,7 +164,7 @@ export interface AgentViewOptions {
 
 const statusOf = (run: RunInfo, children: Children) => {
   const live = children.live(run.id);
-  if (!live) return run.state;
+  if (!live) return isHandingOff(run) ? 'handing off' : run.state;
   if (run.state === 'stopping') return 'stopping';
   if (run.state === 'waiting') return 'waiting for its agents';
   if (run.state === 'paused') return 'interrupted · waiting for you';

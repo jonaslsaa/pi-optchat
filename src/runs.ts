@@ -38,6 +38,8 @@ export function transition(run: RunInfo, to: RunState) {
 export const isActiveRun = (run: RunInfo) => run.state === 'running' || run.state === 'waiting' || run.state === 'stopping' || run.state === 'paused';
 /** Live and working: a paused run is neither running nor finished. */
 export const isRunning = (run: RunInfo) => isActiveRun(run) && run.state !== 'paused';
+/** A connected run that has ended but whose handoff summary has not reached the main agent yet. */
+export const isHandingOff = (run: RunInfo) => !isActiveRun(run) && !!run.handoff && !run.handoff.delivered;
 function isRun(value: unknown): value is RunInfo {
   return record(value) && ['id', 'task', 'cwd', 'model', 'thinking', 'parentSession'].every(k => typeof value[k] === 'string')
     && typeof value.id === 'string' && /^[a-zA-Z0-9-]+$/.test(value.id)

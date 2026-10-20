@@ -3,7 +3,7 @@ import { clampThinkingLevel, isRetryableAssistantError, type Api, type Assistant
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { COMPACT, compaction, IMPORT_GUIDANCE, tooLong } from './prompts.ts';
-import { bytes, NODE, type Compressor } from './memory.ts';
+import { bytes, cut, Refused, type Compressor } from './memory.ts';
 import { cachePayload, splitView } from './cache.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
 
@@ -83,20 +83,22 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     };
     for (let attempt = 0; attempt < 5; attempt++) {
       const reply = await answer();
+      // A stop reason means the model answered: a refusal or a content filter, which asking again repeats.
+      if (reply.stopReason === 'error' && reply.rawStopReason !== undefined && !isRetryableAssistantError(reply))
+        throw new Refused(reply.errorMessage ?? `Compactor stopped: ${reply.rawStopReason}`);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
       // A reply cut off at the token limit, or one that calls a tool, is no summary: ask again.
       if (reply.stopReason === 'length' || reply.content.some(c => c.type === 'toolCall')) continue;
       // The compactions' view shows each line under its id+n| head, which a line can copy.
       const line = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim().replace(/^\d+\+\d+\|\s*/, '');
-      if (!line) throw new Error('Compactor returned no text.');
+      if (!line) throw new Refused('Compactor returned no text.');
       tries.push(line);
       // A merge of two short lines can come back nearly as big as both, so a line must also shrink what it replaces.
       if (bytes(line) <= accepted() && bytes(line) < bytes(input.source)) break;
       messages.push(reply);
-      const cut = Buffer.from(line).subarray(0, NODE).toString('utf8').replace(/\uFFFD$/, '');
-      messages.push({ role: 'user', content: tooLong(bytes(line), cut), timestamp: Date.now() });
+      messages.push({ role: 'user', content: tooLong(bytes(line), cut(line)), timestamp: Date.now() });
     }
-    if (!tries.length) throw new Error('Compactor returned no whole line in 5 tries.');
+    if (!tries.length) throw new Refused('Compactor returned no whole line in 5 tries.');
     return tries.reduce((a, b) => bytes(a) <= bytes(b) ? a : b);
   };
 }

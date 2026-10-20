@@ -971,3 +971,23 @@ test('a menu agent that finishes before selection is rejected and the menu refre
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
   }
 });
+
+test("Pi's compaction replaces session.messages, yet a connected window still gets every later reply", async () => {
+  const f = await fixture();
+  const events: WindowEvent[] = [];
+  const close = await serveWindows(f.dir, f.children, () => true, async () => {});
+  const client = await connectWindow(f.dir, e => events.push(e), () => {});
+  const replies = () => events.filter(e => e.name === 'message' && e.from === 'agent').map(e => e.text);
+  try {
+    await client.request('start', 'long reply', f.dir);
+    const id = events.find(e => e.name === 'started')!.text;
+    for (const [n, text] of [[2, 'long reply'], [3, 'third']] as const) { await until(() => replies().length === n - 1); await client.request('say', text); }
+    await until(() => replies().length === 3);
+    const session = f.children.live(id)!.session, projection = session.messages;
+    await session.compact(); // Pi assigns a new, shorter projection; retries and context edits do too.
+    assert.ok(session.messages !== projection && session.messages.length < projection.length);
+    await client.request('say', 'after compaction');
+    await until(() => replies().length === 4);
+    assert.equal(replies().at(-1), 'Reply: after compaction');
+  } finally { client.close(); await close(); await f.close(); }
+});

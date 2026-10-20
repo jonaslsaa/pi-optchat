@@ -1,3 +1,4 @@
+import type { ModelChoice } from './compactor.ts';
 import { NODE, start, type Part } from './memory.ts';
 
 // Prompts from Victor Taelin's OptChat recipe, lightly adapted; docs/recipe-differences.md lists the changes.
@@ -70,8 +71,10 @@ further along than it was, and never narrate the process of summarizing
 ("output unseen", "read-only", "unconfirmed") unless that uncertainty is itself
 a fact OptChat must know. If told the line is too long, shorten it. Non-ASCII
 characters cost 2-4 bytes.`;
-/** Spawn tasks may name a model; the ids the model knows from training drift, so the models tool is the source. */
-export const MODELS_HINT = 'When the user names a model family without a version ("Opus", "GPT"), assume the newest one and call models() for its exact id: your training may not know it.';
+/** Names the profile's subagent choice, so the agent has no gap to fill from memory when it spawns: unset means this
+ * model, and the ids it knows from training drift, so the models tool is the only source for a named one. */
+export const modelsHint = ({ provider, model, thinking }: ModelChoice) =>
+  `Subagents run ${provider}/${model} at thinking ${thinking}: leave a task's model and thinking unset for that. Set either one only when the user asks for it. A named model takes its id from models(), never from memory: your training may not know the newest ones, and a family without a version ("Opus", "GPT") means the newest one.`;
 /** Labels the line naming running agents, last in every main-agent request while any run (src/transcript.ts); never stored. */
 export const AT_WORK = '[OptChat status] Agents at work now: ';
 export const MASTER = `You are OptChat, an AI agent that works for one user in a single chat that
@@ -81,7 +84,6 @@ message.
 Do the user's tasks yourself (or delegate to subagents according to the tasks and user preferences), with your tools, following the user's instructions
 at the end of this prompt: who they are, how their files are organized and how
 they want work done. Use subagents when it makes sense and when the user asks for them.
-${MODELS_HINT}
 
 Messages the user sends while you work reach you between tool calls. Subagents
 and computer tasks run in the background; each one's report reaches you as a
@@ -153,7 +155,7 @@ export const IMPORT_GUIDANCE = `Entries marked Historical are imported records, 
 
 // Subagent instructions, joined after the user's own (AGENTS.md etc.): one of the two delegation paragraphs,
 // then STEERABLE, then the connected or plain tell_parent paragraph.
-export const delegation = (maxAgents: number) => `You may delegate parts of your assigned task with spawn when useful. Child reports arrive automatically after your current run ends; the harness keeps you alive to receive them. Never poll, sleep, or wait in a tool for children. Finish your current work and return; you will be prompted with their results. The profile allows ${maxAgents} active agents total. ${MODELS_HINT}`;
+export const delegation = (maxAgents: number, choice: ModelChoice) => `You may delegate parts of your assigned task with spawn when useful. Child reports arrive automatically after your current run ends; the harness keeps you alive to receive them. Never poll, sleep, or wait in a tool for children. Finish your current work and return; you will be prompted with their results. The profile allows ${maxAgents} active agents total. ${modelsHint(choice)}`;
 export const NO_DELEGATION = 'You are at the maximum delegation depth. Complete your task with your own tools.';
 /** Pi hands steering to a run only between tool calls, so one long command keeps the parent and the user from reaching it. */
 export const STEERABLE = 'Never block in a single command for more than about 60 seconds. To wait for something, poll in short separate tool calls (for example one `sleep 30` per call), so messages from your parent or the user can reach you between calls.';

@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Memory, cap, CAP, start, end, bytes, mostDue, type Compression, type Part } from '../src/memory.ts';
+import { Memory, Refused, cap, CAP, SOURCE, NODE, start, end, bytes, mostDue, type Compression, type Part } from '../src/memory.ts';
 import { appendJson, localDay } from '../src/store.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload } from '../src/cache.ts';
@@ -44,6 +44,19 @@ test('tree covers all history, fits incrementally, and exact originals survive r
     assert.deepEqual(memory.root.slice(0, 48).map(e => e.text), originals);
     assert.match(memory.zoom(17, 1), /valuable detail/);
     assert.throws(() => memory.zoom(3, 4), /No line/);
+  } finally { await memory.close(); removeDir(dir); }
+});
+
+test('zoom returns the built half when the other is not summarized yet, and a bad line lists the roots', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
+  const memory = new Memory(dir, async () => { throw new Error('model unavailable'); }, () => {}, 128000, 8, 60_000);
+  try {
+    memory.append('user', 'A short question.');
+    memory.append('talk', 'long answer '.repeat(100));
+    memory.append('user', 'Thanks.');
+    await memory.settle(AbortSignal.timeout(2000));
+    assert.equal(memory.zoom(0, 2), '0+1|user: A short question.\n1+1|(not summarized yet: zoom it)');
+    assert.throws(() => memory.zoom(1, 2), /No line 1\+2: .*roots: 0\+2, 2\+1\./);
   } finally { await memory.close(); removeDir(dir); }
 });
 
@@ -582,6 +595,29 @@ test('incremental view size and pending count match the rendered view across fai
     memory = new Memory(dir, compress, () => {}, 4000, 8, 10);
     assert.equal(memory.pending, 0);
     assert.equal(memory.size, measured(memory));
+  } finally { await memory.close(); removeDir(dir); }
+});
+
+test('a node the model refuses or leaves empty keeps the start of its source instead of being retried, and a leaf sends at most SOURCE characters', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-refused-'));
+  const calls: Compression[] = [], warnings: string[] = [];
+  const compress = async (input: Compression) => {
+    calls.push(input);
+    if (input.source.startsWith('user: refuse')) throw new Refused('The model refused.');
+    return input.source.startsWith('user: empty') ? ' ' : 'summary';
+  };
+  const memory = new Memory(dir, compress, text => warnings.push(text), 4000, 8, 10);
+  try {
+    memory.append('user', `refuse\n${'x'.repeat(600)}`);
+    memory.append('user', `empty ${'y'.repeat(600)}`);
+    memory.append('user', 'z'.repeat(3 * SOURCE));
+    await memory.settle(AbortSignal.timeout(5000), 'tree');
+    assert.equal(memory.node({ l: 0, i: 0 })?.text, `(not summarized: zoom it) user: refuse ${'x'.repeat(NODE - 39)}`);
+    assert.match(memory.node({ l: 0, i: 1 })?.text ?? '', /^\(not summarized: zoom it\) user: empty y+$/);
+    assert.deepEqual(calls.filter(c => c.part.l === 0).map(c => c.part.i), [0, 1, 2], 'each leaf is asked once');
+    assert.ok(calls[2].source.length <= SOURCE);
+    assert.ok(memory.node({ l: 1, i: 0 }), 'the refused leaves still merge');
+    assert.deepEqual(warnings.map(w => w.split(':')[0]), ['Compactor 0+1', 'Compactor 1+1']);
   } finally { await memory.close(); removeDir(dir); }
 });
 
