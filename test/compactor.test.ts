@@ -126,6 +126,20 @@ test('an error that is not transient surfaces at once, and a transient one after
   assert.equal(calls.length, 4);
 });
 
+test('a provider stop that names a network error is asked again, and never kept as a refusal', { timeout: 5000 }, async () => {
+  const { calls, run, settle } = await setup();
+  const network = () => calls.at(-1)!.fail('Provider finish_reason: network_error', 'network_error'); // what pi-ai's OpenAI completions API reports
+  const recovered = run('a');
+  await settle(); network();
+  await settle(); calls[1].answer(); calls[1].finish();
+  assert.equal(await recovered, 'summary of a', 'one network stop is retried and the next reply is used');
+  const down = run('b').catch((error: Error) => error);
+  for (let i = 0; i < 3; i++) { await settle(); network(); }
+  const error = await down;
+  assert.ok(error instanceof Error && !(error instanceof Refused), 'still down after the retries: a plain error, so the summary is tried again later, not given up');
+  assert.equal(calls.length, 5);
+});
+
 test('a refusal the model itself stops with is final, without asking again', { timeout: 5000 }, async () => {
   const { calls, run, settle } = await setup();
   const reply = run('a');
