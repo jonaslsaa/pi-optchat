@@ -706,6 +706,21 @@ test('an interrupt during a tool call continues with the queued message, not a r
   } finally { await children.close(); removeDir(dir); }
 });
 
+test('an interrupt during a tool call, right after taking a message back, still continues with the rest', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-tool-withdraw-interrupt-'));
+  const reports: string[] = [];
+  const { children } = await busyChildren(dir, reports);
+  try {
+    const [id] = await children.spawn([{ task: 'slow tool' }], dir);
+    await until(() => !!children.live(id)?.tools.size);
+    for (const text of ['A.', 'B.', 'C.']) await children.tell(id, text, 'user');
+    assert.equal(children.withdraw(id), 'C.'); // Pi's queue is still being rebuilt with A and B.
+    assert.equal(await children.interrupt(id), 'continued');
+    await until(() => reports.length === 1);
+    assert.match(reports[0], /Now doing: Interrupted by the user:\n\nA\.\n\nB\.$/);
+  } finally { await children.close(); removeDir(dir); }
+});
+
 test('an interrupt keeps a child\'s message already waiting in Pi\'s queue', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-interrupt-report-'));
   const reports: string[] = [];

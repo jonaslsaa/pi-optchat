@@ -390,7 +390,9 @@ export class Children {
       await session.prompt(prompt);
       while (info.state !== 'stopping') {
         if (live.interruption) {
-          const guidance = live.interruption.filter(g => g.state === 'queued');
+          // A message Pi took during the abort (a rebuild of its queue can still be landing) went into a request the abort
+          // cancelled, so it got no reply: it goes in this prompt too. Only a stop's undelivered ones stay out.
+          const guidance = live.interruption.filter(g => g.state !== 'undelivered');
           // Read Pi's queue only once a rebuild has landed, and take the interrupt's messages off it so they arrive once.
           // Until this is done, tell() holds new messages in pendingGuidance, where the turn below or a pause picks them up.
           await live.requeueing;
