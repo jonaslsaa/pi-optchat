@@ -1,4 +1,5 @@
-import { mock, test } from 'node:test';
+import { mock, test, beforeEach, afterEach } from 'node:test';
+import { startDiagnostics, stopDiagnostics } from '../src/diagnostics.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, appendFileSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import fs from 'node:fs';
@@ -17,6 +18,9 @@ import { compaction } from '../src/prompts.ts';
 import type { ToolResultMessage } from '@earendil-works/pi-ai';
 import type { AssistantMessage, SystemMessage, UserMessage } from '@earendil-works/pi-ai';
 import { removeDir } from './support.ts';
+
+beforeEach(() => { startDiagnostics('0.8.9'); });
+afterEach(() => stopDiagnostics());
 
 test('tree covers all history, fits incrementally, and exact originals survive restart', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));

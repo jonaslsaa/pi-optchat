@@ -83,6 +83,10 @@ Subagent and compactor settings are saved per profile and do not follow the main
 
 Compression and subagents make extra model requests with your provider credentials.
 
+## Local diagnostics
+
+Optional metadata-only diagnostics are disabled by default. `OPTCHAT_DIAGNOSTICS=1` writes bounded, best-effort OTLP-compatible JSONL under `$OPTCHAT_HOME/diagnostics/`, outside profile checkpoints. Nothing is exported over the network; prompts, summaries, tool payloads and raw errors are excluded. Start with an isolated development profile. See [diagnostic coverage, privacy and limits](docs/diagnostics.md).
+
 ## Settings
 
 `/optchat settings` opens this profile's settings. Each row shows its value and default, the selected row says what it does and when a change applies, and a change is saved right away to the profile's `config.json`. Defaults follow Victor's recipe, except Previous exchange, Summary size tolerance and Turn refresh threshold.

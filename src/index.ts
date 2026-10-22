@@ -1,3 +1,5 @@
+import { startDiagnostics, stopDiagnostics, diagnostics } from './diagnostics.ts';
+import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
@@ -74,6 +76,7 @@ export default function optchat(pi: ExtensionAPI) {
   let view: string | undefined;
   let prompt = '';
   let runStarted = false;
+  let diagnosticTurn: string | undefined;
   let fault: string | undefined;
   /** Reports not yet in memory. `count`: how many subagent reports the text joins. `batch`: held while the rest of that spawn runs, not sent yet.
    * `steered`: last sent into a running turn, where Esc or a dequeue can clear it from Pi's queue unseen. */
@@ -189,6 +192,11 @@ export default function optchat(pi: ExtensionAPI) {
     createProfile(name); return name;
   };
   const openProfile = async (name: string, ctx: ExtensionContext) => {
+    const diagnostic = diagnostics().begin('profile.open', { 'optchat.profile.id': diagnostics().opaque('profile', name), 'optchat.session.id': ctx.sessionManager.getSessionId(), 'optchat.role': 'main' });
+    try { await diagnostic.run(() => openProfileInner(name, ctx)); diagnostic.end(); }
+    catch (error) { diagnostic.end('error', {}, error); throw error; }
+  };
+  const openProfileInner = async (name: string, ctx: ExtensionContext) => {
     const dir = profilePath(name);
     if (!existsSync(dir)) throw new Error(`Profile ${name} does not exist. Use /optchat profile to create it.`);
     const unlock = await holdProfile(storeFor(dir), dir, name, `${name} · PID ${process.pid} · ${hostname()} · ${ctx.cwd}`, warning => ctx.ui.notify(warning, 'warning'));
@@ -245,6 +253,7 @@ export default function optchat(pi: ExtensionAPI) {
   };
 
   pi.on('session_start', async (_event, ctx) => {
+    startDiagnostics(version, () => ctx.ui.notify('OptChat diagnostics dropped records or stopped writing; chat is unaffected.', 'warning'));
     stopping = false;
     const entries = ctx.sessionManager.getEntries();
     const saved = entries.findLast(e => e.type === 'custom' && e.customType === binding);
@@ -318,7 +327,7 @@ export default function optchat(pi: ExtensionAPI) {
     for (const ms of [0, 250, 1000]) setTimeout(() => title.reapply(), ms).unref();
   });
   pi.on('session_info_changed', () => title.reapply()); // Pi retitles the tab on session renames, just before this.
-  pi.on('session_shutdown', stop);
+  pi.on('session_shutdown', async event => { try { await stop(); } finally { await stopDiagnostics(event.reason); } });
   // Pi shows nothing when a switch is cancelled, so say why and what lets it through.
   const blockSwitch = (command: string, ctx: ExtensionContext) => {
     const children = active?.children, runs = children?.active ? children.ids.flatMap(id => children.live(id)?.info ?? []) : [];
@@ -369,6 +378,7 @@ export default function optchat(pi: ExtensionAPI) {
     return { action: 'continue' };
   });
   const startRun = (ctx: ExtensionContext) => {
+    diagnosticTurn = diagnostics().enabled ? randomUUID() : undefined;
     flush(); run = []; logged = 0; keep = 0; view = undefined; runStarted = true;
     const config = active?.config;
     previous = config?.previousExchange ? previousExchange(ctx.sessionManager.getBranch(), config.previousExchangeKB * 1000) : [];
@@ -443,7 +453,7 @@ export default function optchat(pi: ExtensionAPI) {
         };
         show();
         const unsubscribe = a.memory.onChange(show);
-        try { await a.memory.settle(ctx.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
+        try { await a.memory.settle(ctx.signal, 'turn', diagnosticTurn ? { 'optchat.turn.id': diagnosticTurn } : {}); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
         view = a.memory.render(); // Capture old history before logging the new input.
         flush();
       }
@@ -456,7 +466,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (refresh) {
         const { cut, size } = refresh, began = Date.now();
         ctx.ui.setWorkingMessage(`OptChat: moving this turn's ${Math.round(size / 4000)}k tokens into memory…`);
-        try { flush(); await a.memory.settle(ctx.signal); } finally { ctx.ui.setWorkingMessage(); }
+        try { flush(); await a.memory.settle(ctx.signal, 'turn', diagnosticTurn ? { 'optchat.turn.id': diagnosticTurn } : {}); } finally { ctx.ui.setWorkingMessage(); }
         view = a.memory.render(); keep = cut;
         ctx.ui.notify(`OptChat moved ${Math.round(size / 4000)}k tokens of this turn into memory (${((Date.now() - began) / 1000).toFixed(1)}s).`, 'info');
       }
