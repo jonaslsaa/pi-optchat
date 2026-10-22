@@ -168,8 +168,8 @@ export default function optchat(pi: ExtensionAPI) {
       await closeWindows?.(); closeWindows = undefined;
       await recovery;
       await old.children.close(); flush(); if (!pendingImport(old.dir)) old.inbox.recover(old.memory);
+      // No checkpoint here: a host may kill Pi a second after asking it to stop (#220). The next turn's checkpoint commits what this wrote.
       await old.memory.close(); await checkpoints;
-      await checkpoint(old.dir);
     } finally {
       await old.memory.close(); await old.unlock(); active = undefined;
       run = []; previous = []; logged = 0; keep = 0; view = undefined; runStarted = false; receipts.clear(); prompt = ''; idle = () => true;

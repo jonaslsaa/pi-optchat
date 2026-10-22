@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkpoint } from '../src/checkpoint.ts';
@@ -46,5 +46,21 @@ test('a checkpoint whose commit lands resolves even when git cannot pack afterwa
     writeFileSync(join(dir, 'big.bin'), randomBytes(17_000_000));
     await checkpoint(dir);
     assert.equal(execFileSync('git', ['-C', dir, 'log', '--format=%s'], { encoding: 'utf8' }).trim(), 'Save OptChat memory');
+  } finally { removeDir(dir); }
+});
+
+test('a lock left by a killed git is cleared, but a young one may still be held, so that checkpoint waits for the next', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-checkpoint-'));
+  const commits = () => execFileSync('git', ['-C', dir, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).trim();
+  try {
+    writeFileSync(join(dir, 'a.jsonl'), '{}\n'); await checkpoint(dir);
+    const lock = join(dir, '.git', 'index.lock');
+    appendFileSync(join(dir, 'a.jsonl'), '{}\n'); writeFileSync(lock, '');
+    await checkpoint(dir);
+    assert.equal(commits(), '1');
+    const old = new Date(Date.now() - 11 * 60_000); utimesSync(lock, old, old);
+    await checkpoint(dir);
+    assert.equal(commits(), '2');
+    assert.equal(existsSync(lock), false);
   } finally { removeDir(dir); }
 });

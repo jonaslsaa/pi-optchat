@@ -4,7 +4,7 @@ Profile data lives in `~/.optchat/profiles/<name>/` (override the root with `OPT
 
 ## Git checkpoints
 
-Each profile folder is a local Git repository, committed after each turn and on clean shutdown (memory and config; not runs, HTML, or usage). It has no remote, so it is not a backup. To back up, copy the folder while Pi is closed.
+Each profile folder is a local Git repository, committed after each turn (memory and config; not runs, HTML, or usage). It has no remote, so it is not a backup. To back up, copy the folder while Pi is closed.
 
 ## Import generations
 
