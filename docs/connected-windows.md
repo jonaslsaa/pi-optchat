@@ -8,6 +8,7 @@ If you open the same profile in a second terminal, Pi offers to connect it to th
 
 - Your first message starts a subagent in the second window's working directory. Later messages continue the same conversation.
 - The window looks like a normal Pi chat: replies, tool calls with their output and running time, the working spinner, and reports from the subagent's own agents in the dark box. Ctrl+O expands tool output.
+- Messages you send while the agent works show under the spinner until it reads them, as in Pi. At the editor, Esc interrupts the agent (it goes on with any queued messages, or waits for your next one) and Alt+Up (Alt+Q on Windows) takes the newest queued message back to edit. Both follow your Pi keybindings.
 - The subagent runs inside the original process, which stays the only writer of memory. It appears in the original window's inspector and takes one of the profile's active agent slots (Max active agents, 8 by default). While it is open, the original window can't switch profile or import.
 - The main agent is told when the conversation starts. Use `/tell-main <message>` to message it yourself; the subagent can use `tell_parent`, and the main agent replies with `tell`. Routine turns don't wake the main agent.
 - Text only. For images, give the agent a file path.
@@ -35,7 +36,7 @@ pi --optchat-profile work --optchat-agent 8ab62e89
 This opens that **same agent's session** as a normal Pi chat: its task, previous replies and tool results, then live output. Messages you type are guidance to that agent; a paused agent continues when you send one. `/tell-main` still contacts the main agent.
 
 - The original Pi window stays the only owner: it runs the agent, and reports still go to the agent's parent. Opening the window starts no new agent or model call.
-- **Closing the terminal or `/complete` only detaches.** The agent keeps running. Stop or interrupt it from the main window's **Agents** page, which can open the same agent at the same time, as can other terminals.
+- **Closing the terminal or `/complete` only detaches.** The agent keeps running. Esc interrupts it here as in a connected window; stop it from the main window's **Agents** page, which can open the same agent at the same time, as can other terminals.
 - A finished agent opens for reading, without being restarted.
 - This needs interactive Pi and a running owner window. An unknown ID, or a conversation owned by another connected window, is refused rather than starting a new one.
 - The attached terminal saves no session to resume; run the command again instead. The agent ID is not a Pi session ID.

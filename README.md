@@ -176,7 +176,7 @@ Source paths, selection keys, exactly what is left out, and duplicate rules: [do
 
 Each profile is locked to one Pi process. Open the same profile in a second terminal and Pi offers to connect it to the original window as a subagent.
 
-- Your first message starts a subagent in the second window's working directory; later messages continue it. The window looks like a normal Pi chat.
+- Your first message starts a subagent in the second window's working directory; later messages continue it. The window looks like a normal Pi chat: messages you send while it works queue under the spinner, Esc interrupts, Alt+Up takes the last queued one back.
 - The subagent runs inside the original process, which stays the only writer of memory.
 - `/tell-main <message>` messages the main agent. `/complete` ends the conversation and the compactor writes a handoff for the main agent; closing the window also produces one, marked **interrupted**.
 - Text only. The connection is a local socket restricted to your OS user (on Windows a named pipe, without that restriction; see [Windows](#windows)); no daemon or server.

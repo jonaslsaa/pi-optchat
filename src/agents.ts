@@ -112,6 +112,10 @@ const answering = (session: AgentSession) => new Promise<void>(resolve => {
     if (event.type === 'message_update' || event.type === 'agent_end' || event.type === 'message_end' && event.message.role === 'assistant') { off(); resolve(); }
   });
 });
+
+/** What a run interrupted with messages queued continues with. */
+export const interruptedWith = (texts: string[]) => `Interrupted by the user:\n\n${texts.join('\n\n')}`;
+
 export class Children {
   private readonly running = new Map<string, LiveRun>();
   readonly history: RunHistory;
@@ -407,7 +411,7 @@ export class Children {
           if (!transition(info, 'running')) continue; // A stop during the cleanup wins.
           for (const g of guidance) g.state = 'delivered';
           this.save(info);
-          await session.prompt(`Interrupted by the user:\n\n${guidance.map(g => g.text).join('\n\n')}`);
+          await session.prompt(interruptedWith(guidance.map(g => g.text)));
           continue;
         }
         const paused = info.state === 'paused';

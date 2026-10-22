@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createServer, type Socket } from 'node:net';
-import { createAgentSession, DefaultResourceLoader, SettingsManager, CustomMessageComponent, initTheme, ModelRegistry, ModelRuntime, type ExtensionAPI, type ExtensionContext, type MessageRenderer, type Theme } from '@earendil-works/pi-coding-agent';
-import { TuiMainScreen, type Component, type Terminal } from '@earendil-works/pi-tui';
+import { createAgentSession, DefaultResourceLoader, SettingsManager, CustomMessageComponent, initTheme, ModelRegistry, ModelRuntime, type ExtensionAPI, type TerminalInputHandler, type ExtensionContext, type MessageRenderer, type Theme } from '@earendil-works/pi-coding-agent';
+import { Editor, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, TuiMainScreen, type Component, type Terminal } from '@earendil-works/pi-tui';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { showAgentView } from '../src/agent-view.ts';
 import optchat from '../src/index.ts';
@@ -222,7 +222,7 @@ class OffscreenTerminal implements Terminal {
 }
 const plain = (lines: string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b[\]_][^\x07\x1b]*(\x07|\x1b\\)/g, '');
 
-test('a connected window draws each reply with its tool results, the live turn, and Working vs Waiting for N agents', async () => {
+test('a connected window draws each reply with its tool results, the live turn, Working vs Waiting for N agents, and your queued messages', async () => {
   const f = await fixture();
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = mkdtempSync(join(tmpdir(), 'optchat-home-'));
@@ -234,7 +234,10 @@ test('a connected window draws each reply with its tool results, the live turn, 
   const sent: { content: unknown; details?: { from?: string; turn?: unknown[] } }[] = [];
   const pi = { registerMessageRenderer: (_type: string, r: MessageRenderer) => { renderer = r; }, sendMessage: (m: typeof sent[number]) => { sent.push(m); } } as unknown as ExtensionAPI;
   registerConnectedRenderer(pi);
+  let keys: TerminalInputHandler | undefined, editorText = '';
   const ctx = { cwd: f.dir, shutdown() {}, ui: { setStatus() {}, notify() {}, setWorkingMessage() {}, setTitle() {},
+    onTerminalInput: (handler: TerminalInputHandler) => { keys = handler; return () => {}; },
+    getEditorText: () => editorText, setEditorText: (text: string) => { editorText = text; },
     setWidget: (_key: string, factory?: (tui: TuiMainScreen, theme: Theme) => Component) => { widget?.dispose?.(); widget = factory?.(tui, plainTheme); } } } as unknown as ExtensionContext;
   // What the chat shows for a committed message, drawn through the registered renderer as Pi would.
   const chat = (message: typeof sent[number]) => plain(new CustomMessageComponent({ role: 'custom', customType: 'optchat-connected', content: message.content as string,
@@ -274,6 +277,18 @@ test('a connected window draws each reply with its tool results, the live turn, 
     const bash = turns().map(chat).find(text => text.includes('printf'));
     assert.ok(bash, 'the bash call is in the chat');
     assert.match(bash, /DESCENDANT_TESTS_PASSED_123/, 'a reply and its tool results are one chat entry');
+
+    // While it works, what you send shows under the spinner at once. At the editor, Alt+Up takes the newest back,
+    // and Esc interrupts the agent, which goes on with the rest, now shown as yours in the chat.
+    setKeybindings(new KeybindingsManager({ ...TUI_KEYBINDINGS, 'app.interrupt': { defaultKeys: 'escape' }, 'app.message.dequeue': { defaultKeys: 'alt+up' } }));
+    tui.setFocus(new Editor(tui, { borderColor: text => text, selectList: { selectedPrefix: t => t, selectedText: t => t, description: t => t, scrollInfo: t => t, noMatch: t => t } }));
+    await window.submit('first steer'); await window.submit('second steer');
+    await until(() => /Steering: first steer\s+Steering: second steer/.test(live()));
+    assert.deepEqual(keys?.('\x1b[1;3A'), { consume: true });
+    await until(() => editorText === 'second steer' && !/second steer/.test(live()));
+    assert.deepEqual(keys?.('\x1b'), { consume: true });
+    await until(() => !/Steering/.test(live()) && sent.some(m => m.details?.from === 'user' && /first steer/.test(String(m.content))));
+    assert.equal(f.children.history.records.get(id)?.guidance.some(g => g.text === 'second steer'), false);
   } finally {
     widget?.dispose?.();
     window.close(); await close(); await f.close();
@@ -292,7 +307,7 @@ test('a connected window titles its tab: waiting, working, done, and disconnecte
   let closed = false;
   const pi = { sendMessage() {} } as unknown as ExtensionAPI;
   const ctx = (into: string[]) => ({ cwd: f.dir, shutdown() {},
-    ui: { setStatus() {}, setWidget() {}, notify() {}, setWorkingMessage() {}, setTitle: (title: string) => into.push(title) } }) as unknown as ExtensionContext;
+    ui: { setStatus() {}, setWidget() {}, notify() {}, setWorkingMessage() {}, onTerminalInput: () => () => {}, setTitle: (title: string) => into.push(title) } }) as unknown as ExtensionContext;
   try {
     const window = await openConnectedWindow(pi, ctx(titles), 'win');
     assert.deepEqual(titles, ['↳ win']);

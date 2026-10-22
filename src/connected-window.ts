@@ -1,5 +1,5 @@
-import { getMarkdownTheme, UserMessageComponent, type ExtensionAPI, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
-import { Container, Loader, Markdown, type Component, type TUI } from '@earendil-works/pi-tui';
+import { getMarkdownTheme, keyText, UserMessageComponent, type ExtensionAPI, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
+import { Container, Editor, getKeybindings, Loader, Markdown, Spacer, TruncatedText, TuiAltScreen, TuiMainScreen, type Component, type TUI } from '@earendil-works/pi-tui';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { connectWindow, type LiveState, type WindowEvent } from './window-bridge.ts';
 import { profilePath } from './profiles.ts';
@@ -43,14 +43,15 @@ export function registerConnectedRenderer(pi: ExtensionAPI) {
 
 const toolCalls = (message: AgentMessage) => message.role === 'assistant' ? message.content.flatMap(part => part.type === 'toolCall' ? [part.id] : []) : [];
 
-/** What normally sits at the bottom of Pi's chat while it works: the streaming reply, running tools and the working spinner. */
+/** What normally sits at the bottom of Pi's chat while it works: the streaming reply, running tools, the working spinner and your queued messages. */
 class LiveTurn implements Component {
   private readonly loader: Loader;
   private readonly body = new Container();
+  private readonly queued = new Container();
   private spinning = false;
   turn: AgentMessage[] = [];
   live?: LiveState;
-  constructor(private readonly tui: TUI, theme: Theme) {
+  constructor(readonly tui: TUI, private readonly theme: Theme) {
     this.loader = new Loader(tui, text => theme.fg('accent', text), text => theme.fg('muted', text), 'Working');
     // Running tools show their elapsed time, which only moves when they are redrawn.
     this.timer = setInterval(() => { if (this.live?.tools.length) this.update(); }, 1000); this.timer.unref();
@@ -65,13 +66,21 @@ class LiveTurn implements Component {
     // Waiting with no agents of its own means it is waiting for you, so nothing spins, like an idle Pi.
     const agents = this.live?.agents ?? 0;
     const spin = !!state && statusState(state, agents) === 'working';
-    this.loader.setMessage(state === 'waiting' ? `Waiting for ${agents === 1 ? '1 agent' : `${agents} agents`}` : state === 'stopping' ? 'Stopping' : 'Working');
+    // Owners that send `queued` also take Esc; older ones would drop the connection on it.
+    const interrupt = this.live?.queued ? ` (${keyText('app.interrupt')} to interrupt)` : '';
+    this.loader.setMessage(state === 'waiting' ? `Waiting for ${agents === 1 ? '1 agent' : `${agents} agents`}${interrupt}` : state === 'stopping' ? 'Stopping' : `Working${interrupt}`);
     if (spin && !this.spinning) this.loader.start(); else if (!spin && this.spinning) this.loader.stop();
     this.spinning = spin;
+    // Like Pi's own queue: what you sent shows at once, and leaves this list when the agent reads it into the chat.
+    this.queued.clear();
+    const queued = this.live?.queued ?? [];
+    if (queued.length) this.queued.addChild(new Spacer(1));
+    for (const text of queued) this.queued.addChild(new TruncatedText(this.theme.fg('dim', `Steering: ${text.replace(/\s+/g, ' ')}`), 1, 0));
+    if (queued.length) this.queued.addChild(new TruncatedText(this.theme.fg('dim', `↳ ${keyText('app.message.dequeue')} to edit the last one`), 1, 0));
     this.tui.requestRender();
   }
-  render(width: number) { return [...this.body.render(width), ...(this.spinning ? this.loader.render(width) : [])]; }
-  invalidate() { this.body.invalidate(); this.loader.invalidate(); }
+  render(width: number) { return [...this.body.render(width), ...(this.spinning ? this.loader.render(width) : []), ...this.queued.render(width)]; }
+  invalidate() { this.body.invalidate(); this.loader.invalidate(); this.queued.invalidate(); }
   dispose() { clearInterval(this.timer); this.loader.stop(); }
 }
 
@@ -135,6 +144,23 @@ export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContex
     ctx.ui.setStatus('optchat', `OptChat: ${profile} · connected window · send a task to start`); title('waiting');
     display(`Connected to ${profile}'s original window. Messages here go to one subagent using the profile's subagent model. /tell-main sends a message to the main agent; /complete ends this conversation and sends a handoff. Closing this window interrupts it.`);
   }
+  const failed = (what: string) => (error: unknown) => ctx.ui.notify(`Could not ${what}: ${error instanceof Error ? error.message : String(error)}`, 'error');
+  /** The agent runs in the original window, so Esc and Alt+Up go there; only at the chat's editor, so dialogs and autocomplete keep them. */
+  const unlisten = ctx.ui.onTerminalInput(data => {
+    const tui = liveTurn?.tui, focused = tui instanceof TuiMainScreen || tui instanceof TuiAltScreen ? tui.getFocusedComponent() : undefined;
+    if (ended || !live?.queued || !(focused instanceof Editor) || focused.isShowingAutocomplete() || tui?.hasOverlay()) return;
+    const keys = getKeybindings();
+    if (keys.matches(data, 'app.interrupt') && statusState(live.state, live.agents) === 'working') {
+      connection.request('interrupt').catch(failed('interrupt'));
+      return { consume: true };
+    }
+    if (keys.matches(data, 'app.message.dequeue') && live.queued.length) {
+      connection.request('withdraw').then(text => {
+        if (text !== undefined) ctx.ui.setEditorText([text, ctx.ui.getEditorText()].filter(part => part.trim()).join('\n\n'));
+      }, failed('take the message back'));
+      return { consume: true };
+    }
+  });
   return {
     /** Ended by /complete, by the owner, or by losing the owner: nothing left here to protect from a session switch. */
     get ended() { return ended; },
@@ -150,6 +176,6 @@ export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContex
         ended = true; connection.close(); ctx.shutdown();
       } finally { ctx.ui.setWorkingMessage(); }
     },
-    close() { ended = true; connection.close(); },
+    close() { ended = true; unlisten(); connection.close(); },
   };
 }

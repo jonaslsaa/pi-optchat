@@ -1,19 +1,21 @@
 import { chmodSync } from 'node:fs';
 import { createConnection, createServer, type Socket } from 'node:net';
-import type { Children } from './agents.ts';
+import { interruptedWith, type Children } from './agents.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './cache.ts';
 import { checkSocketPath, isWindows, profileSocket, removeStaleSocket } from './profiles.ts';
 import { textContent } from './transcript.ts';
 import { isActiveRun } from './runs.ts';
 
-type Action = 'list-agents' | 'attach' | 'start' | 'say' | 'tell-main' | 'answer' | 'complete';
+const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'withdraw', 'complete'] as const;
+type Action = typeof ACTIONS[number];
+const isAction = (value: unknown): value is Action => ACTIONS.some(action => action === value);
 interface Request { kind: 'request'; id: number; action: Action; text?: string; cwd?: string; activeOnly?: boolean }
 interface Reply { kind: 'reply'; id: number; error?: string; text?: string }
 /** A tool the subagent is running right now, with its streamed output so far. */
 export interface LiveTool { id: string; name: string; args: unknown; output?: unknown; started: number }
-/** What the subagent is doing between finished messages: its streaming reply and running tools. */
-export interface LiveState { state: string; model: string; streaming?: AgentMessage; tools: LiveTool[]; agents?: number }
+/** What the subagent is doing between finished messages: its streaming reply, running tools, and your messages it has not read yet. */
+export interface LiveState { state: string; model: string; streaming?: AgentMessage; tools: LiveTool[]; agents?: number; queued?: string[] }
 /**
  * `from` marks the conversation itself (your messages and the agent's replies); other messages have no `from`.
  * `message` carries the agent's own messages (replies with tool calls, tool results) so the window can draw them with Pi's components.
@@ -28,7 +30,8 @@ const isMessage = (value: unknown): value is AgentMessage => record(value) && (v
 const isLive = (value: unknown): value is LiveState => record(value) && typeof value.state === 'string' && typeof value.model === 'string'
   && (value.streaming === undefined || isMessage(value.streaming))
   && Array.isArray(value.tools) && value.tools.every(t => record(t) && typeof t.id === 'string' && typeof t.name === 'string' && typeof t.started === 'number')
-  && (value.agents === undefined || typeof value.agents === 'number');
+  && (value.agents === undefined || typeof value.agents === 'number')
+  && (value.queued === undefined || Array.isArray(value.queued) && value.queued.every(text => typeof text === 'string'));
 function parse(value: unknown): Frame {
   if (!record(value)) throw new Error('Invalid window message');
   const name = value.name, action = value.action, from = value.from;
@@ -38,7 +41,7 @@ function parse(value: unknown): Frame {
   if (typeof value.id !== 'number' || !Number.isSafeInteger(value.id)) throw new Error('Invalid request ID');
   if (value.kind === 'reply' && (value.error === undefined || typeof value.error === 'string') && (value.text === undefined || typeof value.text === 'string'))
     return { kind: 'reply', id: value.id, error: value.error, text: value.text };
-  if (value.kind === 'request' && (action === 'list-agents' || action === 'attach' || action === 'start' || action === 'say' || action === 'tell-main' || action === 'answer' || action === 'complete')
+  if (value.kind === 'request' && isAction(action)
     && (value.text === undefined || typeof value.text === 'string') && (value.cwd === undefined || typeof value.cwd === 'string')
     && (value.activeOnly === undefined || typeof value.activeOnly === 'boolean'))
     return { kind: 'request', id: value.id, action, text: value.text, cwd: value.cwd, activeOnly: value.activeOnly as boolean | undefined };
@@ -146,6 +149,13 @@ export async function serveWindows(directory: string, children: Children, availa
               if (text.length > ANSWER_LIMIT) throw new Error(`The reply is over ${ANSWER_LIMIT.toLocaleString('en')} characters; the original Pi window has it in full`);
               send({ kind: 'reply', id: frame.id, text }); return;
             }
+            // Esc and Alt+Up in the window, as agent-view.ts does them in the main one.
+            if (frame.action === 'interrupt') {
+              // The run continues with what was queued in one message; it shows as yours, like each one would.
+              said.add(interruptedWith(children.history.records.get(child)?.guidance.flatMap(g => g.state === 'queued' ? [g.text] : []) ?? []));
+              send({ kind: 'reply', id: frame.id, text: await children.interrupt(child) }); return;
+            }
+            if (frame.action === 'withdraw') { send({ kind: 'reply', id: frame.id, text: children.withdraw(child) }); return; }
             if (frame.action === 'complete') {
               const live = children.live(child);
               if (live) drainMessages(children.retained(child), live.info.task);
@@ -198,7 +208,8 @@ export async function serveWindows(directory: string, children: Children, availa
         streaming: live?.streaming?.role === 'assistant' ? clip(live.streaming) : undefined,
         tools: live ? [...live.tools].map(([id, t]) => ({ id, name: t.name, args: t.args, output: clipOutput(t.output), started: t.started })) : [],
         // A finished child counts until its report has reached this agent, so the agent never looks idle in between.
-        agents: [...children.history.records.values()].filter(run => run.parentId === child && (isActiveRun(run) || children.live(run.id))).length };
+        agents: [...children.history.records.values()].filter(run => run.parentId === child && (isActiveRun(run) || children.live(run.id))).length,
+        queued: info.guidance.flatMap(g => g.state === 'queued' && g.from === 'user' ? [g.text.slice(0, 1000)] : []) };
       if (!fits(state)) state = { ...state, streaming: undefined, tools: state.tools.map(t => ({ ...t, args: {}, output: undefined })) };
       const status = JSON.stringify(state);
       if (status !== lastStatus) { lastStatus = status; send({ kind: 'event', name: 'status', text, live: state }); }
