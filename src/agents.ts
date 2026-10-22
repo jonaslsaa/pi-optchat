@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, getAgentDir, type AgentSession, type AgentSessionEvent, type ExtensionAPI, type InlineExtension, type ModelRegistry } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, getAgentDir, loadProjectContextFiles, parseArgs, type AgentSession, type AgentSessionEvent, type ExtensionAPI, type InlineExtension, type ModelRegistry } from '@earendil-works/pi-coding-agent';
 import * as sdk from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { StringEnum, type Api, type Model } from '@earendil-works/pi-ai';
@@ -117,6 +117,11 @@ const answering = (session: AgentSession) => new Promise<void>(resolve => {
 export const INTERRUPTED = 'Interrupted by the user:\n\n';
 const interruptedWith = (texts: string[]) => `${INTERRUPTED}${texts.join('\n\n')}`;
 
+const noContextFiles = parseArgs(process.argv.slice(2)).noContextFiles === true;
+/** Pi reads AGENTS.md/CLAUDE.md only at session start and /reload; re-reading them each run picks up edits. Off under `-nc`, like Pi. */
+export function refreshContextFiles(options: { contextFiles: Array<{ path: string; content: string }> }, cwd: string) {
+  if (!noContextFiles) options.contextFiles = loadProjectContextFiles({ cwd, agentDir: getAgentDir() });
+}
 export class Children {
   private readonly running = new Map<string, LiveRun>();
   readonly history: RunHistory;
@@ -303,7 +308,6 @@ export class Children {
     thinking?: ModelChoice['thinking']; sessionManager: SessionManager }) {
     const { id, directory, depth, parentId, connected } = o;
     const { subagentLevels, maxAgents, memorySearch } = this.settings, delegates = depth < subagentLevels;
-    const instructions = [this.instructions(), delegates ? delegation(maxAgents, this.choice()) : NO_DELEGATION, STEERABLE, connected ? CONNECTED : NOT_CONNECTED].filter(Boolean).join('\n\n');
     // The user's settings list their installed packages; a copy in memory keeps the child from writing them back.
     const settingsManager = SettingsManager.inMemory({ ...SettingsManager.create(directory, getAgentDir()).getSettings(),
       compaction: subagentCompaction(o.model.contextWindow, refreshFraction(this.settings.refreshAt)), cacheWarming: 'off' });
@@ -314,9 +318,11 @@ export class Children {
         const provider = this.registry.getRegisteredProviderConfig(o.model.provider);
         if (provider) pi.registerProvider(o.model.provider, provider);
         // Same prompt as the main agent (AGENTS.md files, skills, cwd); only the OptChat preamble differs.
+        // Read every run, so edits reach a live child's next run (after a pause, or a connected window's next message); Pi sends only the changed sections.
         pi.on('before_agent_start', event => {
           event.systemPromptOptions.customPrompt = allowSearch(`${SUBAGENT}\n\n${VIEW_DOC}${memorySearch ? SEARCH_DOC : ''}`, memorySearch);
-          event.systemPromptOptions.sections.instructions = instructions;
+          event.systemPromptOptions.sections.instructions = [this.instructions(), delegates ? delegation(maxAgents, this.choice()) : NO_DELEGATION, STEERABLE, connected ? CONNECTED : NOT_CONNECTED].filter(Boolean).join('\n\n');
+          refreshContextFiles(event.systemPromptOptions, directory);
         });
         pi.on('before_provider_request', async (event, ctx) => {
           // Set by launch for a sibling's first request; a stop or an interrupt aborts the request, which ends the wait.

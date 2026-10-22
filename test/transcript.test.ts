@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type ImageContent, type TextContent, type UserMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, getAgentDir, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { asUser, buildContext, PREVIOUS_EXCHANGE, previousExchange, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from '../src/transcript.ts';
@@ -300,9 +300,9 @@ test('another extension\'s shown custom message starts a turn and stays in memor
   }
 });
 
-test('main agent keeps Pi\'s AGENTS.md files and skills, with profile instructions last', async () => {
+test('main agent keeps Pi\'s AGENTS.md files and skills, with profile instructions last, and picks up AGENTS.md edits on the next run', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-prompt-'));
-  const agentDir = join(dir, 'agent');
+  const agentDir = getAgentDir(); // Pi's CLI loads from here too, and OptChat re-reads AGENTS.md files from it each run.
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
@@ -345,10 +345,13 @@ test('main agent keeps Pi\'s AGENTS.md files and skills, with profile instructio
     assert.ok(system.includes('demo-skill'), 'skills are listed');
     const order = ['GLOBAL_RULES', 'REPO_RULES', 'PROFILE_RULES'].map(rule => system.indexOf(rule));
     assert.ok(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), 'global, then repo AGENTS.md, then profile instructions last');
+    writeFileSync(join(dir, 'AGENTS.md'), 'REPO_RULES_V2');
+    await session.prompt('Again.');
+    assert.ok(systems.at(-1)?.includes('REPO_RULES_V2'), 'an AGENTS.md edit reaches the next run without /reload');
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
-    removeDir(dir);
+    removeDir(dir); rmSync(join(agentDir, 'AGENTS.md'), { force: true }); removeDir(join(agentDir, 'skills'));
   }
 });
 

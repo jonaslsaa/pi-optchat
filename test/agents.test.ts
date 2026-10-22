@@ -289,6 +289,46 @@ test('children get the main agent\'s extensions, AGENTS.md files and skills, but
   } finally { removeDir(dir); rmSync(join(agentDir, 'settings.json'), { force: true }); rmSync(join(agentDir, 'AGENTS.md'), { force: true }); removeDir(join(agentDir, 'extensions')); removeDir(join(agentDir, 'skills')); }
 });
 
+test('a live child picks up AGENTS.md and profile instruction edits on its next run, without /reload', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-context-refresh-'));
+  let profile = 'PROFILE_V1', system = '', calls = 0;
+  writeFileSync(join(dir, 'AGENTS.md'), 'REPO_V1');
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+  runtime.registerProvider('optchat-test', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'child', name: 'Synthetic child', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple: (model, context, options) => {
+      // Every system message the request carries, so a section Pi patches in after a change counts too.
+      system = JSON.stringify(context.messages.filter(m => m.role === 'system'));
+      const first = ++calls === 1, stream = createAssistantMessageEventStream();
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'done' }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
+      void (async () => {
+        stream.push({ type: 'start', partial: message });
+        // The first run works until the user interrupts it, so the child stays live and paused.
+        if (first) await new Promise<void>(resolve => { options?.signal?.addEventListener('abort', () => resolve(), { once: true }); if (options?.signal?.aborted) resolve(); });
+        if (options?.signal?.aborted) { message.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: message }); }
+        else stream.push({ type: 'done', reason: 'stop', message });
+        stream.end();
+      })();
+      return stream;
+    },
+  });
+  const children = new Children(new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'minimal' }), () => profile,
+    async () => {}, () => {}, join(dir, 'profile'), { settings: nested, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+  try {
+    const [id] = await children.spawn([{ task: 'work' }], dir);
+    await until(() => calls === 1);
+    assert.ok(system.includes('REPO_V1') && system.includes('PROFILE_V1'));
+    assert.equal(await children.interrupt(id), 'paused');
+    await until(() => children.history.records.get(id)?.state === 'paused');
+    writeFileSync(join(dir, 'AGENTS.md'), 'REPO_V2'); profile = 'PROFILE_V2';
+    await children.tell(id, 'Go on.', 'user');
+    await until(() => !children.active);
+    assert.ok(system.includes('REPO_V2'), 'the edited AGENTS.md reaches the next run');
+    assert.ok(system.includes('PROFILE_V2'), 'the edited profile instructions reach the next run');
+  } finally { await children.close(); removeDir(dir); }
+});
+
 test('children can message their parent mid-run: the main agent, an idle parent, or a busy one', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-tell-parent-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
