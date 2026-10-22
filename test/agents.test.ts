@@ -518,13 +518,17 @@ async function busyChildren(dir: string, reports: string[], options: { settings?
       asked.push(typed);
       const stream = createAssistantMessageEventStream();
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `Now doing: ${typed.at(-1)}` }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
+      // A 'slow tool' task first works in a long bash call.
+      if (textContent(context.messages.find(m => m.role === 'user')?.content ?? '').endsWith('slow tool') && !context.messages.some(m => m.role === 'toolResult')) {
+        message.content = [{ type: 'toolCall', id: 'slow', name: 'bash', arguments: { command: 'sleep 30' } }]; message.stopReason = 'toolUse';
+      }
       void (async () => {
         stream.push({ type: 'start', partial: message });
-        if (!typed.length) await new Promise<void>(resolve => {
+        if (!typed.length && message.stopReason !== 'toolUse') await new Promise<void>(resolve => {
           options?.signal?.addEventListener('abort', () => resolve(), { once: true }); if (options?.signal?.aborted) resolve();
         });
         if (options?.signal?.aborted) { message.stopReason = 'aborted'; stream.push({ type: 'error', reason: 'aborted', error: message }); }
-        else stream.push({ type: 'done', reason: 'stop', message });
+        else stream.push({ type: 'done', reason: message.stopReason === 'toolUse' ? 'toolUse' : 'stop', message });
         stream.end();
       })();
       return stream;
@@ -579,7 +583,8 @@ test('a message sent while an interrupt is still settling is not lost; a stop du
     // Ctrl+X lands while the interrupt is clearing Pi's queue.
     await children.tell(stopped, 'Use the cache.', 'user');
     const session = children.live(stopped)!.session, clear = session.clearQueue.bind(session);
-    session.clearQueue = () => { void children.stop(stopped); return clear(); };
+    let clears = 0; // The interrupt clears Pi's queue once before its abort; the run clears it again as it settles.
+    session.clearQueue = () => { if (++clears === 2) void children.stop(stopped); return clear(); };
     await children.interrupt(stopped);
     await until(() => children.history.records.get(stopped)?.state === 'stopped');
     assert.ok(!asked.flat().some(text => text.startsWith('Interrupted by the user:')), 'no turn starts after the stop');
@@ -684,6 +689,20 @@ test('taking back a message whose text is queued twice keeps the queue and its r
     const session = children.live(id)!.session;
     await until(() => session.getSteeringMessages().length === 2);
     assert.deepEqual(children.history.records.get(id)?.guidance.map(g => g.text), [...session.getSteeringMessages()]);
+  } finally { await children.close(); removeDir(dir); }
+});
+
+test('an interrupt during a tool call continues with the queued message, not a request the abort cancels', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-tool-interrupt-'));
+  const reports: string[] = [];
+  const { children } = await busyChildren(dir, reports);
+  try {
+    const [id] = await children.spawn([{ task: 'slow tool' }], dir);
+    await until(() => !!children.live(id)?.tools.size);
+    await children.tell(id, 'Summarize instead.', 'user');
+    assert.equal(await children.interrupt(id), 'continued');
+    await until(() => reports.length === 1);
+    assert.match(reports[0], /Now doing: Interrupted by the user:\n\nSummarize instead\.$/);
   } finally { await children.close(); removeDir(dir); }
 });
 
