@@ -55,6 +55,25 @@ test('retain the exact last answer and its requests, excluding prior working con
   assert.equal(final.content[0].type, 'thinking', 'the saved transcript must not be mutated');
 });
 
+test('a run another extension started with a hidden custom message is that turn\'s input, and carries the view', () => {
+  // As pi-subagents reports a finished background subagent: a hidden custom message and a turn, with nothing else in it.
+  const notice: AgentMessage = { role: 'custom', customType: 'subagent-notify', content: 'Background task completed: Scout.', display: false, timestamp: 1 };
+  const view = '<chat>\nsummary\n</chat>';
+  const wake = buildContext([], [notice], view, 'instructions');
+  assert.deepEqual(wake.map(m => m.role), ['system', 'custom']);
+  assert.ok(wake[1].role === 'custom');
+  assert.equal(textContent(wake[1].content), `${view}\n\n\nBackground task completed: Scout.`);
+  // With an earlier exchange to replay, the view keeps its place at the front of the cached prefix.
+  const previous = [user('Earlier'), answer('Earlier answer')];
+  const replayed = buildContext([], [notice], view, 'instructions', previous);
+  assert.deepEqual(replayed.map(m => m.role), ['system', 'user', 'assistant', 'custom']);
+  assert.ok(replayed[1].role === 'user');
+  assert.match(textContent(replayed[1].content), new RegExp('^' + view.replaceAll(/[.[\]]/g, '\\$&')));
+  assert.equal(replayed.at(-1), notice, 'the notice is passed on as Pi wrote it');
+  // A run with neither a request nor a notice still has nothing to answer, and must refuse.
+  assert.throws(() => buildContext([], [], view, 'instructions', previous), /no current user message/);
+});
+
 test('unsuccessful or unsettled runs preserve the earlier completed exchange', () => {
   const completed = [user('Earlier'), answer('Earlier answer')];
   for (const reason of ['error', 'aborted', 'length', 'toolUse'] as const) {
@@ -293,6 +312,55 @@ test('another extension\'s shown custom message starts a turn and stays in memor
     const after = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n').map(line => JSON.parse(line)));
     assert.ok(after.some(entry => entry.kind === 'user' && entry.text === 'Plan the change.'));
     assert.ok(!after.some(entry => entry.kind === 'user' && entry.text.includes('PLAN MODE')));
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    removeDir(dir);
+  }
+});
+
+test('a hidden custom message that starts a turn on its own is answered, not refused as a run with no user message', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-wake-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  const captured: Context['messages'][] = [];
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    saveConfig(profilePath('fixture'), { ...loadConfig(profilePath('fixture')), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
+      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+    runtime.registerProvider('fixture', {
+      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+      streamSimple(model, context) {
+        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+        if (!compression) captured.push(context.messages.filter(m => m.role !== 'system'));
+        const reply = answer(compression ? 'Summary.' : `Answer to: ${textContent(context.messages.at(-1)?.content).split('</chat>').at(-1)?.trim()}`);
+        reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
+        const stream = createAssistantMessageEventStream();
+        stream.push({ type: 'done', reason: 'stop', message: reply }); stream.end();
+        return stream;
+      },
+    });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.inMemory(dir);
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
+      resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom'] })).session;
+    await session.bindExtensions({});
+    // As pi-subagents wakes the parent when a background subagent finishes: a notice the user never sees, and nothing else.
+    const notice = 'Background task completed: Scout found three files.';
+    await session.sendCustomMessage({ customType: 'subagent-notify', content: notice, display: false }, { triggerTurn: true });
+    await session.agent.waitForIdle();
+    assert.equal(session.getLastAssistantText(), `Answer to: ${notice}`);
+    // Pi sends a custom message to the model as a user message, so the notice is what this turn answers.
+    assert.deepEqual(captured.at(-1)!.map(m => m.role), ['user']);
+    assert.equal(textContent(captured.at(-1)![0].content).split('</chat>').at(-1)?.trim(), notice);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
