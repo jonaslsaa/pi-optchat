@@ -113,8 +113,9 @@ const answering = (session: AgentSession) => new Promise<void>(resolve => {
   });
 });
 
-/** What a run interrupted with messages queued continues with. */
-export const interruptedWith = (texts: string[]) => `Interrupted by the user:\n\n${texts.join('\n\n')}`;
+/** What a run interrupted with messages queued continues with: the user's interrupt, so windows show it as theirs. */
+export const INTERRUPTED = 'Interrupted by the user:\n\n';
+const interruptedWith = (texts: string[]) => `${INTERRUPTED}${texts.join('\n\n')}`;
 
 export class Children {
   private readonly running = new Map<string, LiveRun>();

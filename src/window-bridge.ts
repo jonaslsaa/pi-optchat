@@ -1,6 +1,6 @@
 import { chmodSync } from 'node:fs';
 import { createConnection, createServer, type Socket } from 'node:net';
-import { interruptedWith, type Children } from './agents.ts';
+import { INTERRUPTED, type Children } from './agents.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './cache.ts';
 import { checkSocketPath, isWindows, profileSocket, removeStaleSocket } from './profiles.ts';
@@ -150,11 +150,7 @@ export async function serveWindows(directory: string, children: Children, availa
               send({ kind: 'reply', id: frame.id, text }); return;
             }
             // Esc and Alt+Up in the window, as agent-view.ts does them in the main one.
-            if (frame.action === 'interrupt') {
-              // The run continues with what was queued in one message; it shows as yours, like each one would.
-              said.add(interruptedWith(children.history.records.get(child)?.guidance.flatMap(g => g.state === 'queued' ? [g.text] : []) ?? []));
-              send({ kind: 'reply', id: frame.id, text: await children.interrupt(child) }); return;
-            }
+            if (frame.action === 'interrupt') { send({ kind: 'reply', id: frame.id, text: await children.interrupt(child) }); return; }
             if (frame.action === 'withdraw') { send({ kind: 'reply', id: frame.id, text: children.withdraw(child) }); return; }
             if (frame.action === 'complete') {
               const live = children.live(child);
@@ -185,7 +181,8 @@ export async function serveWindows(directory: string, children: Children, availa
         const message = displayable[cursor++];
         let text = message.role === 'toolResult' ? '' : textContent(message.content);
         if (message.role === 'user' && firstUser) { text = task; firstUser = false; said.add(task.trim()); }
-        if (message.role === 'user') { if (text) send({ kind: 'event', name: 'message', from: said.has(text.trim()) ? 'user' : undefined, text: shorten(text, 200_000) }); continue; }
+        // An interrupt, from any view, continues with your queued messages, so it shows as yours.
+        if (message.role === 'user') { if (text) send({ kind: 'event', name: 'message', from: said.has(text.trim()) || text.startsWith(INTERRUPTED) ? 'user' : undefined, text: shorten(text, 200_000) }); continue; }
         const clipped = clip(message);
         if (fits(clipped)) send({ kind: 'event', name: 'message', from: message.role === 'assistant' ? 'agent' : undefined, text: shorten(text, 200_000), message: clipped });
         else if (text) send({ kind: 'event', name: 'message', from: 'agent', text: shorten(text, 200_000) });
