@@ -5,7 +5,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './cache.ts';
 import { checkSocketPath, isWindows, profileSocket, removeStaleSocket } from './profiles.ts';
 import { textContent } from './transcript.ts';
-import { isActiveRun } from './runs.ts';
+import { isActiveRun, type RunInfo } from './runs.ts';
 
 const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'withdraw', 'complete'] as const;
 type Action = typeof ACTIONS[number];
@@ -100,7 +100,6 @@ export async function serveWindows(directory: string, children: Children, availa
     connections.add(socket);
     let child: string | undefined, attached = false, cursor = 0, firstUser = true, lastStatus = '', ending = false;
     let finalMessages: AgentMessage[] | undefined;
-    const said = new Set<string>(); // Main-agent guidance and child reports reach the session as user messages too.
     const controller = new AbortController();
     let queue = Promise.resolve();
     const track = (promise: Promise<void>) => { work.add(promise); void promise.finally(() => work.delete(promise)).catch(() => {}); };
@@ -127,13 +126,11 @@ export async function serveWindows(directory: string, children: Children, availa
               throw new Error(`Subagent ${id} is no longer available in the menu. Refresh and choose a live agent.`);
             const live = children.live(id);
             const messages = children.retained(id);
-            said.add(info.task.trim());
             // This socket borrows the existing session, never its lifetime, slot or report destination.
             // Other views (the main window's Agents page, other terminals) stay open alongside it.
             attached = true; child = id; finalMessages = live ? undefined : messages;
-            for (const guidance of info.guidance) if (guidance.from === 'user') said.add(guidance.text.trim());
             send({ kind: 'event', name: 'started', text: child });
-            drainMessages(messages, info.task);
+            drainMessages(messages, info);
           } else if (frame.action === 'start') {
             if (child) throw new Error('This window already has a conversation');
             if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
@@ -150,18 +147,24 @@ export async function serveWindows(directory: string, children: Children, availa
               send({ kind: 'reply', id: frame.id, text }); return;
             }
             // Esc and Alt+Up in the window, as agent-view.ts does them in the main one.
-            if (frame.action === 'interrupt') { send({ kind: 'reply', id: frame.id, text: await children.interrupt(child) }); return; }
+            if (frame.action === 'interrupt') {
+              // Reply once the abort has started, not when it ends, so a tool that ignores it can't hold up this window.
+              // interrupt() throws before it starts the abort, so a refusal is already settled and wins the race.
+              const interrupting = children.interrupt(child);
+              track(interrupting.then(() => {}));
+              send({ kind: 'reply', id: frame.id, text: await Promise.race([interrupting, undefined]) }); return;
+            }
             if (frame.action === 'withdraw') { send({ kind: 'reply', id: frame.id, text: children.withdraw(child) }); return; }
             if (frame.action === 'complete') {
               const live = children.live(child);
-              if (live) drainMessages(children.retained(child), live.info.task);
+              if (live) drainMessages(children.retained(child), live.info);
               ending = true;
               if (!attached) track(children.finish(child, 'complete').then(() => {}));
               send({ kind: 'event', name: 'finished', text: attached ? 'Detached. The background agent remains with its original parent.'
                 : 'Conversation ended by you. The original window is stopping remaining work and preparing the handoff.' });
             } else {
               if (!frame.text?.trim()) throw new Error('Message is empty');
-              if (frame.action === 'say') { said.add(frame.text.trim()); await children.tell(child, frame.text, 'user'); }
+              if (frame.action === 'say') await children.tell(child, frame.text, 'user');
               else await report(`[${child}] User message from connected window: ${frame.text}`);
             }
           }
@@ -170,7 +173,8 @@ export async function serveWindows(directory: string, children: Children, availa
       });
       track(queue);
     });
-    const drainMessages = (messages: AgentMessage[], task: string) => {
+    /** Main-agent guidance and child reports reach the session as user messages too; only what the user sent, from any view, shows as theirs. */
+    const drainMessages = (messages: AgentMessage[], info: RunInfo) => {
       const displayable = messages.filter(message => message.role === 'user' || message.role === 'assistant' || message.role === 'toolResult');
       // An attachment may replay hours of tool output. Pace the history instead of overflowing the bounded wire
       // or starving the owner's event loop. The next status tick continues from the same cursor, which stays valid because
@@ -180,9 +184,14 @@ export async function serveWindows(directory: string, children: Children, availa
         if (batch++ >= 32 || socket.writableLength > 1_000_000) return false;
         const message = displayable[cursor++];
         let text = message.role === 'toolResult' ? '' : textContent(message.content);
-        if (message.role === 'user' && firstUser) { text = task; firstUser = false; said.add(task.trim()); }
-        // An interrupt, from any view, continues with your queued messages, so it shows as yours.
-        if (message.role === 'user') { if (text) send({ kind: 'event', name: 'message', from: said.has(text.trim()) || text.startsWith(INTERRUPTED) ? 'user' : undefined, text: shorten(text, 200_000) }); continue; }
+        const task = message.role === 'user' && firstUser;
+        if (task) { text = info.task; firstUser = false; }
+        if (message.role === 'user') {
+          // The task, and an interrupt, which continues with your queued messages, are yours too.
+          const yours = task || text.startsWith(INTERRUPTED) || info.guidance.some(g => g.from === 'user' && g.text === text.trim());
+          if (text) send({ kind: 'event', name: 'message', from: yours ? 'user' : undefined, text: shorten(text, 200_000) });
+          continue;
+        }
         const clipped = clip(message);
         if (fits(clipped)) send({ kind: 'event', name: 'message', from: message.role === 'assistant' ? 'agent' : undefined, text: shorten(text, 200_000), message: clipped });
         else if (text) send({ kind: 'event', name: 'message', from: 'agent', text: shorten(text, 200_000) });
@@ -198,7 +207,7 @@ export async function serveWindows(directory: string, children: Children, availa
         send({ kind: 'event', name: 'finished', text: 'This conversation was deleted from the Agents page.' });
         return;
       }
-      if (live) drainMessages(children.retained(child), info.task);
+      if (live) drainMessages(children.retained(child), info);
       const preview = live?.streaming && 'content' in live.streaming ? textContent(live.streaming.content).slice(-2000) : '';
       const text = `${info.state === 'waiting' ? 'Awaiting user or child reports' : info.state} · ${info.model}\n${live ? [...live.tools.values()].map(t => t.name).join(', ') : ''}\n${preview}`;
       let state: LiveState = { state: info.state, model: info.model,
@@ -211,7 +220,7 @@ export async function serveWindows(directory: string, children: Children, availa
       const status = JSON.stringify(state);
       if (status !== lastStatus) { lastStatus = status; send({ kind: 'event', name: 'status', text, live: state }); }
       if (!live && (attached && !isActiveRun(info) || info.handoff?.delivered)) {
-        try { if (!drainMessages(finalMessages ??= children.retained(child), info.task)) return; }
+        try { if (!drainMessages(finalMessages ??= children.retained(child), info)) return; }
         catch (error) { send({ kind: 'event', name: 'message', text: `Could not read the final transcript: ${errorText(error)}` }); }
         ending = true;
         send({ kind: 'event', name: 'finished', text: attached ? `Agent ${child} is ${info.state}. Its report goes to its original parent; /complete closes only this view.` : info.handoff?.text ?? 'Conversation ended.' });

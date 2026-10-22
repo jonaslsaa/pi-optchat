@@ -706,6 +706,20 @@ test('an interrupt during a tool call continues with the queued message, not a r
   } finally { await children.close(); removeDir(dir); }
 });
 
+test('an interrupt keeps a child\'s message already waiting in Pi\'s queue', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-interrupt-report-'));
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports);
+  try {
+    const [id] = await children.spawn([{ task: 'busy' }], dir);
+    await until(() => asked.length === 1);
+    await (children as unknown as { toParent(parent: string, text: string): Promise<boolean> }).toParent(id, '[grandchild] Found it.');
+    await children.tell(id, 'Use the cache.', 'user');
+    assert.equal(await children.interrupt(id), 'continued');
+    await until(() => asked.flat().includes('[grandchild] Found it.'));
+  } finally { await children.close(); removeDir(dir); }
+});
+
 test('an interrupt right after taking a message back delivers each remaining message once', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-withdraw-interrupt-'));
   const reports: string[] = [];

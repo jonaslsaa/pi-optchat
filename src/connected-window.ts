@@ -150,7 +150,7 @@ export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContex
     const tui = liveTurn?.tui, focused = tui instanceof TuiMainScreen || tui instanceof TuiAltScreen ? tui.getFocusedComponent() : undefined;
     if (ended || !live?.queued || !(focused instanceof Editor) || focused.isShowingAutocomplete() || tui?.hasOverlay()) return;
     const keys = getKeybindings();
-    if (keys.matches(data, 'app.interrupt') && statusState(live.state, live.agents) === 'working') {
+    if (keys.matches(data, 'app.interrupt') && live.state !== 'stopping' && statusState(live.state, live.agents) === 'working') {
       connection.request('interrupt').catch(failed('interrupt'));
       return { consume: true };
     }

@@ -531,11 +531,12 @@ export class Children {
     if (!live || !['running', 'waiting'].includes(live.info.state)) throw new Error(`No running subagent ${id}.`);
     const guidance = live.info.guidance.filter(g => g.state === 'queued');
     // Nothing yields before the abort starts, so the run cannot finish in between and drop the messages.
-    // They leave pendingGuidance and Pi's steering queue here, and execute() sends them in one prompt. Pi's queue holds only
-    // queued guidance, and must be empty before the abort: after an aborted tool call Pi hands it to a request the abort cancels.
+    // They leave pendingGuidance and Pi's steering queue here, and execute() sends them in one prompt. Pi's queue must be empty
+    // before the abort: after an aborted tool call Pi hands it to a request the abort cancels.
     const texts = new Set(guidance.map(g => g.text));
     live.pendingGuidance = live.pendingGuidance.filter(text => !texts.has(text));
-    live.session.clearQueue();
+    // The rest of the queue (a child's tell_parent message) follows the interrupt's prompt, as reports to a paused run do.
+    live.pendingReports.push(...live.session.clearQueue().steering.filter(text => !texts.has(text)));
     live.interruption = guidance;
     live.wake?.();
     await live.session.abort();
