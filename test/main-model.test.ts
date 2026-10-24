@@ -35,7 +35,8 @@ async function open(dir: string, main: ModelChoice | undefined, sessions: { clos
 }
 
 test('the main model and thinking level follow the profile', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'optchat-main-model-'));
+  // macOS's default TMPDIR can push the profile's lock socket past the Unix socket path limit.
+  const dir = mkdtempSync(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'oc-main-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = join(dir, 'home');
   const sessions: { close: () => Promise<void> }[] = [];
@@ -61,6 +62,9 @@ test('the main model and thinking level follow the profile', async () => {
     assert.equal(flagged.session.model?.id, 'deep');
     assert.equal(flagged.session.thinkingLevel, 'high', '--thinking on the command line wins over the saved level');
     assert.ok(flagged.untouched(), 'and is not saved as the profile\'s pick');
+    flagged.session.setThinkingLevel('low'); flagged.session.setThinkingLevel('high');
+    for (let i = 0; i < 100 && flagged.saved()?.thinking !== 'high'; i++) await new Promise(r => setTimeout(r, 10));
+    assert.equal(flagged.saved()?.thinking, 'high', 'picking the flag\'s level by hand afterwards is saved');
     await flagged.close();
 
     const gone = await open(dir, { provider: 'fixture', model: 'retired', thinking: 'high' }, sessions);

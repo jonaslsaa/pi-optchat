@@ -124,8 +124,9 @@ export default function optchat(pi: ExtensionAPI) {
   const rememberMain = (ctx: ExtensionContext) => {
     // Read Pi's state, not the event: a model switch reports its thinking level before the model, and a late handler sees where both ended up.
     const a = active, main = mainChoice(ctx);
-    if (restoring || !a || !main || sameChoice(restored, main) || sameChoice(a.config.main, main)) return;
+    if (restoring || !a || !main || sameChoice(restored, main)) return;
     restored = undefined;
+    if (sameChoice(a.config.main, main)) return;
     try { saveConfig(a.dir, { ...a.config, main }); a.config.main = main; }
     catch (error) { ctx.ui.notify(`Could not save the main model to ${a.name}: ${errorText(error)}`, 'error'); }
   };
