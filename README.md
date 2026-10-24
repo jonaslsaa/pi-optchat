@@ -75,11 +75,11 @@ Details, errors and join rules: [docs/connected-windows.md](docs/connected-windo
 
 | Role | Default | Change with |
 | --- | --- | --- |
-| Main agent | Whatever is selected in Pi | `/model` |
+| Main agent | Whatever is selected in Pi, then the profile's last pick | `/model` |
 | Subagents | Anthropic Opus 5.5, high | `/optchat agents model` |
 | Compactor (summaries, imports, handoffs) | Anthropic Sonnet 5.5, medium | `/optchat model` |
 
-Subagent and compactor settings are saved per profile and do not follow the main model. If you use other providers, change them before chatting. Authentication uses Pi's existing provider login.
+All three are saved per profile. The main agent's model and thinking level are saved whenever you change them in Pi and picked again when the profile opens, unless the saved model is no longer available. On Pi's command line, `--model` (or `--provider`) keeps that model and `--thinking` that level. Subagent and compactor settings do not follow the main model. If you use other providers, change them before chatting. Authentication uses Pi's existing provider login.
 
 Compression and subagents make extra model requests with your provider credentials.
 
@@ -202,7 +202,7 @@ Profile data lives in `~/.optchat/profiles/<name>/` (override the root with `OPT
 | `active-memory.json`, `memories/<id>/` | After an import: pointer to the active `main/` and `tree/`. Older generations are kept. |
 | `imports/pending.json` | Resumable import state |
 | `AGENTS.md` | Profile instructions |
-| `config.json` | Compactor and subagent models |
+| `config.json` | Main, compactor and subagent models, and settings |
 | `pending-inputs.json`, `pending-reports.json` | Recovery journals |
 | `runs/` | Subagent sessions and run metadata |
 | `usage.jsonl` | Usage ledger |

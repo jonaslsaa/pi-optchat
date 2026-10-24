@@ -4,11 +4,11 @@ import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import { parseArgs, parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
-import { createCompressor } from './compactor.ts';
+import { createCompressor, type ModelChoice } from './compactor.ts';
 import { createProfile, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, MASTER, modelsHint, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC } from './prompts.ts';
 import { cachePayload, record } from './cache.ts';
@@ -113,6 +113,35 @@ export default function optchat(pi: ExtensionAPI) {
   const joinProfile = async (name: string) => {
     try { return await joinHeadless(profilePath(name)); }
     catch (error) { process.exitCode = 1; throw error; }
+  };
+  // The main model follows the profile: each pick in Pi is saved to its config.json, and opening the profile picks it again.
+  // `--model`/`--provider`/`--thinking` on Pi's command line win over the saved choice for as long as this Pi runs.
+  const launch = parseArgs(process.argv.slice(2)), pinnedModel = launch.model !== undefined || launch.provider !== undefined;
+  let restoring = false;
+  const sameChoice = (a: ModelChoice | undefined, b: ModelChoice) => a?.provider === b.provider && a.model === b.model && a.thinking === b.thinking;
+  const rememberMain = (ctx: ExtensionContext) => {
+    const a = active, model = ctx.model;
+    if (restoring || !a || !model) return;
+    // Read Pi's state, not the event: a model switch reports its thinking level before the model, and a late handler sees where both ended up.
+    const main = { provider: model.provider, model: model.id, thinking: pi.getThinkingLevel() };
+    if (sameChoice(a.config.main, main)) return;
+    try { saveConfig(a.dir, { ...a.config, main }); a.config.main = main; }
+    catch (error) { ctx.ui.notify(`Could not save the main model to ${a.name}: ${errorText(error)}`, 'error'); }
+  };
+  pi.on('model_select', (_event, ctx) => rememberMain(ctx));
+  pi.on('thinking_level_select', (_event, ctx) => rememberMain(ctx));
+  const restoreMain = async (ctx: ExtensionContext, { name, config: { main } }: Active) => {
+    if (!main || pinnedModel) return;
+    const model = ctx.modelRegistry.find(main.provider, main.model), thinking = launch.thinking ?? main.thinking;
+    restoring = true;
+    try {
+      const current = ctx.model?.provider === main.provider && ctx.model.id === main.model;
+      if (!model || !current && !await pi.setModel(model).catch(() => false)) {
+        ctx.ui.notify(`${name}'s main model ${main.provider}/${main.model} is unavailable; keeping ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : 'Pi\'s default'}.`, 'warning');
+        return;
+      }
+      pi.setThinkingLevel(thinking);
+    } finally { restoring = false; }
   };
   const required = () => { if (!active) throw new Error('Choose an OptChat profile first: /optchat profile'); return active; };
   const status = (ctx: ExtensionContext) => {
@@ -219,6 +248,7 @@ export default function optchat(pi: ExtensionAPI) {
       atomicWrite(pending, JSON.stringify(reports));
       rememberProfile(name);
       active = { name, dir, config, memory, inbox, children, usage, unlock }; fault = undefined; idle = () => ctx.isIdle();
+      await restoreMain(ctx, active);
       if (ctx.mode === 'tui') unmountNavigation = mountNavigation(ctx, children, memory, shortcut, page => { void inspect(ctx, page); });
       // A one-shot run (`pi -p`, JSON) exits after its own prompt, which would end every conversation connected to it.
       if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport);
