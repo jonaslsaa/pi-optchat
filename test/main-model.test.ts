@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
@@ -16,6 +16,7 @@ const model = (id: string, reasoning: boolean) =>
 async function open(dir: string, main: ModelChoice | undefined, sessions: { close: () => Promise<void> }[]) {
   const profile = profilePath('fixture'), fixture = { provider: 'fixture', model: 'plain', thinking: 'off' as const };
   saveConfig(profile, { ...loadConfig(profile), compactor: fixture, subagent: fixture, ...main && { main } });
+  const written = () => statSync(join(profile, 'config.json')).mtimeMs, before = written();
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider('fixture', { baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions', models: [model('plain', false), model('deep', true)] });
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
@@ -27,7 +28,7 @@ async function open(dir: string, main: ModelChoice | undefined, sessions: { clos
   const { session } = await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'plain'), resourceLoader: loader, settingsManager, sessionManager: manager });
   const notes: string[] = [];
   await session.bindExtensions({ uiContext: { ...session.extensionRunner.getUIContext(), notify: text => { notes.push(text); } }, mode: 'print' });
-  const opened = { session, runtime, notes, saved: () => loadConfig(profile).main,
+  const opened = { session, runtime, notes, saved: () => loadConfig(profile).main, untouched: () => written() === before,
     close: async () => { sessions.splice(sessions.indexOf(opened), 1); await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); } };
   sessions.push(opened);
   return opened;
@@ -50,9 +51,17 @@ test('the main model and thinking level follow the profile', async () => {
     const second = await open(dir, first.saved(), sessions);
     assert.equal(second.session.model?.id, 'deep', 'reopening picks the saved model over Pi\'s default');
     assert.equal(second.session.thinkingLevel, 'low');
-    assert.deepEqual(second.saved(), { provider: 'fixture', model: 'deep', thinking: 'low' }, 'reopening leaves the saved choice as it was');
+    assert.ok(second.untouched(), 'restoring writes nothing back');
     assert.deepEqual(second.notes.filter(n => n.includes('main model')), []);
     await second.close();
+
+    const argv = process.argv;
+    process.argv = [...argv, '--thinking', 'high'];
+    const flagged = await open(dir, first.saved(), sessions).finally(() => { process.argv = argv; });
+    assert.equal(flagged.session.model?.id, 'deep');
+    assert.equal(flagged.session.thinkingLevel, 'high', '--thinking on the command line wins over the saved level');
+    assert.ok(flagged.untouched(), 'and is not saved as the profile\'s pick');
+    await flagged.close();
 
     const gone = await open(dir, { provider: 'fixture', model: 'retired', thinking: 'high' }, sessions);
     assert.equal(gone.session.model?.id, 'plain', 'a model that no longer exists leaves Pi\'s pick alone');

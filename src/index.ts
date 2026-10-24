@@ -115,23 +115,25 @@ export default function optchat(pi: ExtensionAPI) {
     catch (error) { process.exitCode = 1; throw error; }
   };
   // The main model follows the profile: each pick in Pi is saved to its config.json, and opening the profile picks it again.
-  // `--model`/`--provider`/`--thinking` on Pi's command line win over the saved choice for as long as this Pi runs.
+  // `--model`/`--provider`/`--thinking` on Pi's command line win over the saved choice for as long as this Pi runs; `--models` only keeps a saved model inside its scope.
   const launch = parseArgs(process.argv.slice(2)), pinnedModel = launch.model !== undefined || launch.provider !== undefined;
-  let restoring = false;
+  // `restored`: where the last restore left Pi. Pi fires thinking_level_select without awaiting it, so a handler may run after the restore; that state isn't a pick.
+  let restoring = false, restored: ModelChoice | undefined;
   const sameChoice = (a: ModelChoice | undefined, b: ModelChoice) => a?.provider === b.provider && a.model === b.model && a.thinking === b.thinking;
+  const mainChoice = ({ model }: ExtensionContext): ModelChoice | undefined => model && { provider: model.provider, model: model.id, thinking: pi.getThinkingLevel() };
   const rememberMain = (ctx: ExtensionContext) => {
-    const a = active, model = ctx.model;
-    if (restoring || !a || !model) return;
     // Read Pi's state, not the event: a model switch reports its thinking level before the model, and a late handler sees where both ended up.
-    const main = { provider: model.provider, model: model.id, thinking: pi.getThinkingLevel() };
-    if (sameChoice(a.config.main, main)) return;
+    const a = active, main = mainChoice(ctx);
+    if (restoring || !a || !main || sameChoice(restored, main) || sameChoice(a.config.main, main)) return;
+    restored = undefined;
     try { saveConfig(a.dir, { ...a.config, main }); a.config.main = main; }
     catch (error) { ctx.ui.notify(`Could not save the main model to ${a.name}: ${errorText(error)}`, 'error'); }
   };
   pi.on('model_select', (_event, ctx) => rememberMain(ctx));
   pi.on('thinking_level_select', (_event, ctx) => rememberMain(ctx));
   const restoreMain = async (ctx: ExtensionContext, { name, config: { main } }: Active) => {
-    if (!main || pinnedModel) return;
+    restored = undefined;
+    if (!main || pinnedModel || launch.models && !ctx.scopedModels.some(({ model }) => model.provider === main.provider && model.id === main.model)) return;
     const model = ctx.modelRegistry.find(main.provider, main.model), thinking = launch.thinking ?? main.thinking;
     restoring = true;
     try {
@@ -141,6 +143,7 @@ export default function optchat(pi: ExtensionAPI) {
         return;
       }
       pi.setThinkingLevel(thinking);
+      restored = mainChoice(ctx);
     } finally { restoring = false; }
   };
   const required = () => { if (!active) throw new Error('Choose an OptChat profile first: /optchat profile'); return active; };
