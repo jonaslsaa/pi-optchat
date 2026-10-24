@@ -31,7 +31,7 @@ function formatEvidence({ run, messages, transcriptError }: HandoffEvidence) {
 /** Summarize in one call when possible; otherwise fold chunks with the prior handoff included in the budget. */
 export function createHandoffSummarizer(registry: ModelRegistry, choice: () => ModelChoice,
   usage: (message: AssistantMessage) => void, retryDelays?: readonly number[]) {
-  return async (run: RunInfo, messages: AgentMessage[], descendants: HandoffEvidence[] = []) => {
+  return async (run: RunInfo, messages: AgentMessage[], descendants: HandoffEvidence[] = [], signal?: AbortSignal) => {
     const selected = choice(), model = registry.find(selected.provider, selected.model);
     if (!model) throw new Error('Profile compactor model unavailable');
     const transcript = Buffer.from([{ run, messages }, ...descendants].map(formatEvidence).join('\n\n'));
@@ -53,7 +53,7 @@ export function createHandoffSummarizer(registry: ModelRegistry, choice: () => M
       const reply = await retryTransient(() => registry.streamSimple(model, {
         systemPrompt: HANDOFF,
         messages: [{ role: 'user', timestamp: Date.now(), content: prefix + transcript.subarray(offset, end).toString('utf8') }],
-      }, { reasoning: reasoningFor(model, selected.thinking), maxTokens, signal: AbortSignal.timeout(300_000) }).result(), usage, retryDelays);
+      }, { reasoning: reasoningFor(model, selected.thinking), maxTokens, signal: AbortSignal.any([AbortSignal.timeout(300_000), ...signal ? [signal] : []]) }).result(), usage, retryDelays, signal);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? reply.stopReason);
       if (reply.stopReason === 'length') throw new Error('Handoff hit the model output limit before finishing');
       summary = textContent(reply.content).trim();

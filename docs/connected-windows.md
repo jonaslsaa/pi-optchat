@@ -18,7 +18,7 @@ If you open the same profile in a second terminal, Pi offers to connect it to th
 
 - Run `/complete` when done. The window closes, remaining work stops, and the compactor writes a handoff for the main agent: decisions, changes, evidence, failures, unfinished work, and links to the transcripts.
 - Closing or force-quitting the window also produces a handoff, marked **interrupted**.
-- If the original window is closed cleanly, handoffs are delivered on next start. If it is killed, reopening the profile recovers unfinished handoffs (work is not restarted).
+- If the original window is closed cleanly or reloaded, it doesn't wait for the compactor: handoffs are written and delivered on next start. If it is killed, reopening the profile recovers unfinished handoffs (work is not restarted).
 - Closing the original window, or running `/reload` in it, ends every connected conversation; Pi gives no chance to warn before a reload. The connected window then shows **disconnected**. `/new` there starts over: after the profile picker if Pi was started without `--optchat-profile`, a profile still open elsewhere offers **Start a connected subagent conversation here** again, and a free one opens in this window.
 
 ### Handoff limits

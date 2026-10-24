@@ -198,6 +198,8 @@ export default function optchat(pi: ExtensionAPI) {
     if (!active) return;
     const old = active;
     try {
+      // Ending connected windows and recovery must not wait on handoff summaries: the next start writes and delivers them.
+      old.children.deferHandoffs();
       await closeWindows?.(); closeWindows = undefined;
       await recovery;
       await old.children.close(); flush(); if (!pendingImport(old.dir)) old.inbox.recover(old.memory);

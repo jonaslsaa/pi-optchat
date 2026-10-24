@@ -368,6 +368,43 @@ test('pending handoffs survive failed delivery and restart without another model
   } finally { await f.close(); }
 });
 
+test('closing the owner leaves a connected handoff for the next start instead of waiting on its summary', async () => {
+  const f = await fixture();
+  const events: WindowEvent[] = [];
+  const close = await serveWindows(f.dir, f.children, () => true, async text => { f.reports.push(text); });
+  const client = await connectWindow(f.dir, event => events.push(event), () => {});
+  const restart = (summarizeHandoff: NonNullable<typeof f.options.summarizeHandoff>, reports: string[] = []) =>
+    new Children(f.memory, f.registry, f.choice, () => '', async text => { reports.push(text); }, () => {}, f.dir, { ...f.options, summarizeHandoff });
+  try {
+    await client.request('start', 'Investigate this repository.', f.dir);
+    const id = events.find(e => e.name === 'started')?.text; assert.ok(id);
+    await until(() => f.children.history.records.get(id)?.state === 'waiting');
+    // What /reload does: the window ends as owner-stopped, without a summary.
+    f.children.deferHandoffs(); await close();
+    assert.equal(f.summaries.length, 0);
+    assert.deepEqual(f.children.history.records.get(id)?.handoff, { reason: 'owner-stopped' });
+
+    // The next start's recovery is aborted by another quick /reload, still leaving the handoff undelivered.
+    let started = () => {};
+    const asked = new Promise<void>(resolve => { started = resolve; });
+    const interrupted = restart(async (_run, _messages, _descendants, signal) => {
+      started();
+      await new Promise<void>(resolve => signal?.addEventListener('abort', () => resolve(), { once: true }));
+      throw new Error('aborted');
+    });
+    const recovery = interrupted.recoverHandoffs();
+    await asked; interrupted.deferHandoffs(); await recovery; await interrupted.close();
+    assert.deepEqual(interrupted.history.records.get(id)?.handoff, { reason: 'owner-stopped' }, 'no fallback written, nothing delivered');
+
+    const delivered: string[] = [];
+    const restored = restart(async () => 'Summary written at the next start.', delivered);
+    await restored.recoverHandoffs(); await restored.recoverHandoffs();
+    assert.equal(delivered.length, 1);
+    assert.match(delivered[0], /interrupted \(owner-stopped\)\.[^]*Summary written at the next start/);
+    await restored.close();
+  } finally { client.close(); await f.close(); }
+});
+
 test('disconnect during startup cancels cleanly, and importing owners reject new work', async () => {
   const f = await fixture();
   let available = false;

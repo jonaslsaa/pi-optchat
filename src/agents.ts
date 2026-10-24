@@ -49,7 +49,7 @@ interface Options { parentSession?: string; usage?: UsageLedger; createSession?:
   hold?: (batch: string, texts: string[]) => void;
   /** Read on every spawn, so a changed profile setting applies to the next one. Missing settings take their defaults. */
   settings?: () => Partial<Settings>;
-  summarizeHandoff?: (run: RunInfo, messages: AgentMessage[], descendants?: HandoffEvidence[]) => Promise<string> }
+  summarizeHandoff?: (run: RunInfo, messages: AgentMessage[], descendants?: HandoffEvidence[], signal?: AbortSignal) => Promise<string> }
 
 // Subagents load the user's installed extensions, except any copy of OptChat itself: they get memory tools directly and must not open a profile.
 const packageName = (path: string): string | undefined => {
@@ -133,6 +133,8 @@ export class Children {
   private settling = 0;
   private readonly launches = new Set<Promise<unknown>>();
   private readonly completions = new Set<Promise<void>>();
+  /** Aborted when Pi starts closing: see deferHandoffs(). */
+  private readonly deferring = new AbortController();
   constructor(private readonly memory: Memory, private readonly registry: ModelRegistry,
     private readonly choice: () => ModelChoice, private readonly instructions: () => string,
     private readonly report: (text: string, options?: { once?: boolean; count?: number }) => Promise<void>, private readonly warn: (text: string) => void,
@@ -681,6 +683,8 @@ export class Children {
     const handoff = run.handoff;
     if (!handoff || handoff.delivered) return;
     if (!handoff.text) {
+      const deferred = this.deferring.signal;
+      if (deferred.aborted) return;
       const evidence = [run, ...this.history.descendants(run.id)].map((record): HandoffEvidence => {
         try { return { run: record, messages: this.messages(record.id) }; }
         catch (error) { return { run: record, messages: [], transcriptError: String(error) }; }
@@ -688,8 +692,9 @@ export class Children {
       let summary: string;
       try {
         if (!this.options.summarizeHandoff) throw new Error('No handoff summarizer configured');
-        summary = await this.options.summarizeHandoff(run, evidence[0].messages, evidence.slice(1));
+        summary = await this.options.summarizeHandoff(run, evidence[0].messages, evidence.slice(1), deferred);
       } catch (error) {
+        if (deferred.aborted) return;
         summary = `Automatic summary unavailable: ${String(error)}\nInitial request: ${run.task}\nLast recorded result: ${run.report ?? 'No final answer recorded.'}\nUndelivered guidance: ${run.guidance.filter(g => g.state === 'undelivered').map(g => g.text).join('\n')}\nRead the saved transcript or run metadata for the full work and user corrections.`;
       }
       const source = evidence.map(({ run: record, transcriptError }) => {
@@ -747,8 +752,11 @@ export class Children {
       if (!reports) this.memory.append('work', `[${id}] deleted by the user`);
     } finally { for (const run of marked) this.deleting.delete(run); this.changed(); }
   }
+  /** Pi is closing: a handoff not written yet is left undelivered for the next start's recoverHandoffs(), and one being
+   * written is aborted, so closing or /reload never waits on a model call. */
+  deferHandoffs() { this.deferring.abort(); }
   async close() {
-    this.closing = true;
+    this.closing = true; this.deferHandoffs();
     // Only work in progress is picked up at the next start: not paused runs waiting for the user, runs being stopped, or connected windows (they hand off).
     for (const { info } of this.running.values()) if (!info.connected && (info.state === 'running' || info.state === 'waiting')) info.cutOff = true;
     await Promise.allSettled([...this.running.keys()].map(id => this.stop(id, 'pi')));
