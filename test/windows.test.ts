@@ -1154,6 +1154,28 @@ test('a report a paused window never read goes into its handoff request', async 
   } finally { await f.close(); }
 });
 
+test('closing while a window writes its handoff does not wait for it, and the next start writes it', async () => {
+  const f = await fixture();
+  try {
+    const [id] = await f.children.spawn([{ task: 'Investigate this repository.' }], f.dir, undefined, undefined, true);
+    await until(() => f.children.history.records.get(id)?.state === 'waiting');
+    f.control.holdSummary = true;
+    const finishing = f.children.finish(id, 'complete');
+    await until(() => f.contexts.some(c => c.handoff));
+    f.children.deferHandoffs(); await f.children.close(); await finishing;
+    assert.deepEqual(f.children.history.records.get(id)?.handoff, { reason: 'complete' });
+    f.control.holdSummary = false;
+    const delivered: string[] = [];
+    const restored = new Children(f.memory, f.registry, f.choice, () => '', async text => { delivered.push(text); }, () => {}, f.dir, f.options);
+    try {
+      await restored.recoverHandoffs();
+      assert.equal(delivered.length, 1);
+      assert.match(delivered[0], /completed by user\..*\nWindow handoff: kept the existing API\.\n/);
+      assert.equal(f.summaries.length, 0);
+    } finally { await restored.close(); }
+  } finally { await f.close(); }
+});
+
 test('a handoff deferred by /reload is written by the reopened window on the next start', async () => {
   const f = await fixture();
   try {
