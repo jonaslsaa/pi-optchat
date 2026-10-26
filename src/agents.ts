@@ -469,6 +469,7 @@ export class Children {
       try {
         if (info.connected) {
           info.handoff ??= { reason: 'failed' };
+          if (live.pendingReports.length) info.handoff.unread = live.pendingReports.splice(0);
           transition(info, info.handoff.reason === 'complete' ? 'completed' : 'interrupted');
           this.save(info);
           await this.deliverHandoff(info, session);
@@ -752,7 +753,7 @@ export class Children {
     const off = session.subscribe(event => { if (event.type === 'message_end' && event.message.role === 'assistant') reply = event.message; });
     const abort = () => { void session.abort(); };
     limit.addEventListener('abort', abort, { once: true });
-    try { await session.prompt(windowHandoff(run.handoff?.reason ?? 'failed', undelivered(run), stopped)); }
+    try { await session.prompt(windowHandoff(run.handoff?.reason ?? 'failed', { undelivered: undelivered(run), unread: run.handoff?.unread ?? [], stopped })); }
     finally {
       limit.removeEventListener('abort', abort); off();
       this.options.usage?.backfill(session.sessionManager.getEntries(), run.parentSession, 'subagent', run.id);

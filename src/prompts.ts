@@ -213,8 +213,9 @@ const ENDINGS: Record<FinishReason, string> = {
 };
 export const HANDOFF_REQUEST = '[OptChat] This connected conversation has ended';
 /** Sent to an ended connected window's own session, so the window writes its handoff with its context still cached;
- * `undelivered` are messages queued for it that it never got, `stopped` its subagents that this ending stopped before they reported. */
-export const windowHandoff = (reason: FinishReason, undelivered: string[], stopped: string[]) => `${HANDOFF_REQUEST}: ${ENDINGS[reason]}. Don't continue the work, but you can check things first if needed. Write the handoff the main agent gets in place of this conversation. Assume it remembers nothing of it. Use these headings, skipping empty ones:
+ * `undelivered` are messages queued for it that it never got, `unread` its subagents' reports it never read (it was paused), and
+ * `stopped` its subagents that this ending stopped before they reported. */
+export const windowHandoff = (reason: FinishReason, { undelivered, unread, stopped }: Record<'undelivered' | 'unread' | 'stopped', string[]>) => `${HANDOFF_REQUEST}: ${ENDINGS[reason]}. Don't continue the work, but you can check things first if needed. Write the handoff the main agent gets in place of this conversation. Assume it remembers nothing of it. Use these headings, skipping empty ones:
 Goal: what the user wanted, their wishes and corrections, in their words where it matters.
 Constraints: rules you were given, by the user or the main agent.
 Decisions: what was decided, by whom, and why.
@@ -224,7 +225,10 @@ Open: unanswered questions, offers not yet taken up, unfinished work and next st
 Tell attempts from successes: the conversation ending doesn't mean the work succeeded. Attribute your subagents' work to them. Be concise, but leave out nothing the main agent needs.${undelivered.length ? `
 
 Messages queued for you that you never got:
-${undelivered.join('\n')}` : ''}${stopped.length ? `
+${undelivered.join('\n')}` : ''}${unread.length ? `
+
+Reports from your subagents that you never read:
+${unread.join('\n\n')}` : ''}${stopped.length ? `
 
 Stopped subagents: ${stopped.map(id => `\`${id}\``).join(', ')} (full transcripts available via zoom)` : ''}`;
 

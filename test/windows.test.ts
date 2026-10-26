@@ -1140,6 +1140,20 @@ test('a window whose subagent was stopped by its ending still writes its handoff
   } finally { await f.close(); }
 });
 
+test('a report a paused window never read goes into its handoff request', async () => {
+  const f = await fixture();
+  try {
+    const [id] = await f.children.spawn([{ task: 'hold work parent' }], f.dir, undefined, undefined, true);
+    await until(() => f.requests.some(text => text.includes('hold work parent')));
+    const [child] = await f.children.spawn([{ task: 'slow descendant' }], f.dir, undefined, id);
+    assert.equal(await f.children.interrupt(id), 'paused');
+    await until(() => f.children.history.records.get(child)?.state === 'completed');
+    await f.children.finish(id, 'complete');
+    assert.match(f.contexts.at(-1)!.messages.at(-1)!, new RegExp(`Reports from your subagents that you never read:.*\\[${child}\\]`));
+    assert.equal(f.summaries.length, 0);
+  } finally { await f.close(); }
+});
+
 test('a handoff deferred by /reload is written by the reopened window on the next start', async () => {
   const f = await fixture();
   try {
