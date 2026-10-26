@@ -1092,6 +1092,21 @@ for (const failure of ['error', 'tool call'] as const) {
   });
 }
 
+test('a window whose subagent was stopped by its ending leaves the handoff to the compactor, which reads that subagent\'s transcript', async () => {
+  const f = await fixture(undefined, undefined, true);
+  try {
+    const [id] = await f.children.spawn([{ task: 'hold work parent' }], f.dir, undefined, undefined, true);
+    await until(() => f.requests.some(text => text.includes('hold work parent')));
+    const [child] = await f.children.spawn([{ task: 'hold work descendant' }], f.dir, undefined, id);
+    await until(() => f.requests.some(text => text.includes('hold work descendant')));
+    await f.children.finish(id, 'complete');
+    assert.equal(f.children.history.records.get(child)?.state, 'stopped');
+    assert.ok(!f.contexts.some(c => c.handoff));
+    assert.equal(f.summaries.length, 1);
+    assert.ok(f.summaries[0].includes(`AGENT ${child}`));
+  } finally { await f.close(); }
+});
+
 test('a handoff deferred by /reload is written by the reopened window on the next start', async () => {
   const f = await fixture(undefined, undefined, true);
   try {

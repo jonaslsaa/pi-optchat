@@ -694,8 +694,10 @@ export class Children {
         try { return { run: record, messages: this.messages(record.id) }; }
         catch (error) { return { run: record, messages: [], transcriptError: String(error) }; }
       });
+      // A child stopped or cut off when the window ended never reported to it, so the compactor, which reads every transcript, writes this one.
+      const unreported = this.history.descendants(run.id).some(child => child.parentId === run.id && child.state !== 'completed' && child.state !== 'failed');
       const write = async () => {
-        try { return await this.writtenByWindow(run, live, deferred); }
+        if (!unreported) try { return await this.writtenByWindow(run, live, deferred); }
         catch (error) { if (deferred.aborted) throw error; } // Otherwise the compactor writes it.
         if (!this.options.summarizeHandoff) throw new Error('No handoff summarizer configured');
         return await this.options.summarizeHandoff(run, evidence[0].messages, evidence.slice(1), deferred);
