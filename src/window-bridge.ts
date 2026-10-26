@@ -177,7 +177,7 @@ export async function serveWindows(directory: string, children: Children, availa
     /** Main-agent guidance and child reports reach the session as user messages too; only what the user sent, from any view, shows as theirs. */
     const drainMessages = (messages: AgentMessage[], info: RunInfo) => {
       // The window's handoff, written once the conversation ended, is for the main agent: the window shows the conversation only.
-      const end = messages.findIndex(message => message.role === 'user' && textContent(message.content).startsWith(HANDOFF_REQUEST));
+      const end = info.handoff ? messages.findIndex(message => message.role === 'user' && textContent(message.content).startsWith(HANDOFF_REQUEST)) : -1;
       const displayable = (end < 0 ? messages : messages.slice(0, end)).filter(message => message.role === 'user' || message.role === 'assistant' || message.role === 'toolResult');
       // An attachment may replay hours of tool output. Pace the history instead of overflowing the bounded wire
       // or starving the owner's event loop. The next status tick continues from the same cursor, which stays valid because

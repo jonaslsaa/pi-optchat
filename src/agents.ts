@@ -506,7 +506,9 @@ export class Children {
     }
     if (info.parentId) {
       const parent = this.running.get(info.parentId);
-      if (parent && parent.info.state !== 'stopping') { parent.pendingReports.push(text); parent.wake?.(); this.changed(); }
+      // A connected parent that is stopping still keeps a report its child finished on its own: its handoff includes it.
+      const finished = info.state === 'completed' || info.state === 'failed';
+      if (parent && (parent.info.state !== 'stopping' || parent.info.connected && finished)) { parent.pendingReports.push(text); parent.wake?.(); this.changed(); }
       return;
     }
     if (this.closing) this.memory.append('work', text);
@@ -753,7 +755,10 @@ export class Children {
     const off = session.subscribe(event => { if (event.type === 'message_end' && event.message.role === 'assistant') reply = event.message; });
     const abort = () => { void session.abort(); };
     limit.addEventListener('abort', abort, { once: true });
-    try { await session.prompt(windowHandoff(run.handoff?.reason ?? 'failed', { undelivered: undelivered(run), unread: run.handoff?.unread ?? [], stopped })); }
+    // A tool that ignores the abort must not hold up closing or the fallback: the wait ends with `limit`, and the caller disposes the session.
+    const prompting = session.prompt(windowHandoff(run.handoff?.reason ?? 'failed', { undelivered: undelivered(run), unread: run.handoff?.unread ?? [], stopped }));
+    prompting.catch(() => {});
+    try { await abortable(prompting, limit); limit.throwIfAborted(); await prompting; }
     finally {
       limit.removeEventListener('abort', abort); off();
       this.options.usage?.backfill(session.sessionManager.getEntries(), run.parentSession, 'subagent', run.id);
