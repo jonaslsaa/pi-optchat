@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createServer, type Socket } from 'node:net';
-import { createAgentSession, DefaultResourceLoader, SettingsManager, CustomMessageComponent, initTheme, ModelRegistry, ModelRuntime, type ExtensionAPI, type TerminalInputHandler, type ExtensionContext, type MessageRenderer, type Theme } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, type ToolDefinition, SettingsManager, CustomMessageComponent, initTheme, ModelRegistry, ModelRuntime, type ExtensionAPI, type TerminalInputHandler, type ExtensionContext, type MessageRenderer, type Theme } from '@earendil-works/pi-coding-agent';
 import { Editor, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, TuiMainScreen, type Component, type Terminal } from '@earendil-works/pi-tui';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { showAgentView } from '../src/agent-view.ts';
@@ -20,6 +20,7 @@ import { openConnectedWindow, registerConnectedRenderer } from '../src/connected
 import { createHandoffSummarizer } from '../src/handoff.ts';
 import { HANDOFF_REQUEST } from '../src/prompts.ts';
 import { removeDir } from './support.ts';
+import { Type } from 'typebox';
 
 /** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
 const nested = () => ({ subagentLevels: 3, maxAgents: 8 });
@@ -37,7 +38,10 @@ async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
     modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   const control = { failSummary: false, truncateSummary: false, holdSummary: false, summaryText: 'Handoff: retained the user correction and actual work.',
-    window: 'answer' as 'answer' | 'error' | 'empty' | 'tool call, then handoff' };
+    window: 'answer' as 'answer' | 'error' | 'empty' | 'tool call, then handoff' | 'stuck tool', releaseTool: () => {} };
+  // A tool that ignores the abort: it returns only once the test releases it.
+  const stuck: ToolDefinition = { name: 'stuck', label: 'Stuck', description: 'Never cancels.', parameters: Type.Object({}),
+    execute: () => new Promise(resolve => { control.releaseTool = () => resolve({ content: [{ type: 'text', text: 'released' }], details: {} }); }) };
   /** Every request's messages as the provider got them, in order; `handoff` marks the window's handoff request. */
   const contexts: { messages: string[]; handoff: boolean }[] = [];
   const requests: string[] = [], summaries: string[] = [], reports: string[] = [], warnings: string[] = [];
@@ -67,9 +71,10 @@ async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
       if (summary && control.failSummary) { message.stopReason = 'error'; message.errorMessage = 'Synthetic summarizer unavailable'; }
       if (handoff) {
         const checks = control.window === 'tool call, then handoff' && last?.role === 'user';
-        message.content = checks ? [{ type: 'text', text: 'Let me check one thing first.' }, { type: 'toolCall', id: 'check', name: 'bash', arguments: { command: "printf 'CHECKED_BEFORE_HANDOFF'" } }]
+        message.content = control.window === 'stuck tool' && last?.role === 'user' ? [{ type: 'toolCall', id: 'stuck', name: 'stuck', arguments: {} }]
+          : checks ? [{ type: 'text', text: 'Let me check one thing first.' }, { type: 'toolCall', id: 'check', name: 'bash', arguments: { command: "printf 'CHECKED_BEFORE_HANDOFF'" } }]
           : [{ type: 'text', text: control.window === 'empty' ? '' : 'Window handoff: kept the existing API.' }];
-        if (checks) message.stopReason = 'toolUse';
+        if (message.content.some(block => block.type === 'toolCall')) message.stopReason = 'toolUse';
         if (control.window === 'error') { message.stopReason = 'error'; message.errorMessage = 'Synthetic window error'; }
       }
       if (text === 'spawn one') {
@@ -106,7 +111,8 @@ async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
   const registry = new ModelRegistry(runtime), choice = () => ({ provider: 'window-test', model: 'child', thinking: 'off' as const });
   const ledger = new UsageLedger(dir);
   const summarize = createHandoffSummarizer(registry, choice, reply => ledger.compression(reply, 'compactor', 'owner'));
-  const options = { settings: nested, parentSession: 'owner', usage: ledger, createSession: (options: Parameters<typeof createAgentSession>[0]) => createAgentSession({ ...options, modelRuntime: runtime }), summarizeHandoff: summarize };
+  const options = { settings: nested, parentSession: 'owner', usage: ledger, summarizeHandoff: summarize, windowHandoffTimeout: undefined as number | undefined,
+    createSession: (options: Parameters<typeof createAgentSession>[0]) => createAgentSession({ ...options, modelRuntime: runtime, customTools: [...options?.customTools ?? [], stuck] }) };
   const children = new Children(memory, registry, choice, () => '', async text => { reports.push(text); }, text => warnings.push(text), dir, options);
   const unlock = await lockProfile(dir, 'test owner');
   return { control, contexts, dir, memory, children, requests, summaries, summaryOptions, reports, warnings, registry, runtime, choice, options, ledger,
@@ -1188,6 +1194,45 @@ test('closing while a window writes its handoff does not wait for it, and the ne
       assert.match(delivered[0], /completed by user\..*\nWindow handoff: kept the existing API\.\n/);
       assert.equal(f.summaries.length, 0);
     } finally { await restored.close(); }
+  } finally { await f.close(); }
+});
+
+test('a handoff tool that ignores the abort holds up neither closing nor the timeout fallback', async () => {
+  for (const ending of ['close', 'timeout'] as const) {
+    const f = await fixture();
+    f.control.window = 'stuck tool';
+    if (ending === 'timeout') f.options.windowHandoffTimeout = 100;
+    try {
+      const [id] = await f.children.spawn([{ task: 'Investigate this repository.' }], f.dir, undefined, undefined, true);
+      await until(() => f.children.history.records.get(id)?.state === 'waiting');
+      const finishing = f.children.finish(id, 'complete');
+      await until(() => f.contexts.some(c => c.handoff));
+      if (ending === 'close') {
+        f.children.deferHandoffs(); await f.children.close(); await finishing;
+        assert.deepEqual(f.children.history.records.get(id)?.handoff, { reason: 'complete' }, 'left for the next start');
+      } else {
+        await finishing;
+        assert.match(f.warnings.join('\n'), /could not write its own handoff, so the compactor writes it/);
+        assert.match(f.children.history.records.get(id)?.handoff?.text ?? '', /Handoff: retained the user correction/);
+      }
+    } finally { f.control.releaseTool(); await f.close(); }
+  }
+});
+
+test('a batch flushed by a stopped child still hands its finished sibling\'s report to the stopping window', async () => {
+  const f = await fixture();
+  f.options.settings = () => ({ ...nested(), groupReports: true });
+  try {
+    const [id] = await f.children.spawn([{ task: 'hold work parent' }], f.dir, undefined, undefined, true);
+    await until(() => f.requests.some(text => text.includes('hold work parent')));
+    const [done, held] = await f.children.spawn([{ task: 'Investigate this repository.' }, { task: 'hold work descendant' }], f.dir, undefined, id);
+    await until(() => f.children.history.records.get(done)?.state === 'completed');
+    await f.children.finish(id, 'complete');
+    assert.equal(f.children.history.records.get(held)?.state, 'stopped');
+    const request = f.contexts.findLast(c => c.handoff)!.messages.at(-1)!;
+    assert.match(request, new RegExp(`never read:.*\\[${done}\\]`));
+    assert.match(request, new RegExp(`Stopped subagents: \`${held}\``));
+    assert.ok(!request.includes(`[${held}]`), 'the stopped child is named, not reported');
   } finally { await f.close(); }
 });
 

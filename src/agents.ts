@@ -50,7 +50,9 @@ interface Options { parentSession?: string; usage?: UsageLedger; createSession?:
   /** Read on every spawn, so a changed profile setting applies to the next one. Missing settings take their defaults. */
   settings?: () => Partial<Settings>;
   /** The compactor's handoff, when the window can't write its own. */
-  summarizeHandoff?: (run: RunInfo, messages: AgentMessage[], descendants?: HandoffEvidence[], signal?: AbortSignal) => Promise<string> }
+  summarizeHandoff?: (run: RunInfo, messages: AgentMessage[], descendants?: HandoffEvidence[], signal?: AbortSignal) => Promise<string>;
+  /** How long a window may take to write its handoff before the compactor writes it; 5 minutes by default. */
+  windowHandoffTimeout?: number }
 
 // Subagents load the user's installed extensions, except any copy of OptChat itself: they get memory tools directly and must not open a profile.
 const packageName = (path: string): string | undefined => {
@@ -511,9 +513,13 @@ export class Children {
     }
     if (info.parentId) {
       const parent = this.running.get(info.parentId);
-      // A connected parent that is stopping still keeps a report its child finished on its own: its handoff includes it.
-      const finished = info.state === 'completed' || info.state === 'failed';
-      if (parent && (parent.info.state !== 'stopping' || parent.info.connected && finished)) { parent.pendingReports.push(text); parent.wake?.(); this.changed(); }
+      // A connected parent that is ending still keeps the reports of children that finished on their own: its handoff includes
+      // them. Its stopped children are named there instead.
+      const finished = (batch?.ids ?? [info.id]).filter(id => ['completed', 'failed'].includes(this.history.records.get(id)?.state ?? ''))
+        .map(id => batch?.reports.get(id) ?? text);
+      const ending = parent?.info.state === 'stopping' || parent?.info.state === 'stopped';
+      const kept = !ending ? text : parent?.info.connected && finished.length ? finished.join('\n\n') : undefined;
+      if (parent && kept) { parent.pendingReports.push(kept); parent.wake?.(); this.changed(); }
       return;
     }
     if (this.closing) this.memory.append('work', text);
@@ -698,17 +704,18 @@ export class Children {
     if (!handoff.text) {
       const deferred = this.deferring.signal;
       if (deferred.aborted) return;
-      const evidence = [run, ...this.history.descendants(run.id)].map((record): HandoffEvidence => {
-        try { return { run: record, messages: this.retained(record.id) }; }
-        catch (error) { return { run: record, messages: [], transcriptError: String(error) }; }
-      });
-      // Written by the window itself, else by the compactor from every transcript, else a labelled stub.
+      // Written by the window itself, else by the compactor from every transcript (read after the window's try, which may have
+      // checked things), else a labelled stub.
       let summary: string | undefined;
       try { summary = await this.writtenByWindow(run, live, deferred); }
       catch (error) {
         if (deferred.aborted) return;
         this.warn(`${run.id} could not write its own handoff, so the compactor writes it: ${error instanceof Error ? error.message : String(error)}`);
       }
+      const evidence = [run, ...this.history.descendants(run.id)].map((record): HandoffEvidence => {
+        try { return { run: record, messages: this.retained(record.id) }; }
+        catch (error) { return { run: record, messages: [], transcriptError: String(error) }; }
+      });
       if (summary === undefined) {
         try {
           if (!this.options.summarizeHandoff) throw new Error('No handoff summarizer configured');
@@ -753,7 +760,7 @@ export class Children {
   private async askForHandoff(session: AgentSession, run: RunInfo, signal: AbortSignal) {
     // Its children that this ending stopped never reported to it, so it is told they were stopped.
     const stopped = this.history.descendants(run.id).filter(child => child.parentId === run.id && child.state !== 'completed' && child.state !== 'failed').map(child => child.id);
-    const limit = AbortSignal.any([AbortSignal.timeout(300_000), signal]);
+    const limit = AbortSignal.any([AbortSignal.timeout(this.options.windowHandoffTimeout ?? 300_000), signal]);
     limit.throwIfAborted();
     // It may check facts with tools first, as in any turn. The handoff is its final reply: text next to an earlier tool call never counts.
     let reply: AgentMessage | undefined;
