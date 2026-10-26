@@ -211,11 +211,13 @@ export async function serveWindows(directory: string, children: Children, availa
         return;
       }
       if (live) drainMessages(children.retained(child), info);
-      const preview = live?.streaming && 'content' in live.streaming ? textContent(live.streaming.content).slice(-2000) : '';
-      const text = `${info.state === 'waiting' ? 'Awaiting user or child reports' : info.state} · ${info.model}\n${live ? [...live.tools.values()].map(t => t.name).join(', ') : ''}\n${preview}`;
+      // Once the conversation has ended, what its session still streams is the handoff, which is for the main agent.
+      const working = info.handoff ? undefined : live;
+      const preview = working?.streaming && 'content' in working.streaming ? textContent(working.streaming.content).slice(-2000) : '';
+      const text = `${info.state === 'waiting' ? 'Awaiting user or child reports' : info.state} · ${info.model}\n${working ? [...working.tools.values()].map(t => t.name).join(', ') : ''}\n${preview}`;
       let state: LiveState = { state: info.state, model: info.model,
-        streaming: live?.streaming?.role === 'assistant' ? clip(live.streaming) : undefined,
-        tools: live ? [...live.tools].map(([id, t]) => ({ id, name: t.name, args: t.args, output: clipOutput(t.output), started: t.started })) : [],
+        streaming: working?.streaming?.role === 'assistant' ? clip(working.streaming) : undefined,
+        tools: working ? [...working.tools].map(([id, t]) => ({ id, name: t.name, args: t.args, output: clipOutput(t.output), started: t.started })) : [],
         // A finished child counts until its report has reached this agent, so the agent never looks idle in between.
         agents: [...children.history.records.values()].filter(run => run.parentId === child && (isActiveRun(run) || children.live(run.id))).length,
         queued: info.guidance.flatMap(g => g.state === 'queued' && g.from === 'user' ? [g.text.slice(0, 1000)] : []) };

@@ -692,7 +692,7 @@ export class Children {
       const deferred = this.deferring.signal;
       if (deferred.aborted) return;
       const evidence = [run, ...this.history.descendants(run.id)].map((record): HandoffEvidence => {
-        try { return { run: record, messages: this.messages(record.id) }; }
+        try { return { run: record, messages: this.retained(record.id) }; }
         catch (error) { return { run: record, messages: [], transcriptError: String(error) }; }
       });
       // Written by the window itself, else by the compactor from every transcript, else a labelled stub.
