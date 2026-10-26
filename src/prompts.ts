@@ -211,9 +211,10 @@ const ENDINGS: Record<FinishReason, string> = {
   'owner-stopped': 'the main Pi window closed or reloaded',
   failed: 'it stopped on an error',
 };
-/** Appended to an ended connected window's own session, so the window writes its handoff with its context still cached;
- * `undelivered` are messages queued for it that it never got. */
-export const windowHandoff = (reason: FinishReason, undelivered: string[]) => `[OptChat] This connected conversation has ended: ${ENDINGS[reason]}. Don't call tools or continue the work. Write the handoff the main agent gets in place of this conversation. Assume it remembers nothing of it. Use these headings, skipping empty ones:
+export const HANDOFF_REQUEST = '[OptChat] This connected conversation has ended';
+/** Sent to an ended connected window's own session, so the window writes its handoff with its context still cached;
+ * `undelivered` are messages queued for it that it never got, `stopped` its subagents that this ending stopped before they reported. */
+export const windowHandoff = (reason: FinishReason, undelivered: string[], stopped: string[]) => `${HANDOFF_REQUEST}: ${ENDINGS[reason]}. Don't continue the work, but you can check things first if needed. Write the handoff the main agent gets in place of this conversation. Assume it remembers nothing of it. Use these headings, skipping empty ones:
 Goal: what the user wanted, their wishes and corrections, in their words where it matters.
 Constraints: rules you were given, by the user or the main agent.
 Decisions: what was decided, by whom, and why.
@@ -223,7 +224,9 @@ Open: unanswered questions, offers not yet taken up, unfinished work and next st
 Tell attempts from successes: the conversation ending doesn't mean the work succeeded. Attribute your subagents' work to them. Be concise, but leave out nothing the main agent needs.${undelivered.length ? `
 
 Messages queued for you that you never got:
-${undelivered.join('\n')}` : ''}`;
+${undelivered.join('\n')}` : ''}${stopped.length ? `
+
+Stopped subagents: ${stopped.map(id => `\`${id}\``).join(', ')} (full transcripts available via zoom)` : ''}`;
 
 /** Ends the task's message after a mid-turn refresh (#146): the steps between it and the last tool call are now view lines. */
 export const TURN_REFRESHED = '[OptChat: this turn grew long, so its earlier steps were moved into <chat> above, as its last lines. The last tool call and its result follow in full. Carry on from there; zoom a line if you need its exact output.]';

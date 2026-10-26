@@ -38,6 +38,13 @@ export function transition(run: RunInfo, to: RunState) {
 export const isActiveRun = (run: RunInfo) => run.state === 'running' || run.state === 'waiting' || run.state === 'stopping' || run.state === 'paused';
 /** Live and working: a paused run is neither running nor finished. */
 export const isRunning = (run: RunInfo) => isActiveRun(run) && run.state !== 'paused';
+/** Messages queued for a run that it never read. */
+export const undelivered = (run: RunInfo) => run.guidance.filter(g => g.state === 'undelivered').map(g => g.text);
+/** A run's saved session, or undefined if it is missing or unreadable. */
+export function savedSession(run: RunInfo) {
+  try { return run.sessionFile && existsSync(run.sessionFile) ? SessionManager.open(run.sessionFile) : undefined; } catch { return undefined; }
+}
+
 /** A connected run that has ended but whose handoff summary has not reached the main agent yet. */
 export const isHandingOff = (run: RunInfo) => !isActiveRun(run) && !!run.handoff && !run.handoff.delivered;
 function isRun(value: unknown): value is RunInfo {

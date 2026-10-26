@@ -6,6 +6,7 @@ import { record } from './cache.ts';
 import { checkSocketPath, isWindows, profileSocket, removeStaleSocket } from './profiles.ts';
 import { textContent } from './transcript.ts';
 import { isActiveRun, type RunInfo } from './runs.ts';
+import { HANDOFF_REQUEST } from './prompts.ts';
 
 const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'withdraw', 'complete'] as const;
 type Action = typeof ACTIONS[number];
@@ -175,7 +176,9 @@ export async function serveWindows(directory: string, children: Children, availa
     });
     /** Main-agent guidance and child reports reach the session as user messages too; only what the user sent, from any view, shows as theirs. */
     const drainMessages = (messages: AgentMessage[], info: RunInfo) => {
-      const displayable = messages.filter(message => message.role === 'user' || message.role === 'assistant' || message.role === 'toolResult');
+      // The window's handoff, written once the conversation ended, is for the main agent: the window shows the conversation only.
+      const end = messages.findIndex(message => message.role === 'user' && textContent(message.content).startsWith(HANDOFF_REQUEST));
+      const displayable = (end < 0 ? messages : messages.slice(0, end)).filter(message => message.role === 'user' || message.role === 'assistant' || message.role === 'toolResult');
       // An attachment may replay hours of tool output. Pace the history instead of overflowing the bounded wire
       // or starving the owner's event loop. The next status tick continues from the same cursor, which stays valid because
       // retained messages are only ever appended (unlike Pi's projection, which compaction and retries replace).

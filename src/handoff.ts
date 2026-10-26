@@ -1,9 +1,9 @@
-import type { AgentSession, ModelRegistry } from '@earendil-works/pi-coding-agent';
+import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { normalizeContext, type AssistantMessage } from '@earendil-works/pi-ai';
+import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { reasoningFor, retryTransient, type ModelChoice } from './compactor.ts';
-import { HANDOFF, windowHandoff } from './prompts.ts';
-import type { RunInfo } from './runs.ts';
+import { HANDOFF } from './prompts.ts';
+import { undelivered, type RunInfo } from './runs.ts';
 import { textContent } from './transcript.ts';
 
 export interface HandoffEvidence { run: RunInfo; messages: AgentMessage[]; transcriptError?: string }
@@ -24,8 +24,8 @@ function formatEvidence({ run, messages, transcriptError }: HandoffEvidence) {
     if (message.role === 'toolResult') return [`TOOL RESULT (${message.toolName}, error=${message.isError}): ${textContent(message.content)}`];
     return [];
   }).join('\n\n') + `\n\nRecorded outcome before handoff: ${run.report ?? 'No final answer'}`;
-  const undelivered = run.guidance.filter(g => g.state === 'undelivered');
-  return transcript + (undelivered.length ? `\nMessages queued but NOT delivered to this agent:\n${undelivered.map(g => g.text).join('\n')}` : '');
+  const queued = undelivered(run);
+  return transcript + (queued.length ? `\nMessages queued but NOT delivered to this agent:\n${queued.join('\n')}` : '');
 }
 
 /** Summarize in one call when possible; otherwise fold chunks with the prior handoff included in the budget. */
@@ -61,39 +61,17 @@ export function createHandoffSummarizer(registry: ModelRegistry, choice: () => M
   };
 }
 
-/** The ended window's own session writes its handoff: one more request with the window's exact context and the handoff prompt
- * appended, built the way Pi's agent loop builds a turn's request (the session's projection, its context transforms such as
- * hidden tool declarations, conversion, its payload hook), so the provider reads everything before the prompt from its cache.
- * The request is sent directly rather than with session.prompt, so no tool runs and the session file is left as it was. */
-export function createWindowHandoff(usage: (message: AssistantMessage, run: RunInfo) => void, retryDelays?: readonly number[]) {
-  return async (session: AgentSession, run: RunInfo, signal: AbortSignal) => {
-    const { agent } = session, { model, thinkingLevel } = agent.state;
-    const projection = session.sessionManager.buildSessionProjection().messages;
-    if (!projection.some(message => message.role === 'assistant')) throw new Error('The window never answered, so it has nothing to hand off');
-    const request: AgentMessage = { role: 'user', timestamp: Date.now(),
-      content: windowHandoff(run.handoff?.reason ?? 'failed', run.guidance.filter(g => g.state === 'undelivered').map(g => g.text)) };
-    const limit = AbortSignal.any([AbortSignal.timeout(300_000), signal]);
-    const reply = await retryTransient(async () => {
-      const messages = [...projection, request];
-      const context = normalizeContext({ messages: await agent.convertToLlm(agent.transformContext ? await agent.transformContext(messages, limit) : messages) });
-      const stream = await agent.streamFunction(model, context, { reasoning: thinkingLevel === 'off' ? undefined : thinkingLevel,
-        sessionId: agent.sessionId, onPayload: agent.onPayload, transport: agent.transport, thinkingBudgets: agent.thinkingBudgets,
-        maxRetryDelayMs: agent.maxRetryDelayMs, apiKey: await agent.getApiKey?.(model.provider), signal: limit });
-      return stream.result();
-    }, reply => usage(reply, run), retryDelays, signal);
-    // A reply of only tool calls has no text, so it fails here like an empty one.
-    return withUndelivered(run, handoffText(reply));
-  };
-}
-
-function handoffText(reply: AssistantMessage) {
+/** A handoff reply's text; a failed, cut-off, empty or tool-calling reply throws. */
+export function handoffText(reply: AssistantMessage) {
   if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? reply.stopReason);
   if (reply.stopReason === 'length') throw new Error('Handoff hit the model output limit before finishing');
+  // A reply that calls a tool isn't finished: its text is a preamble, not the handoff.
+  if (reply.content.some(block => block.type === 'toolCall')) throw new Error('The handoff reply ended on a tool call');
   const text = textContent(reply.content).trim();
   if (!text) throw new Error('Empty handoff summary');
   return text;
 }
-const withUndelivered = (run: RunInfo, summary: string) => {
-  const undelivered = run.guidance.filter(g => g.state === 'undelivered');
-  return summary + (undelivered.length ? `\nMessages queued but NOT delivered to the agent:\n${undelivered.map(g => g.text).join('\n')}` : '');
+export const withUndelivered = (run: RunInfo, summary: string) => {
+  const queued = undelivered(run);
+  return summary + (queued.length ? `\nMessages queued but NOT delivered to the agent:\n${queued.join('\n')}` : '');
 };
