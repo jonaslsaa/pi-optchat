@@ -213,7 +213,14 @@ const ENDINGS: Record<FinishReason, string> = {
 };
 /** Appended to an ended connected window's own session, so the window writes its handoff with its context still cached;
  * `undelivered` are messages queued for it that it never got. */
-export const windowHandoff = (reason: FinishReason, undelivered: string[]) => `[OptChat] This connected conversation has ended: ${ENDINGS[reason]}. Don't call tools or continue the work. Write the handoff the main agent gets in place of this conversation: the user's goals, wishes, decisions and corrections; what was actually changed and verified (files, commits, PRs, commands, exact errors); what failed; what is unfinished. Tell attempts from successes: the conversation ending doesn't mean the work succeeded. Attribute your subagents' work to them. Be concise, but leave out nothing the main agent needs.${undelivered.length ? `
+export const windowHandoff = (reason: FinishReason, undelivered: string[]) => `[OptChat] This connected conversation has ended: ${ENDINGS[reason]}. Don't call tools or continue the work. Write the handoff the main agent gets in place of this conversation. Assume it remembers nothing of it. Use these headings, skipping empty ones:
+Goal: what the user wanted, their wishes and corrections, in their words where it matters.
+Constraints: rules you were given, by the user or the main agent.
+Decisions: what was decided, by whom, and why.
+Done: what was changed or found, with exact identifiers (files, paths, commits, branches, PR and issue numbers, commands, URLs, numbers), and how it was verified.
+Failed or unverified: what didn't work or wasn't checked, with exact errors.
+Open: unanswered questions, offers not yet taken up, unfinished work and next steps.
+Tell attempts from successes: the conversation ending doesn't mean the work succeeded. Attribute your subagents' work to them. Be concise, but leave out nothing the main agent needs.${undelivered.length ? `
 
 Messages queued for you that you never got:
 ${undelivered.join('\n')}` : ''}`;
