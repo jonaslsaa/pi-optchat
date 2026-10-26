@@ -1154,6 +1154,21 @@ test('a report a paused window never read goes into its handoff request', async 
   } finally { await f.close(); }
 });
 
+test('guidance still queued in Pi when a busy window completes is listed in its handoff request, not taken as new input', async () => {
+  const f = await fixture();
+  try {
+    const [id] = await f.children.spawn([{ task: 'hold work parent' }], f.dir, undefined, undefined, true);
+    await until(() => f.requests.some(text => text.includes('hold work parent')));
+    await f.children.tell(id, 'STALE_GUIDANCE', 'user');
+    await f.children.finish(id, 'complete');
+    const handoffs = f.contexts.filter(c => c.handoff);
+    assert.equal(handoffs.length, 1, 'one handoff request, with no turn after it');
+    assert.match(handoffs[0].messages.at(-1)!, /never got:.*STALE_GUIDANCE/);
+    assert.ok(!handoffs[0].messages.slice(0, -1).some(m => m.includes('STALE_GUIDANCE')));
+    assert.match(f.children.history.records.get(id)?.handoff?.text ?? '', /Window handoff: kept the existing API/);
+  } finally { await f.close(); }
+});
+
 test('closing while a window writes its handoff does not wait for it, and the next start writes it', async () => {
   const f = await fixture();
   try {

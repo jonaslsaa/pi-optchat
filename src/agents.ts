@@ -469,7 +469,12 @@ export class Children {
       try {
         if (info.connected) {
           info.handoff ??= { reason: 'failed' };
-          if (live.pendingReports.length) info.handoff.unread = live.pendingReports.splice(0);
+          // Pi's queue must be empty before the handoff turn, or it would take a cancelled message as new input. Guidance in it is
+          // already marked undelivered; the rest (a child's message) joins the reports the window never read.
+          await live.requeueing;
+          const guidance = new Set(info.guidance.map(g => g.text));
+          const unread = [...live.pendingReports.splice(0), ...session.clearQueue().steering.filter(text => !guidance.has(text))];
+          if (unread.length) info.handoff.unread = unread;
           transition(info, info.handoff.reason === 'complete' ? 'completed' : 'interrupted');
           this.save(info);
           await this.deliverHandoff(info, session);
