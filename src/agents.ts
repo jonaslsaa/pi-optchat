@@ -712,11 +712,13 @@ export class Children {
         if (deferred.aborted) return;
         this.warn(`${run.id} could not write its own handoff, so the compactor writes it: ${error instanceof Error ? error.message : String(error)}`);
       }
-      const evidence = [run, ...this.history.descendants(run.id)].map((record): HandoffEvidence => {
-        try { return { run: record, messages: this.retained(record.id) }; }
-        catch (error) { return { run: record, messages: [], transcriptError: String(error) }; }
-      });
+      const records = [run, ...this.history.descendants(run.id)];
+      let evidence: HandoffEvidence[] = records.map(record => ({ run: record, messages: [] }));
       if (summary === undefined) {
+        evidence = records.map((record): HandoffEvidence => {
+          try { return { run: record, messages: this.retained(record.id) }; }
+          catch (error) { return { run: record, messages: [], transcriptError: String(error) }; }
+        });
         try {
           if (!this.options.summarizeHandoff) throw new Error('No handoff summarizer configured');
           summary = await this.options.summarizeHandoff(run, evidence[0].messages, evidence.slice(1), deferred);
