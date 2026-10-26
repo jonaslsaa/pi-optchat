@@ -22,7 +22,7 @@ test('usage keeps roles/sessions separate, includes caches, and survives replay 
     ledger.backfill(session.getEntries(), session.getSessionId());
     const child = SessionManager.inMemory(); child.appendMessage(message);
     ledger.backfill(child.getEntries(), session.getSessionId(), 'subagent', 'child-1');
-    ledger.compression(message, 'import', session.getSessionId());
+    ledger.call(message, 'import', session.getSessionId());
     assert.equal(ledger.entries.length, 4);
     const total = summarizeUsage(ledger.select('This session', session.getSessionId(), now + 1000));
     assert.equal(total.total.totalTokens, 405);

@@ -16,14 +16,16 @@ If you open the same profile in a second terminal, Pi offers to connect it to th
 
 ### Ending a conversation
 
-- Run `/complete` when done. The window closes, remaining work stops, and the compactor writes a handoff for the main agent: decisions, changes, evidence, failures, unfinished work, and links to the transcripts.
+- Run `/complete` when done. The window closes, remaining work stops, and the window's own agent writes a handoff for the main agent in the background: decisions, changes, evidence, failures, unfinished work, plus links to the transcripts.
 - Closing or force-quitting the window also produces a handoff, marked **interrupted**.
-- If the original window is closed cleanly or reloaded, it doesn't wait for the compactor: handoffs, including one still being written after `/complete`, are written and delivered on next start. If it is killed, reopening the profile recovers unfinished handoffs (work is not restarted).
+- If the original window is closed cleanly or reloaded, it doesn't wait for the handoff: handoffs, including one still being written after `/complete`, are written and delivered on next start. If it is killed, reopening the profile recovers unfinished handoffs (work is not restarted).
 - Closing the original window, or running `/reload` in it, ends every connected conversation; Pi gives no chance to warn before a reload. The connected window then shows **disconnected**. `/new` there starts over: after the profile picker if Pi was started without `--optchat-profile`, a profile still open elsewhere offers **Start a connected subagent conversation here** again, and a free one opens in this window.
 
 ### Handoff limits
 
-The whole transcript is summarized in one call if it fits in about 128,000 input tokens (estimated at 4 bytes per token; less on smaller models), otherwise in chunks. Output is up to 16,000 tokens, with a 5-minute timeout per call. If summarizing fails, a labelled fallback still reports the task, last result, and transcript locations.
+The handoff is one more request in the window's own conversation: the same model, thinking level, system prompt, tools and messages, with a closing message asking for the handoff (`windowHandoff` in `src/prompts.ts`). Everything before that message is what the window last sent, so the provider reads it from its prompt cache (if the cache is still warm, about 5 minutes on Anthropic). No tool runs and the window's transcript is not changed. After a restart, the window's session is reopened from its transcript for this. The call has a 5-minute timeout and is retried on dropped connections.
+
+If the window can't write it (an error, an empty or tool-only reply, a context overflow, a missing model or transcript), the compactor writes it instead: the whole transcript and subagent transcripts are summarized in one call if they fit in about 128,000 input tokens (estimated at 4 bytes per token; less on smaller models), otherwise in chunks. Output is up to 16,000 tokens, with a 5-minute timeout per call. If that fails too, a labelled fallback still reports the task, last result, and transcript locations.
 
 ## Open an existing background agent in another terminal
 

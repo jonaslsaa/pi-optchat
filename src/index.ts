@@ -29,7 +29,7 @@ import { showAgentView } from './agent-view.ts';
 import { inspectorShortcut, mountNavigation } from './navigation.ts';
 import { joinHeadless, listAttachableAgents, serveWindows } from './window-bridge.ts';
 import { openConnectedWindow, registerConnectedRenderer } from './connected-window.ts';
-import { createHandoffSummarizer } from './handoff.ts';
+import { createHandoffSummarizer, createWindowHandoff } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
 import { showModelPicker, showSettings } from './settings-page.ts';
 import { showMenu } from './menu.ts';
@@ -237,7 +237,7 @@ export default function optchat(pi: ExtensionAPI) {
       const saved: unknown = existsSync(pending) ? JSON.parse(readFileSync(pending, 'utf8')) : [];
       if (!Array.isArray(saved) || !saved.every(isPendingReport)) throw new Error('Invalid pending report journal.');
       const memory = await Memory.open(memoryDirectory(dir), createCompressor(ctx.modelRegistry, () => config.compactor, message => {
-        usage.compression(message, 'compactor', sessionId);
+        usage.call(message, 'compactor', sessionId);
         status(ctx);
       }, () => config.summaryAcceptBytes), warning => ctx.ui.notify(warning, 'error'), undefined, config.jobs);
       openingMemory = memory;
@@ -246,7 +246,8 @@ export default function optchat(pi: ExtensionAPI) {
       if (recovered) ctx.ui.notify(`Recovered ${recovered} unanswered inputs into ${name}'s memory. Ask to continue them when ready.`, 'info');
       const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => `${instructions(dir)}\n\n${IMPORT_GUIDANCE}`,
         deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, builtins: () => loadedBuiltins(pi), settings: () => config, hold: holdReports,
-          summarizeHandoff: createHandoffSummarizer(ctx.modelRegistry, () => config.compactor, message => usage.compression(message, 'compactor', sessionId)) });
+          writeHandoff: createWindowHandoff((message, run) => usage.call(message, 'subagent', sessionId, run.id)),
+          summarizeHandoff: createHandoffSummarizer(ctx.modelRegistry, () => config.compactor, message => usage.call(message, 'compactor', sessionId)) });
       const loggedReports = new Set(memory.root.map(e => e.receipt));
       // Reports a crash held back with their unfinished siblings are delivered now, as they are.
       reports = saved.map(s => typeof s === 'string' ? { text: s } : { text: s.text, count: s.count })
@@ -622,7 +623,7 @@ export default function optchat(pi: ExtensionAPI) {
         }
         if (!closed) { await a.memory.close(); closed = true; }
         const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, message => {
-          a.usage.compression(message, 'import', ctx.sessionManager.getSessionId());
+          a.usage.call(message, 'import', ctx.sessionManager.getSessionId());
         }, () => a.config.summaryAcceptBytes);
         const completed = await showProgress(ctx, job, (signal, progress) => runImport(a.dir, compress, signal, a.config.jobs, progress), signal);
         ctx.ui.notify(completed ? `Imported ${job.added} messages into ${a.name}. Previous memory retained at ${job.previous === '.' ? a.dir : join(a.dir, job.previous)}.`

@@ -61,8 +61,9 @@ export class UsageLedger {
     appendJson(this.file, entry);
     this.entries.push(entry); if (entry.id) this.ids.add(entry.id);
   }
-  compression(message: AssistantMessage, role: 'compactor' | 'import', session: string) {
-    this.add({ id: randomUUID(), date: new Date().toISOString(), role, session, provider: message.provider, model: message.model, usage: message.usage });
+  /** One model call made outside any session: compaction, an import, a window's handoff (with its `runId`). */
+  call(message: AssistantMessage, role: UsageRole, session: string, runId?: string) {
+    this.add({ id: randomUUID(), date: new Date().toISOString(), role, session, runId, provider: message.provider, model: message.model, usage: message.usage });
   }
   backfill(entries: SessionEntry[], session: string, role: 'main' | 'subagent' = 'main', runId?: string) {
     const cursorKey = `${session}:${runId ?? ''}`;

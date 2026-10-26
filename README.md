@@ -77,7 +77,7 @@ Details, errors and join rules: [docs/connected-windows.md](docs/connected-windo
 | --- | --- | --- |
 | Main agent | Whatever is selected in Pi, then the profile's last pick | `/model` |
 | Subagents | Anthropic Opus 5.5, high | `/optchat agents model` |
-| Compactor (summaries, imports, handoffs) | Anthropic Sonnet 5.5, medium | `/optchat model` |
+| Compactor (summaries, imports, fallback handoffs) | Anthropic Sonnet 5.5, medium | `/optchat model` |
 
 All three are saved per profile. The main agent's model and thinking level are saved whenever you change them in Pi and picked again when the profile opens, unless the saved model is no longer available. This includes resumed sessions: the profile's pick replaces the one the session last used. On Pi's command line, `--model` (or `--provider`) keeps that model, `--thinking` that level, and `--models` keeps a saved model only if it is in that list. Subagent and compactor settings do not follow the main model. If you use other providers, change them before chatting. Authentication uses Pi's existing provider login.
 
@@ -178,7 +178,7 @@ Each profile is locked to one Pi process. Open the same profile in a second term
 
 - Your first message starts a subagent in the second window's working directory; later messages continue it. The window looks like a normal Pi chat: messages you send while it works queue under the spinner, Esc interrupts, Alt+Up takes the last queued one back.
 - The subagent runs inside the original process, which stays the only writer of memory.
-- `/tell-main <message>` messages the main agent. `/complete` ends the conversation and the compactor writes a handoff for the main agent; closing the window also produces one, marked **interrupted**.
+- `/tell-main <message>` messages the main agent. `/complete` ends the conversation and the window's agent writes a handoff for the main agent (the compactor if it can't); closing the window also produces one, marked **interrupted**.
 - Text only. The connection is a local socket restricted to your OS user (on Windows a named pipe, without that restriction; see [Windows](#windows)); no daemon or server.
 
 To open an existing background agent instead, pick it from the menu, or pass its ID:

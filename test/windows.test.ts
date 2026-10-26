@@ -17,7 +17,7 @@ import { textContent } from '../src/transcript.ts';
 import { serveWindows, connectWindow, joinHeadless, listAttachableAgents, type WindowEvent } from '../src/window-bridge.ts';
 import { profileSocket, lockProfile, createProfile, profilePath } from '../src/profiles.ts';
 import { openConnectedWindow, registerConnectedRenderer } from '../src/connected-window.ts';
-import { createHandoffSummarizer } from '../src/handoff.ts';
+import { createHandoffSummarizer, createWindowHandoff } from '../src/handoff.ts';
 import { removeDir } from './support.ts';
 
 /** These tests cover delegation below the first level, which profiles opt into with Subagent levels. */
@@ -30,12 +30,16 @@ async function until(predicate: () => boolean) {
   const deadline = Date.now() + 10000;
   while (!predicate()) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(resolve => setTimeout(resolve, 10)); }
 }
-async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
+/** `windowWrites`: ended windows write their own handoffs, as in OptChat; without it, every handoff is the compactor's. */
+async function fixture(contextWindow = 1_000_000, maxTokens = 64_000, windowWrites = false) {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-window-'));
   const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
     modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
-  const control = { failSummary: false, truncateSummary: false, holdSummary: false, summaryText: 'Handoff: retained the user correction and actual work.' };
+  const control = { failSummary: false, truncateSummary: false, holdSummary: false, summaryText: 'Handoff: retained the user correction and actual work.',
+    window: 'answer' as 'answer' | 'error' | 'tool call' };
+  /** Every request's messages as the provider got them, in order; `handoff` marks the window's handoff request. */
+  const contexts: { messages: string[]; handoff: boolean }[] = [];
   const requests: string[] = [], summaries: string[] = [], reports: string[] = [], warnings: string[] = [];
   const summaryOptions: { maxTokens?: number; systemPrompt?: string }[] = [];
   runtime.registerProvider('window-test', {
@@ -45,8 +49,9 @@ async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
       const stream = createAssistantMessageEventStream();
       const last = context.messages.at(-1);
       const text = textContent(last && 'content' in last ? last.content : '');
-      const summary = text.includes('Prior handoff:');
-      if (summary) summaries.push(text); else requests.push(text);
+      const summary = text.includes('Prior handoff:'), handoff = text.startsWith('[OptChat] This connected conversation has ended');
+      contexts.push({ messages: context.messages.map(m => JSON.stringify(m)), handoff });
+      if (summary) summaries.push(text); else if (!handoff) requests.push(text);
       if (summary) summaryOptions.push({ maxTokens: options?.maxTokens, systemPrompt: textContent(context.messages.find(m => m.role === 'system')?.content) });
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: summary ? control.summaryText : `Reply: ${text.split('Your task:\n').at(-1)}` }],
         api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
@@ -60,6 +65,11 @@ async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
         message.content = [{ type: 'toolCall', id: 'evidence', name: 'bash', arguments: { command: "printf 'DESCENDANT_TESTS_PASSED_123\\n'" } }];
       }
       if (summary && control.failSummary) { message.stopReason = 'error'; message.errorMessage = 'Synthetic summarizer unavailable'; }
+      if (handoff) {
+        message.content = [control.window === 'tool call' ? { type: 'toolCall', id: 'late', name: 'bash', arguments: { command: 'true' } } : { type: 'text', text: 'Window handoff: kept the existing API.' }];
+        if (control.window === 'tool call') message.stopReason = 'toolUse';
+        if (control.window === 'error') { message.stopReason = 'error'; message.errorMessage = 'Synthetic window error'; }
+      }
       if (text === 'spawn one') {
         message.content = [{ type: 'toolCall', id: 'spawn-one', name: 'spawn', arguments: { tasks: [{ task: 'hold work descendant' }] } }];
         message.stopReason = 'toolUse';
@@ -93,11 +103,12 @@ async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
   });
   const registry = new ModelRegistry(runtime), choice = () => ({ provider: 'window-test', model: 'child', thinking: 'off' as const });
   const ledger = new UsageLedger(dir);
-  const summarize = createHandoffSummarizer(registry, choice, reply => ledger.compression(reply, 'compactor', 'owner'));
-  const options = { settings: nested, parentSession: 'owner', usage: ledger, createSession: (options: Parameters<typeof createAgentSession>[0]) => createAgentSession({ ...options, modelRuntime: runtime }), summarizeHandoff: summarize };
+  const summarize = createHandoffSummarizer(registry, choice, reply => ledger.call(reply, 'compactor', 'owner'));
+  const options = { settings: nested, parentSession: 'owner', usage: ledger, createSession: (options: Parameters<typeof createAgentSession>[0]) => createAgentSession({ ...options, modelRuntime: runtime }), summarizeHandoff: summarize,
+    ...windowWrites ? { writeHandoff: createWindowHandoff((reply, run) => ledger.call(reply, 'subagent', 'owner', run.id)) } : {} };
   const children = new Children(memory, registry, choice, () => '', async text => { reports.push(text); }, text => warnings.push(text), dir, options);
   const unlock = await lockProfile(dir, 'test owner');
-  return { control, dir, memory, children, requests, summaries, summaryOptions, reports, warnings, registry, runtime, choice, options, ledger,
+  return { control, contexts, dir, memory, children, requests, summaries, summaryOptions, reports, warnings, registry, runtime, choice, options, ledger,
     async close() { await children.close(); await memory.close(); await unlock(); removeDir(dir); } };
 }
 
@@ -1038,4 +1049,66 @@ test("Pi's compaction replaces session.messages, yet a connected window still ge
     await until(() => replies().length === 4);
     assert.equal(replies().at(-1), 'Reply: after compaction');
   } finally { client.close(); await close(); await f.close(); }
+});
+
+/** The window's handoff request must repeat its last request byte for byte, with only its reply and the handoff prompt after it, so the provider reads it all from the cache. */
+function assertCachedPrefix(contexts: { messages: string[]; handoff: boolean }[]) {
+  const handoff = contexts.findLast(c => c.handoff), before = contexts.slice(0, contexts.lastIndexOf(handoff!)).findLast(c => !c.handoff);
+  assert.ok(handoff && before);
+  assert.deepEqual(handoff.messages.slice(0, before.messages.length), before.messages);
+  assert.equal(handoff.messages.length, before.messages.length + 2);
+  assert.match(handoff.messages.at(-2)!, /"role":"assistant"/);
+}
+
+test('an ended window writes its own handoff from its cached context, and the compactor is not called', async () => {
+  const f = await fixture(undefined, undefined, true);
+  try {
+    const [id] = await f.children.spawn([{ task: 'Investigate this repository.' }], f.dir, undefined, undefined, true);
+    await until(() => f.children.history.records.get(id)?.state === 'waiting');
+    await f.children.finish(id, 'complete');
+    const text = f.children.history.records.get(id)?.handoff?.text ?? '';
+    assert.match(text, /completed by user\..*\nWindow handoff: kept the existing API\.\n/);
+    assert.match(f.contexts.at(-1)!.messages.at(-1)!, /ended: the user completed it/);
+    assertCachedPrefix(f.contexts);
+    assert.equal(f.summaries.length, 0);
+    // Its own entry, beside the run's turns that Pi's session file records.
+    assert.deepEqual(f.ledger.entries.filter(e => e.runId === id && !e.id?.startsWith('entry:')).map(e => e.role), ['subagent']);
+    assert.ok(!f.ledger.entries.some(e => e.role === 'compactor'));
+  } finally { await f.close(); }
+});
+
+for (const failure of ['error', 'tool call'] as const) {
+  test(`a window that can't write its handoff (${failure}) falls back to the compactor`, async () => {
+    const f = await fixture(undefined, undefined, true);
+    f.control.window = failure;
+    try {
+      const [id] = await f.children.spawn([{ task: 'Investigate this repository.' }], f.dir, undefined, undefined, true);
+      await until(() => f.children.history.records.get(id)?.state === 'waiting');
+      await f.children.finish(id, 'complete');
+      assert.ok(f.contexts.some(c => c.handoff));
+      assert.equal(f.summaries.length, 1);
+      assert.match(f.children.history.records.get(id)?.handoff?.text ?? '', /Handoff: retained the user correction/);
+    } finally { await f.close(); }
+  });
+}
+
+test('a handoff deferred by /reload is written by the reopened window on the next start', async () => {
+  const f = await fixture(undefined, undefined, true);
+  try {
+    const [id] = await f.children.spawn([{ task: 'Investigate this repository.' }], f.dir, undefined, undefined, true);
+    await until(() => f.children.history.records.get(id)?.state === 'waiting');
+    f.children.deferHandoffs(); await f.children.close();
+    assert.deepEqual(f.children.history.records.get(id)?.handoff, { reason: 'owner-stopped' });
+    assert.ok(!f.contexts.some(c => c.handoff), 'closing does not ask the window');
+    const delivered: string[] = [];
+    const restored = new Children(f.memory, f.registry, f.choice, () => '', async text => { delivered.push(text); }, () => {}, f.dir, f.options);
+    try {
+      await restored.recoverHandoffs();
+      assert.equal(delivered.length, 1);
+      assert.match(delivered[0], /interrupted \(owner-stopped\)\..*\nWindow handoff: kept the existing API\.\n/);
+      assert.match(f.contexts.at(-1)!.messages.at(-1)!, /ended: the main Pi window closed or reloaded/);
+      assertCachedPrefix(f.contexts);
+      assert.equal(f.summaries.length, 0);
+    } finally { await restored.close(); }
+  } finally { await f.close(); }
 });

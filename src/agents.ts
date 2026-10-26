@@ -49,6 +49,9 @@ interface Options { parentSession?: string; usage?: UsageLedger; createSession?:
   hold?: (batch: string, texts: string[]) => void;
   /** Read on every spawn, so a changed profile setting applies to the next one. Missing settings take their defaults. */
   settings?: () => Partial<Settings>;
+  /** Asks an ended connected window's own session for its handoff (see createWindowHandoff). */
+  writeHandoff?: (session: AgentSession, run: RunInfo, signal: AbortSignal) => Promise<string>;
+  /** The compactor's handoff, when the window can't write its own. */
   summarizeHandoff?: (run: RunInfo, messages: AgentMessage[], descendants?: HandoffEvidence[], signal?: AbortSignal) => Promise<string> }
 
 // Subagents load the user's installed extensions, except any copy of OptChat itself: they get memory tools directly and must not open a profile.
@@ -464,9 +467,10 @@ export class Children {
       await Promise.allSettled(children.flatMap(child => child.completion ? [child.completion] : []));
       info.ended = Date.now();
       for (const g of info.guidance) if (g.state === 'queued') g.state = 'undelivered';
-      await this.shutdown(session);
+      // A connected run's session stays open until it has written its handoff below.
+      if (!info.connected) { await this.shutdown(session); this.dispose(session); }
       // A failed dispose must neither keep the slot taken nor drop the report below.
-      this.dispose(session); this.running.delete(info.id);
+      this.running.delete(info.id);
     }
     if (info.cutOff) {
       // Aborted by Pi closing, not by anyone's choice: no report now, the next start resumes it.
@@ -478,8 +482,8 @@ export class Children {
     if (info.connected) {
       info.handoff ??= { reason: 'failed' };
       transition(info, info.handoff.reason === 'complete' ? 'completed' : 'interrupted');
-      this.save(info);
-      await this.deliverHandoff(info);
+      try { this.save(info); await this.deliverHandoff(info, session); }
+      finally { await this.shutdown(session); this.dispose(session); }
       return;
     }
     // Said plainly, so the parent does not take the user's choice for a failure and delegate the task again.
@@ -679,7 +683,8 @@ export class Children {
     this.completions.add(recovery);
     try { await recovery; } finally { this.completions.delete(recovery); this.changed(); }
   }
-  private async deliverHandoff(run: RunInfo) {
+  /** `live`: the run's still open session; without it, the window's session is reopened from its file. */
+  private async deliverHandoff(run: RunInfo, live?: AgentSession) {
     const handoff = run.handoff;
     if (!handoff || handoff.delivered) return;
     if (!handoff.text) {
@@ -689,11 +694,15 @@ export class Children {
         try { return { run: record, messages: this.messages(record.id) }; }
         catch (error) { return { run: record, messages: [], transcriptError: String(error) }; }
       });
-      let summary: string;
-      try {
+      const write = async () => {
+        try { return await this.writtenByWindow(run, live, deferred); }
+        catch (error) { if (deferred.aborted) throw error; } // Otherwise the compactor writes it.
         if (!this.options.summarizeHandoff) throw new Error('No handoff summarizer configured');
-        summary = await this.options.summarizeHandoff(run, evidence[0].messages, evidence.slice(1), deferred);
-      } catch (error) {
+        return await this.options.summarizeHandoff(run, evidence[0].messages, evidence.slice(1), deferred);
+      };
+      let summary: string;
+      try { summary = await write(); }
+      catch (error) {
         if (deferred.aborted) return;
         summary = `Automatic summary unavailable: ${String(error)}\nInitial request: ${run.task}\nLast recorded result: ${run.report ?? 'No final answer recorded.'}\nUndelivered guidance: ${run.guidance.filter(g => g.state === 'undelivered').map(g => g.text).join('\n')}\nRead the saved transcript or run metadata for the full work and user corrections.`;
       }
@@ -707,6 +716,27 @@ export class Children {
     }
     await this.report(handoff.text, { once: true });
     handoff.delivered = true; this.save(run);
+  }
+  /** The window's own session writes the handoff, so it reads its context from the cache. After a restart the session is reopened
+   * from its file; a close while it reopens doesn't wait for it, and it is disposed once open. */
+  private async writtenByWindow(run: RunInfo, live: AgentSession | undefined, signal: AbortSignal) {
+    const write = this.options.writeHandoff;
+    if (!write) throw new Error('No window handoff configured');
+    if (live) return await write(live, run, signal);
+    const model = this.find(run.model);
+    if (!model || !run.sessionFile || !existsSync(run.sessionFile)) throw new Error('The window\'s model or transcript is unavailable');
+    const sessionManager = SessionManager.open(run.sessionFile);
+    if (!sessionManager.buildSessionProjection().messages.some(message => message.role === 'assistant')) throw new Error('The window never answered, so it has nothing to hand off');
+    // No thinking level: the session restores the one it ran with.
+    const opening = this.open({ id: run.id, directory: run.cwd, depth: run.depth, parentId: run.parentId, connected: true, model, sessionManager });
+    await abortable(opening, signal);
+    if (signal.aborted) {
+      void opening.then(async session => { await this.shutdown(session); this.dispose(session); }, () => {});
+      throw new Error('Pi is closing');
+    }
+    const session = await opening;
+    try { return await write(session, run, signal); }
+    finally { await this.shutdown(session); this.dispose(session); }
   }
   /** Ends a run and its descendants; `cause` is said in its report (the user's Ctrl+X by default). */
   async stop(id: string, cause: StopCause = 'user') {
