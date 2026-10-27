@@ -135,7 +135,12 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('thinking_level_select', (_event, ctx) => rememberMain(ctx));
   const restoreMain = async (ctx: ExtensionContext, { name, config: { main } }: Active) => {
     restored = undefined;
-    if (!main || pinnedModel || launch.models && !ctx.scopedModels.some(({ model }) => model.provider === main.provider && model.id === main.model)) return;
+    if (!main) {
+      // Nothing saved yet: record where Pi is, so later opens keep this model instead of following Pi's default.
+      if (!pinnedModel) rememberMain(ctx);
+      return;
+    }
+    if (pinnedModel || launch.models && !ctx.scopedModels.some(({ model }) => model.provider === main.provider && model.id === main.model)) return;
     const model = ctx.modelRegistry.find(main.provider, main.model), thinking = launch.thinking ?? main.thinking;
     restoring = true;
     try {
