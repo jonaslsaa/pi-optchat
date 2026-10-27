@@ -757,6 +757,21 @@ test('a /skill: message the user steers in counts as delivered once the agent ge
   } finally { await children.close(); removeDir(dir); }
 });
 
+test('messages steered at the same moment each keep their own queued text, and both count as delivered', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-steer-together-'));
+  reviewSkill(dir);
+  const reports: string[] = [];
+  const { children } = await busyChildren(dir, reports);
+  try {
+    const [id] = await children.spawn([{ task: 'short tool' }], dir);
+    await until(() => !!children.live(id)?.tools.size);
+    await Promise.all([children.tell(id, 'Plain note.'), children.tell(id, '/skill:review Check it.', 'user')]);
+    assert.equal(children.history.records.get(id)?.guidance[0].sent, undefined, 'a plain message is queued as typed');
+    await until(() => reports.length === 1);
+    assert.deepEqual(children.history.records.get(id)?.guidance.map(g => g.state), ['delivered', 'delivered']);
+  } finally { await children.close(); removeDir(dir); }
+});
+
 test('a /skill: message sent to a paused agent counts as delivered once it starts the next turn', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-prompt-skill-'));
   reviewSkill(dir);
