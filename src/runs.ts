@@ -20,9 +20,12 @@ export interface RunInfo {
   handoff?: { reason: FinishReason; text?: string; delivered?: boolean; unread?: string[] };
   /** Working when Pi closed or crashed: the next start resumes it (see `Children.resumeCutOff`). */
   cutOff?: boolean;
-  /** `from` is missing on runs saved before senders were recorded. */
-  guidance: { text: string; date: number; state: 'queued' | 'delivered' | 'undelivered'; from?: 'user' | 'manager' }[];
+  /** `from` is missing on runs saved before senders were recorded. `sent`: what Pi queued, when it rewrote `text` (a `/skill:` line becomes the skill itself). */
+  guidance: Guidance[];
 }
+export type Guidance = { text: string; date: number; state: 'queued' | 'delivered' | 'undelivered'; from?: 'user' | 'manager'; sent?: string };
+/** The text the agent receives, which is how Pi's queue and the session know the message. */
+export const sentText = (g: Guidance) => g.sent ?? g.text;
 const moves: Record<RunState, readonly RunState[]> = {
   running: ['waiting', 'paused', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'],
   waiting: ['running', 'paused', 'stopping', 'completed', 'failed', 'stopped', 'interrupted'],
@@ -63,7 +66,7 @@ function isRun(value: unknown): value is RunInfo {
       && (value.handoff.unread === undefined || Array.isArray(value.handoff.unread) && value.handoff.unread.every(text => typeof text === 'string')))
     && typeof value.depth === 'number' && Number.isInteger(value.depth) && value.depth >= 1
     && (value.parentId === undefined || typeof value.parentId === 'string')
-    && Array.isArray(value.guidance) && value.guidance.every(g => record(g) && typeof g.text === 'string' && typeof g.date === 'number' && ['queued', 'delivered', 'undelivered'].includes(String(g.state)) && (g.from === undefined || g.from === 'user' || g.from === 'manager'));
+    && Array.isArray(value.guidance) && value.guidance.every(g => record(g) && typeof g.text === 'string' && typeof g.date === 'number' && ['queued', 'delivered', 'undelivered'].includes(String(g.state)) && (g.from === undefined || g.from === 'user' || g.from === 'manager') && (g.sent === undefined || typeof g.sent === 'string'));
 }
 export const CUT_OFF = 'Pi closed before this agent finished. Its partial transcript is retained.';
 export function sessionMessages(file: string): AgentMessage[] {

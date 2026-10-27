@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, unlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -244,6 +244,8 @@ const plain = (lines: string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za
 
 test('a connected window draws each reply with its tool results, the live turn, Working vs Waiting for N agents, and your queued messages', async () => {
   const f = await fixture();
+  mkdirSync(join(f.dir, '.pi', 'skills', 'review'), { recursive: true });
+  writeFileSync(join(f.dir, '.pi', 'skills', 'review', 'SKILL.md'), '---\nname: review\ndescription: Reviews code.\n---\nREVIEW_SKILL_BODY\n');
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = mkdtempSync(join(tmpdir(), 'optchat-home-'));
   createProfile('draw');
@@ -309,6 +311,11 @@ test('a connected window draws each reply with its tool results, the live turn, 
     assert.deepEqual(keys?.('\x1b'), { consume: true });
     await until(() => !/Steering/.test(live()) && sent.some(m => m.details?.from === 'user' && /first steer/.test(String(m.content))));
     assert.equal(f.children.history.records.get(id)?.guidance.some(g => g.text === 'second steer'), false);
+
+    // Pi sends a /skill: line as the skill itself; the chat still shows it as you typed it, and it leaves the queue once sent.
+    await window.submit('/skill:review Check it.');
+    await until(() => sent.some(m => m.details?.from === 'user' && m.content === '/skill:review Check it.'));
+    await until(() => f.children.history.records.get(id)?.guidance.at(-1)?.state === 'delivered' && !/Steering/.test(live()));
   } finally {
     widget?.dispose?.();
     window.close(); await close(); await f.close();

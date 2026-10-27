@@ -5,7 +5,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './cache.ts';
 import { checkSocketPath, isWindows, profileSocket, removeStaleSocket } from './profiles.ts';
 import { textContent } from './transcript.ts';
-import { isActiveRun, type RunInfo } from './runs.ts';
+import { isActiveRun, sentText, type RunInfo } from './runs.ts';
 import { HANDOFF_REQUEST } from './prompts.ts';
 
 const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'withdraw', 'complete'] as const;
@@ -191,7 +191,10 @@ export async function serveWindows(directory: string, children: Children, availa
         if (task) { text = info.task; firstUser = false; }
         if (message.role === 'user') {
           // The task, and an interrupt, which continues with your queued messages, are yours too.
-          const yours = task || text.startsWith(INTERRUPTED) || info.guidance.some(g => g.from === 'user' && g.text === text.trim());
+          // A message of yours shows as you typed it, not as the skill Pi expanded it into.
+          const guidance = info.guidance.find(g => g.from === 'user' && sentText(g) === text.trim());
+          if (guidance) text = guidance.text;
+          const yours = task || text.startsWith(INTERRUPTED) || !!guidance;
           if (text) send({ kind: 'event', name: 'message', from: yours ? 'user' : undefined, text: shorten(text, 200_000) });
           continue;
         }

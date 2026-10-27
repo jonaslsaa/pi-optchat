@@ -558,9 +558,10 @@ async function busyChildren(dir: string, reports: string[], options: { settings?
       asked.push(typed);
       const stream = createAssistantMessageEventStream();
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `Now doing: ${typed.at(-1)}` }], api: model.api, model: model.id, provider: model.provider, stopReason: 'stop', timestamp: Date.now(), usage: emptyUsage() };
-      // A 'slow tool' task first works in a long bash call.
-      if (textContent(context.messages.find(m => m.role === 'user')?.content ?? '').endsWith('slow tool') && !context.messages.some(m => m.role === 'toolResult')) {
-        message.content = [{ type: 'toolCall', id: 'slow', name: 'bash', arguments: { command: 'sleep 30' } }]; message.stopReason = 'toolUse';
+      // A 'slow tool' task first works in a long bash call, a 'short tool' one in a short one.
+      const task = textContent(context.messages.find(m => m.role === 'user')?.content ?? '');
+      if (/(slow|short) tool$/.test(task) && !context.messages.some(m => m.role === 'toolResult')) {
+        message.content = [{ type: 'toolCall', id: 'slow', name: 'bash', arguments: { command: task.endsWith('slow tool') ? 'sleep 30' : 'sleep 1' } }]; message.stopReason = 'toolUse';
       }
       void (async () => {
         stream.push({ type: 'start', partial: message });
@@ -729,6 +730,61 @@ test('taking back a message whose text is queued twice keeps the queue and its r
     const session = children.live(id)!.session;
     await until(() => session.getSteeringMessages().length === 2);
     assert.deepEqual(children.history.records.get(id)?.guidance.map(g => g.text), [...session.getSteeringMessages()]);
+  } finally { await children.close(); removeDir(dir); }
+});
+
+/** A project skill: Pi queues `/skill:review …` as the skill's own text, so what the agent receives differs from what was typed. */
+function reviewSkill(dir: string) {
+  mkdirSync(join(dir, '.pi', 'skills', 'review'), { recursive: true });
+  writeFileSync(join(dir, '.pi', 'skills', 'review', 'SKILL.md'), '---\nname: review\ndescription: Reviews code.\n---\nREVIEW_SKILL_BODY\n');
+}
+
+test('a /skill: message the user steers in counts as delivered once the agent gets it, and can be taken back until then', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-steer-skill-'));
+  reviewSkill(dir);
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports);
+  try {
+    const [id] = await children.spawn([{ task: 'short tool' }], dir);
+    await until(() => !!children.live(id)?.tools.size);
+    await children.tell(id, '/skill:review Check it.', 'user');
+    assert.equal(children.withdraw(id), '/skill:review Check it.', 'taken back while still queued');
+    await until(() => !children.live(id)?.session.getSteeringMessages().length);
+    await children.tell(id, '/skill:review Check it.', 'user');
+    await until(() => reports.length === 1);
+    assert.equal(asked.flat().filter(text => text.includes('REVIEW_SKILL_BODY')).length >= 1, true, 'the agent got the skill');
+    assert.deepEqual(children.history.records.get(id)?.guidance.map(g => g.state), ['delivered']);
+  } finally { await children.close(); removeDir(dir); }
+});
+
+test('a /skill: message sent to a paused agent counts as delivered once it starts the next turn', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-prompt-skill-'));
+  reviewSkill(dir);
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports);
+  try {
+    const [id] = await children.spawn([{ task: 'busy' }], dir);
+    await until(() => asked.length === 1);
+    assert.equal(await children.interrupt(id), 'paused');
+    await children.tell(id, '/skill:review Check it.', 'user');
+    await until(() => asked.some(texts => texts.some(text => text.includes('REVIEW_SKILL_BODY'))));
+    await until(() => children.history.records.get(id)?.guidance[0]?.state === 'delivered');
+  } finally { await children.close(); removeDir(dir); }
+});
+
+test('an interrupt continues with a steered /skill: message once, as the skill', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-interrupt-skill-'));
+  reviewSkill(dir);
+  const reports: string[] = [];
+  const { children, asked } = await busyChildren(dir, reports);
+  try {
+    const [id] = await children.spawn([{ task: 'busy' }], dir);
+    await until(() => asked.length === 1);
+    await children.tell(id, '/skill:review Check it.', 'user');
+    assert.equal(await children.interrupt(id), 'continued');
+    await until(() => reports.length === 1);
+    assert.equal(asked.at(-1)?.filter(text => text.includes('REVIEW_SKILL_BODY')).length, 1, 'once, not also as a requeued message');
+    assert.equal(asked.at(-1)?.some(text => text.includes('/skill:review')), false, 'the skill, not the raw command');
   } finally { await children.close(); removeDir(dir); }
 });
 
