@@ -313,8 +313,8 @@ test('a connected window draws each reply with its tool results, the live turn, 
     assert.equal(f.children.history.records.get(id)?.guidance.some(g => g.text === 'second steer'), false);
 
     // Pi sends a /skill: line as the skill itself; the chat still shows it as you typed it, and it leaves the queue once sent.
-    await window.submit('/skill:review Check it.');
-    await until(() => sent.some(m => m.details?.from === 'user' && m.content === '/skill:review Check it.'));
+    await window.submit('/skill:review Check "$&".');
+    await until(() => sent.some(m => m.details?.from === 'user' && m.content === '/skill:review Check "$&".'));
     await until(() => f.children.history.records.get(id)?.guidance.at(-1)?.state === 'delivered' && !/Steering/.test(live()));
   } finally {
     widget?.dispose?.();
