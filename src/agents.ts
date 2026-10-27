@@ -444,7 +444,8 @@ export class Children {
         if (live.pendingGuidance.length) {
           transition(info, 'running'); this.save(info);
           live.prompting = live.pendingGuidance.shift()!;
-          await session.prompt(live.prompting.text);
+          // An extension command sends no message at all, so this can't outlive the prompt and claim a later one.
+          try { await session.prompt(live.prompting.text); } finally { live.prompting = undefined; }
           continue;
         }
         if (live.pendingReports.length) {
