@@ -1,6 +1,6 @@
 import { Container, fuzzyFilter, getKeybindings, Input, SelectList, SettingsList, Spacer, Text, type Component, type SelectItem, type SettingItem } from '@earendil-works/pi-tui';
 import { DynamicBorder, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
-import { defaults, THINKING, type ProfileConfig } from './profiles.ts';
+import { baselineConfig, THINKING, type ProfileConfig } from './profiles.ts';
 import { invalid, isNumberKey, percent, SETTING_KEYS, SETTINGS, type NumberKey, type SettingKey } from './settings.ts';
 import type { ModelChoice } from './compactor.ts';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
@@ -12,9 +12,9 @@ const ROLES: Record<Role, { label: string; description: string; applies: string 
 };
 const modelName = (choice: ModelChoice) => `${choice.provider}/${choice.model}`;
 export const showModel = (choice: ModelChoice) => `${modelName(choice)} · ${choice.thinking}`;
-/** The value column: the model, then whether it is the default (shown short, without its provider). */
-const modelValue = (theme: Theme, role: Role, choice: ModelChoice) => `${showModel(choice)}${theme.fg('dim', showModel(choice) === showModel(defaults[role])
-  ? '  default' : `  default ${defaults[role].model} · ${defaults[role].thinking}`)}`;
+/** The value column: the model, then whether it is what a new profile starts from (shown short, without its provider). */
+const modelValue = (theme: Theme, role: Role, choice: ModelChoice, baseline: ProfileConfig) => `${showModel(choice)}${theme.fg('dim', showModel(choice) === showModel(baseline[role])
+  ? '  default' : `  default ${baseline[role].model} · ${baseline[role].thinking}`)}`;
 const show = (key: SettingKey, value: number | boolean) => {
   const spec = SETTINGS[key];
   return typeof value === 'boolean' ? value ? 'on' : 'off' : spec.kind === 'percent' ? percent(value) : spec.kind === 'number' && spec.unit ? `${value} ${spec.unit}` : String(value);
@@ -131,9 +131,11 @@ export function frame(theme: Theme, title: string, profile: string | undefined, 
 /** The page itself: Pi's settings list over this profile's config, one row per setting, saved on change. */
 export function settingsPage(theme: Theme, o: Options, close: () => void, redraw = () => {}) {
   const { config } = o;
+  // What a new profile starts from: the template when there is one, else the recipe's defaults.
+  const baseline = baselineConfig();
   const notice = new Text('', 2, 0);
   const marker = (same: boolean, fallback: string) => theme.fg('dim', same ? '  default' : `  default ${fallback}`);
-  const value = (key: SettingKey, current: number | boolean) => `${show(key, current)}${marker(current === SETTINGS[key].default, show(key, SETTINGS[key].default))}`;
+  const value = (key: SettingKey, current: number | boolean) => `${show(key, current)}${marker(current === baseline[key], show(key, baseline[key]))}`;
   const apply = (patch: Partial<ProfileConfig>, what: string, applies: string) => {
     const problem = update(o, patch);
     if (!problem) notice.setText(theme.fg('success', `Saved ${what}. `) + theme.fg('muted', applies));
@@ -141,11 +143,11 @@ export function settingsPage(theme: Theme, o: Options, close: () => void, redraw
   };
   const models = (['compactor', 'subagent'] as const).map((role): SettingItem => {
     const { label, description, applies } = ROLES[role];
-    return { id: role, label, description: `${description} Default ${showModel(defaults[role])}. ${applies}`,
-      currentValue: modelValue(theme, role, config[role]),
+    return { id: role, label, description: `${description} Default ${showModel(baseline[role])}. ${applies}`,
+      currentValue: modelValue(theme, role, config[role], baseline),
       submenu: (_value, done) => new ModelStep(theme, role, o.models, config[role], choice => {
         const problem = apply({ [role]: choice }, `${label.toLowerCase()} ${showModel(choice)}`, applies);
-        if (!problem) done(modelValue(theme, role, choice));
+        if (!problem) done(modelValue(theme, role, choice, baseline));
         return problem;
       }, () => done()),
     };

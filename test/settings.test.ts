@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAssistantMessageEventStream, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
@@ -9,7 +9,7 @@ import type { Component } from '@earendil-works/pi-tui';
 import optchat from '../src/index.ts';
 import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
-import { createProfile, defaults, loadConfig, profilePath, saveConfig, type ProfileConfig } from '../src/profiles.ts';
+import { createProfile, defaults, loadConfig, profilePath, saveConfig, templatePath, type ProfileConfig } from '../src/profiles.ts';
 import { settingsPage } from '../src/settings-page.ts';
 import { COMPACT, SEARCH_DOC } from '../src/prompts.ts';
 import { REPORT_TYPE, textContent } from '../src/transcript.ts';
@@ -372,5 +372,31 @@ test('/optchat model and /optchat agents model pick from a searchable list that 
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
     removeDir(dir);
+  }
+});
+
+test('with a template, the settings page marks the template as the default, not the recipe', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-page-'));
+  const home = mkdtempSync(join(tmpdir(), 'optchat-home-')), oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = home;
+  try {
+    const template = { compactor: { provider: 'magpie', model: 'workbuddy/deepseek-v4.1-flash', thinking: 'high' },
+      subagent: { provider: 'magpie', model: 'workbuddy/deepseek-v4.1-flash', thinking: 'high' }, subagentLevels: 2, maxAgents: 24 };
+    mkdirSync(templatePath(), { recursive: true });
+    writeFileSync(join(templatePath(), 'config.json'), JSON.stringify(template));
+    createProfile('seeded');
+    const config = loadConfig(profilePath('seeded'));
+    const page = settingsPage(plain, { profile: 'seeded', config, models: [], save: next => saveConfig(dir, next) }, () => {});
+    const screen = page.render(120).join('\n');
+    // A value the template set is the default now: no fallback value is spelled out.
+    assert.match(screen, /Subagent levels\s+2  default(?! 1)/);
+    assert.match(screen, /Max active agents\s+24  default(?! 8)/);
+    assert.match(screen, /deepseek-v4.1-flash · high  default(?! claude)/);
+    // A row the template did not set still shows the recipe's value as the fallback.
+    assert.match(screen, /Summaries at once\s+8  default/);
+    assert.match(screen, /Memory search\s+off  default/);
+  } finally {
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    removeDir(dir); removeDir(home);
   }
 });

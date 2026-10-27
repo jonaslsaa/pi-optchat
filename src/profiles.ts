@@ -28,16 +28,39 @@ export function listProfiles() {
   const root = join(dataHome(), 'profiles');
   return existsSync(root) ? readdirSync(root, { withFileTypes: true }).filter(f => f.isDirectory() && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(f.name)).map(f => f.name).sort() : [];
 }
+/** A profile's template: a config.json shared by all new profiles, and an optional per-profile AGENTS.md skeleton. */
+export function templatePath() { return join(dataHome(), 'template'); }
+/** The template's config. Missing model keys take the built-in defaults, so a partial file is accepted; a key that is present and invalid is still refused. */
+export function readTemplate(): ProfileConfig {
+  const value: unknown = JSON.parse(readFileSync(join(templatePath(), 'config.json'), 'utf8'));
+  if (!record(value)) throw new Error(`Invalid profile template: ${templatePath()}/config.json`);
+  const compactor = Object.hasOwn(value, 'compactor') ? value.compactor : defaults.compactor;
+  const subagent = Object.hasOwn(value, 'subagent') ? value.subagent : defaults.subagent;
+  const main = Object.hasOwn(value, 'main') ? value.main : undefined;
+  if (!modelChoice(compactor) || !modelChoice(subagent) || main !== undefined && !modelChoice(main)) throw new Error(`Invalid profile template: ${templatePath()}/config.json`);
+  return { compactor, subagent, ...main && { main }, ...readSettings(value) };
+}
+/** The template's AGENTS.md, or undefined when it has none. */
+function templateInstructions() {
+  try { return readFileSync(join(templatePath(), 'AGENTS.md'), 'utf8'); } catch { return undefined; }
+}
+/** What a new profile starts from: the template's config, or the built-in defaults when there is none or it is invalid. Pages that say "default" compare against this. */
+export function baselineConfig(): ProfileConfig {
+  try { return existsSync(join(templatePath(), 'config.json')) ? readTemplate() : defaults; } catch { return defaults; }
+}
 export function createProfile(name: string) {
   const dir = profilePath(name);
   if (existsSync(dir)) throw new Error(`Profile already exists: ${name}`);
+  // Read the template before claiming the directory, so an invalid one fails with no profile on disk.
+  const config = existsSync(join(templatePath(), 'config.json')) ? readTemplate() : defaults;
+  const agents = templateInstructions();
   mkdirSync(resolve(dir, '..'), { recursive: true, mode: 0o700 });
   // Claim the directory exclusively, so a competing creator cannot have its
   // profile overwritten or removed by this attempt's cleanup.
   mkdirSync(dir, { mode: 0o700 });
   try {
-    saveConfig(dir, defaults);
-    atomicWrite(join(dir, 'AGENTS.md'), `# ${name}\n\nThis is the ${name} profile.\nAdd your personal instructions here.\n`);
+    saveConfig(dir, config);
+    atomicWrite(join(dir, 'AGENTS.md'), agents ?? `# ${name}\n\nThis is the ${name} profile.\nAdd your personal instructions here.\n`);
   } catch (error) {
     try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); }
     catch { throw new Error(`Failed to create profile ${name}, and could not remove its incomplete directory: ${dir}`, { cause: error }); }

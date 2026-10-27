@@ -66,6 +66,7 @@ Details, errors and join rules: [docs/connected-windows.md](docs/connected-windo
 | `/optchat usage` | Token usage and cost estimates. |
 | `/optchat activity` | Memory gauge: view size, summaries catching up, running agents. |
 | `/optchat instructions` | Edit this profile's `AGENTS.md`. |
+| `/optchat template save` | Make this profile's config what new profiles start from. |
 | `/optchat browse` | Open a readable snapshot of memory: the shape of what the model sees, summaries you can open down to the original messages, and search that shows where each message is folded. Run again to refresh. |
 | `/optchat import` | Import history, or resume/discard a paused import. |
 | `/complete` | In a connected window: end the conversation and hand off to the main agent. With `--optchat-agent`: detach only, leaving the background agent running. |
@@ -193,7 +194,7 @@ Details (reload behaviour, handoff limits, attach rules, headless joins): [docs/
 
 ## Storage
 
-Profile data lives in `~/.optchat/profiles/<name>/` (override the root with `OPTCHAT_HOME`):
+Profile data lives in `~/.optchat/profiles/<name>/` (override the root with `OPTCHAT_HOME`). A new profile copies `~/.optchat/template/config.json` when that file exists (see [Templates](#templates)):
 
 | Path | Contents |
 | --- | --- |
@@ -212,6 +213,12 @@ Profile data lives in `~/.optchat/profiles/<name>/` (override the root with `OPT
 - To delete a profile, delete its folder. Your original Pi sessions are kept in Pi's normal session directory.
 
 Git checkpoints and the pluggable `Store` seam (for memory on another machine): [docs/storage.md](docs/storage.md).
+
+## Templates
+
+`+ Create profile` writes `~/.optchat/template/config.json` into the new profile when that file exists: models, main model and settings. `~/.optchat/template/AGENTS.md`, when present, becomes the new profile's `AGENTS.md`; otherwise the placeholder is written. `/optchat template save` writes the current profile's `config.json` there. Keys missing from the template keep their built-in defaults, and an invalid template refuses creation with no profile left on disk.
+
+A template sets the profile layer only. Shared instructions belong in Pi's user-level `AGENTS.md` in the agent directory (`~/.pi/agent/AGENTS.md`), which every profile inherits.
 
 ## Windows
 

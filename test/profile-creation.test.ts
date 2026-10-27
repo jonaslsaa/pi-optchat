@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createProfile, defaults, instructions, listProfiles, loadConfig, profilePath } from '../src/profiles.ts';
+import { createProfile, defaults, instructions, listProfiles, loadConfig, profilePath, templatePath } from '../src/profiles.ts';
 import { removeDir } from './support.ts';
 
 function sandbox() {
@@ -65,5 +65,56 @@ test('a competing creator that claims the directory first keeps its files', () =
     assert.throws(() => createProfile('race'), (error: unknown) => error instanceof Error && 'code' in error && error.code === 'EEXIST');
     assert.deepEqual(fs.readdirSync(dir), ['notes.txt']);
     assert.equal(fs.readFileSync(join(dir, 'notes.txt'), 'utf8'), 'other creator');
+  } finally { cleanup(); }
+});
+
+function writeTemplate(config?: unknown, agents?: string) {
+  fs.mkdirSync(templatePath(), { recursive: true });
+  if (config !== undefined) fs.writeFileSync(join(templatePath(), 'config.json'), JSON.stringify(config));
+  if (agents !== undefined) fs.writeFileSync(join(templatePath(), 'AGENTS.md'), agents);
+}
+
+const templateConfig = {
+  compactor: { provider: 'openai', model: 'gpt-5-mini', thinking: 'low' },
+  subagent: { provider: 'openai', model: 'gpt-5', thinking: 'high' },
+  main: { provider: 'openai', model: 'gpt-5', thinking: 'medium' },
+  memorySearch: true, jobs: 4, refreshAt: 0.5, maxAgents: 2,
+};
+
+test('a template config.json and AGENTS.md seed a new profile', () => {
+  const cleanup = sandbox();
+  try {
+    writeTemplate(templateConfig, '# house rules\n\nKeep replies short.');
+    createProfile('seeded');
+    const dir = profilePath('seeded');
+    assert.deepEqual(loadConfig(dir), { ...defaults, ...templateConfig });
+    assert.equal(instructions(dir), '# house rules\n\nKeep replies short.');
+  } finally { cleanup(); }
+});
+
+test('a template without AGENTS.md keeps the placeholder', () => {
+  const cleanup = sandbox();
+  try {
+    writeTemplate(templateConfig);
+    createProfile('placeholder');
+    assert.match(instructions(profilePath('placeholder')), /This is the placeholder profile/);
+  } finally { cleanup(); }
+});
+
+test('a partial template takes the built-in models and settings', () => {
+  const cleanup = sandbox();
+  try {
+    writeTemplate({ compactor: { provider: 'openai', model: 'gpt-5-mini', thinking: 'low' } });
+    createProfile('partial');
+    assert.deepEqual(loadConfig(profilePath('partial')), { ...defaults, compactor: { provider: 'openai', model: 'gpt-5-mini', thinking: 'low' } });
+  } finally { cleanup(); }
+});
+
+test('an invalid template leaves no profile and is not replaced by the defaults', () => {
+  const cleanup = sandbox();
+  try {
+    writeTemplate({ compactor: { provider: 'openai', model: 'gpt-5-mini', thinking: 'turbo' } });
+    assert.throws(() => createProfile('invalid'), /Invalid profile template/);
+    assert.deepEqual(listProfiles(), []);
   } finally { cleanup(); }
 });
