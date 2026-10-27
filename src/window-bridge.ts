@@ -192,7 +192,9 @@ export async function serveWindows(directory: string, children: Children, availa
         if (message.role === 'user') {
           // The task, and an interrupt, which continues with your queued messages, are yours too.
           // Your messages show as you typed them, also inside an interrupt's prompt, not as the skill Pi expanded them into.
-          for (const g of info.guidance) if (g.from === 'user' && g.sent) text = text.replaceAll(g.sent, () => g.text);
+          // Longest first: a skill sent without arguments is the start of the same skill sent with some.
+          const typed = info.guidance.flatMap(g => g.from === 'user' && g.sent ? [{ sent: g.sent, text: g.text }] : []).sort((a, b) => b.sent.length - a.sent.length);
+          for (const g of typed) text = text.replaceAll(g.sent, () => g.text);
           const yours = task || text.startsWith(INTERRUPTED) || info.guidance.some(g => g.from === 'user' && g.text === text.trim());
           if (text) send({ kind: 'event', name: 'message', from: yours ? 'user' : undefined, text: shorten(text, 200_000) });
           continue;
