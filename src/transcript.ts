@@ -166,10 +166,17 @@ export function buildContext(canonical: AgentMessage[], run: AgentMessage[], vie
   previous: readonly AgentMessage[] = [], status?: string): AgentMessage[] {
   const system = getCurrentSystemMessage(canonical);
   const head: SystemMessage = { role: 'system', content: prompt, toolsAdded: system?.toolsAdded, timestamp: 0 };
-  if (!run.some(m => m.role === 'user')) throw new Error('OptChat has no current user message; refusing to send historical context.');
+  // Another extension can start a run with a hidden custom message (a subagent's completion notice, for one), and Pi sends
+  // that to the model as a user message, so it is this turn's input. Only a run carrying no input at all is refused.
+  const task = run.find(m => m.role === 'user') ?? run.find(m => m.role === 'custom');
+  if (!task) throw new Error('OptChat has no current user message; refusing to send historical context.');
+  const sent = [...previous, ...run].filter(m => m.role !== 'system');
+  // The view rides with the earliest input so the cached prefix stays put; a run whose only input is a hidden custom
+  // message has no user message to carry it, so the notice carries the view itself.
+  const carrier = sent.find(m => m.role === 'user') ?? sent.find(m => m.role === 'custom') ?? task;
   let injected = false;
-  const messages = [...previous, ...run].filter(m => m.role !== 'system').map(message => {
-    if (message.role !== 'user' || injected) return message;
+  const messages = sent.map(message => {
+    if (message !== carrier || injected) return message;
     injected = true;
     // OpenAI joins text blocks with nothing between them, so the user's words start their own paragraph after the view.
     const [first, ...rest] = typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content;
