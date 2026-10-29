@@ -28,10 +28,10 @@ const [zoom, date] = memoryTools(() => memory);    // VIEW_DOC tells the model h
 
 - `openMemory(store, compress, { warn, budget, jobs, retryMs })`, and `Memory`: `append`, `render`, `settle(signal?, 'turn' | 'tree' | 'ahead')`, `zoom`, `search`, `date`, `onChange`, `close`, plus `root`, `tree`, `view`, `pending`, `lastError`.
 - `Store`, `Saved`, `Lease`, `Mime`, `isMime`, and the record types `Entry`, `Summary`, `Origin`, `Kind`.
-- `createCompressor({ model, retryable, onUsage?, accepted?, retryDelays?, system? })` (`system`: the compactor's prompt, `COMPACT` by default), `retryTransient`, `ACCEPTED_BYTES`.
+- `createCompressor({ model, retryable, onUsage?, accepted?, retryDelays?, system? })` (`system`: the compactor's prompt, `COMPACT` by default), `ACCEPTED_BYTES`.
 - `logMessage(memory, message, { kind?, receipt?, imageRef? })` (every entry it appends gets `receipt`, so a host can use it as a cursor), `textContent`, `withView`, `boundedMessage`, `completedExchange`, and the mid-turn refresh helpers (`refreshBudget`, `refreshPoint`, `refreshedRun`).
-- `memoryTools(memory, runs?)` (zoom and date; `runs` adds zooming into a subagent's chat), `searchTool`, `searchPage`, `loadImages`, `isImage`.
-- `cachePayload` (Anthropic: the view's cache marks, as a request's `onPayload`), `splitView`.
-- Prompts: `COMPACT`, `VIEW_DOC`, `CONTINUITY`, `SEARCH_DOC`, `allowSearch`, `IMPORT_GUIDANCE`, `TURN_REFRESHED`.
+- `memoryTools(memory, runs?)` (zoom and date; `runs` adds zooming into a subagent's chat), `searchTool`, `loadImages`, `isImage`.
+- `cachePayload` (Anthropic: the view's cache marks, as a request's `onPayload`).
+- Prompts: `COMPACT`, `VIEW_DOC`, `CONTINUITY`, `SEARCH_DOC`, `allowSearch`, `TURN_REFRESHED`.
 
 Not in core yet: the turn itself (when to snapshot the view, refresh mid-turn, replay the previous exchange), which Pi does in `src/index.ts`; staged imports; and loading log text lazily, which a host with a large log in a 128 MB isolate will need.
