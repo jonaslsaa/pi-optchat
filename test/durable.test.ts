@@ -240,6 +240,17 @@ test('a run past the refresh share of the window moves its steps into memory and
   } finally { await agent.close(); }
 });
 
+test('a refresh keeps the task of the run being answered, not an earlier run queued into the same context', async () => {
+  const agent = await open(file(), [fauxAssistantMessage('A done'), read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('B done')], undefined, 150);
+  try {
+    const a = await agent.root.submit({ type: 'input', content: 'task A' }, context), b = await agent.root.submit({ type: 'input', content: 'task B' }, context);
+    await a.wait(context); await b.wait(context); await agent.idle();
+    const refreshed = agent.sent.map(request => request.filter(m => m.role !== 'system').map(m => text(m.content))).find(run => run[0].includes('this turn grew long'));
+    // Run A is in the view now; task B is the one sent whole.
+    assert.match(refreshed?.[0] ?? '', /\|talk: A done\n[^]*<\/chat>\n\ntask B\n\n\[OptChat: this turn grew long/);
+  } finally { await agent.close(); }
+});
+
 test('reopened mid-run after a refresh, the run is sent from where the log says', async () => {
   const path = file();
   // The sixth request, the one after the first refresh, answers only once aborted: the object is evicted while it waits. Reopened, it must

@@ -122,27 +122,39 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
     const at = messages.findIndex(m => m.role !== 'system');
     if (at < 0) return undefined;
     // A tool result over 30K characters is sent as its head and tail, as in Pi.
-    const run = messages.slice(at).map(boundedMessage);
+    const run = messages.slice(at).map(boundedMessage), shared = turn;
+    // The run being answered starts at its task: the last of the user messages after the newest finished answer. An earlier run
+    // in this context, or a reset's note, comes before it; a refresh moves them into memory with the steps it cuts.
+    let task = run.findLastIndex(endsRun) + 1;
+    while (run[task + 1]?.role === 'user') task++;
+    const own = run.slice(task);
     /** Where an answer of the run is: Pi Durable's messages are copies of its entries', so an answer is found by its first tool
      * call's id, or its timestamp without one. */
     const answer = (m: Message) => m.role === 'assistant' ? m.content.find(c => c.type === 'toolCall')?.id ?? m.timestamp : undefined;
     const step = (entry: EntryRecord) => {
       const sent = AssistantEntry.is(entry) && entry.model?.[0];
-      return sent ? run.findIndex(m => answer(m) === answer(sent)) : -1;
+      return sent ? own.findIndex(m => answer(m) === answer(sent)) : -1;
     };
-    // A refresh logs the run up to the answer it cuts at, so the log says where the run is sent from, after a restart too.
+    /** Logs the run up to the answer at `entry`, rebuilding the view if that logged anything. False once a save failed: memory
+     * then lacks part of the run, so it is sent whole. */
+    const logThrough = async (entry: EntryRecord) => {
+      const count = memory.root.length;
+      await logUpTo(conversation, entry.id, ctx);
+      if (memory.saveError) return false;
+      if (memory.root.length !== count) { await memory.settle(ctx.abortSignal); shared.view = memory.render(); }
+      return true;
+    };
+    // A refresh logs the run up to the answer it cuts at, so the log says where the run is sent from, after a restart too; a restart
+    // in the middle of that logging leaves the rest of it to do.
     let keep = 0;
-    if (logged > (head?.id ?? 0)) for (const entry of entries) if (entry.id > logged && (keep = Math.max(0, step(entry)))) break;
+    const kept = logged > (head?.id ?? 0) ? entries.find(entry => entry.id > logged && step(entry) > 0) : undefined;
+    if (kept && await logThrough(kept)) keep = step(kept);
     const { model } = await conversation.agent(ctx);
-    const refresh = refreshPoint(run, keep, refreshBudget(model && api.models.getModel(model.provider, model.modelId)?.contextWindow, refreshAt));
+    const refresh = !memory.saveError && refreshPoint(own, keep, refreshBudget(model && api.models.getModel(model.provider, model.modelId)?.contextWindow, refreshAt));
     const cut = refresh && entries.find(entry => step(entry) === refresh.cut);
-    if (refresh && cut) {
-      await logUpTo(conversation, cut.id, ctx);
-      await memory.settle(ctx.abortSignal);
-      turn.view = memory.render();
-      keep = refresh.cut;
-    }
-    return { messages: withView([...messages.slice(0, at), ...turn.previous, ...refreshedRun(run, keep, TURN_REFRESHED)], turn.view) };
+    if (refresh && cut && await logThrough(cut)) keep = refresh.cut;
+    const sent = keep ? refreshedRun(own, keep, TURN_REFRESHED) : run;
+    return { messages: withView([...messages.slice(0, at), ...turn.previous, ...sent], turn.view) };
   };
 
   const Remember = defineTask<Record<string, never>, { phase: 'remember' }, null>({
