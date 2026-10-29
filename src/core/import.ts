@@ -5,7 +5,7 @@ import { bytes, isEntry, type Entry, type Memory } from './memory.ts';
 export type ImportMode = 'append' | 'rebuild';
 /** A message to import, before memory numbers it. Its `receipt` starts with `import:` and is stable per source message, so
  * importing the same history again adds nothing. */
-export type ImportedEntry = Omit<Entry, 'i' | 'size'>;
+export type ImportedEntry = Omit<Entry, 'i'>;
 
 /** Drops what memory already has: the same receipt, or the same `copyOf` key, the host's second identity for one message
  * (Pi: a Claude message copied into a forked session). */
@@ -44,7 +44,7 @@ export function planImport(existing: readonly Entry[], incoming: readonly Import
   const { added, skipped } = deduplicate(existing, incoming, copyOf);
   if (!added.length) return undefined;
   const all = mode === 'rebuild' ? chronological([...existing, ...added]) : [...existing, ...chronological(added)];
-  const entries: Entry[] = all.map((e, i) => ({ ...e, i, size: bytes(`${e.kind}: ${e.text}`) }));
+  const entries: Entry[] = all.map((e, i) => ({ ...e, i }));
   return { mode, entries, kept: mode === 'append' ? existing.length : 0, added: added.length, skipped,
     inputBytes: (mode === 'rebuild' ? entries : added).reduce((n, e) => n + bytes(e.text), 0) };
 }
@@ -59,7 +59,7 @@ export async function runImport({ plan, total, open, activate }: { plan: readonl
   if (!plan.every(isEntry) || plan.length !== total || plan.some((e, i) => e.i !== i)) throw new Error('Import staging data is invalid; original memory remains intact.');
   const memory = await open();
   try {
-    if (memory.root.length > plan.length || memory.root.some((e, i) => e.text !== plan[i].text)) throw new Error('Import staging data does not match its log; original memory remains intact.');
+    if (memory.root.length > plan.length || memory.root.some((_, i) => memory.text(i) !== plan[i].text)) throw new Error('Import staging data does not match its log; original memory remains intact.');
     // Recipe §10: imported messages are compressed like any other. Each is logged once its node can start, as a burst of live
     // messages is, so up to `jobs` summaries run at once. Unlike a turn, an import waits through failures (`lastError` says why).
     for (const e of plan.slice(memory.root.length)) { await memory.settle(signal, 'ahead'); memory.append(e.kind, e.text, e.date, e.receipt, e.origin); }

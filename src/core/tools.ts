@@ -12,11 +12,11 @@ export function searchPage(memory: Memory, text: string, before?: number) {
   const page = hits.slice(0, SEARCH_PAGE), needle = text.toLowerCase();
   const lines = page.map(entry => {
     // Cut the original text, whose match may span lines, and flatten only the cut.
-    const at = Math.max(0, entry.text.toLowerCase().indexOf(needle) - SNIPPET / 4);
-    const snippet = flat(entry.text.slice(at, at + SNIPPET).replace(/^[\udc00-\udfff]|[\ud800-\udbff]$/g, ''));
+    const text = memory.text(entry.i), at = Math.max(0, text.toLowerCase().indexOf(needle) - SNIPPET / 4);
+    const snippet = flat(text.slice(at, at + SNIPPET).replace(/^[\udc00-\udfff]|[\ud800-\udbff]$/g, ''));
     // The live view, which may have folded since the turn's snapshot: its lines are built, so zoom always opens them.
     const line = memory.covering(entry.i); // Named only when the hit is inside a summary line.
-    return `${entry.i}${line?.l ? ` (in ${start(line)}+${2 ** line.l})` : ''} · ${new Date(entry.date).toString().slice(0, 21)} · ${entry.kind}: ${at ? '…' : ''}${snippet}${at + SNIPPET < entry.text.length ? '…' : ''}`;
+    return `${entry.i}${line?.l ? ` (in ${start(line)}+${2 ** line.l})` : ''} · ${new Date(entry.date).toString().slice(0, 21)} · ${entry.kind}: ${at ? '…' : ''}${snippet}${at + SNIPPET < text.length ? '…' : ''}`;
   });
   const more = hits.length > page.length ? `\nOlder matches: search again with before: ${page[page.length - 1].i}.` : '';
   return `${hits.length} ${older}${hits.length === 1 ? 'message contains' : 'messages contain'} "${text}", newest first:\n${lines.join('\n')}${more}`;

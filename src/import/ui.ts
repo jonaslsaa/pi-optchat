@@ -64,7 +64,7 @@ export async function chooseImport(ctx: ImportUI, profile: string, memory: Memor
     if (choice !== 'Continue with supported records') return;
   }
   if (!entries.length) { ctx.ui.notify('No readable messages remain to import. Rescan or choose different conversations.', 'info'); return; }
-  const { added, skipped } = deduplicate(memory.root, entries);
+  const existing = memory.entries(), { added, skipped } = deduplicate(existing, entries);
   if (!added.length) { ctx.ui.notify(`Nothing new to import (${skipped} messages already present).`, 'info'); return; }
   let mode: ImportMode = 'append';
   if (memory.root.length) {
@@ -75,7 +75,7 @@ export async function chooseImport(ctx: ImportUI, profile: string, memory: Memor
     if (!selected) return;
     mode = selected.startsWith('Rebuild') ? 'rebuild' : 'append';
   }
-  const affected = mode === 'rebuild' ? [...memory.root, ...added] : added;
+  const affected = mode === 'rebuild' ? [...existing, ...added] : added;
   const inputBytes = affected.reduce((n, e) => n + bytes(e.text), 0);
   let nodes = 0;
   for (let n = memory.root.length + added.length; n > 0; n = Math.floor(n / 2)) nodes += n;

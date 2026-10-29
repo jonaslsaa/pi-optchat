@@ -18,7 +18,7 @@ test('search finds original messages newest first, pages backwards, and never re
     memory.append('echo', 'zoom: 3+1|user: note 3 about the banner');
     memory.append('tool', 'search {"text":"banner"}');
     await memory.settle(undefined, 'tree');
-    assert.ok([...memory.tree.values()].some(s => s.text.includes('Lisbon')));
+    assert.ok([...memory.tree.values()].some(s => memory.summary(s)?.includes('Lisbon')));
     assert.equal(searchPage(memory, 'lisbon'), 'No messages contain "lisbon".', 'summaries are not searched');
 
     const first = searchPage(memory, 'BANNER').split('\n');

@@ -1,11 +1,12 @@
-import type { Entry, Summary } from './memory.ts';
+import type { Entry, Part, Summary } from './memory.ts';
 
 /** The image types memory keeps, and the file extension each is saved under. */
 export const EXTENSIONS = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' } as const;
 export type Mime = keyof typeof EXTENSIONS;
 export const isMime = (mime: string): mime is Mime => Object.hasOwn(EXTENSIONS, mime);
 
-/** What a store gives back when a memory opens. Memory validates every record itself; `view` is the JSON `saveView` was last given. */
+/** What a store gives back when a memory opens. Memory validates every record itself; `view` is the JSON `saveView` was last given.
+ * Texts may be left out: an entry needs only its metadata, a node its `size` as `appendNode` got it. Memory keeps no text in RAM. */
 export interface Saved { entries: unknown[]; tree: unknown[]; view?: string }
 /** A write is done when it returns: a store that writes behind returns a promise instead, which Memory awaits in order. */
 type Write = Promise<void> | undefined;
@@ -25,9 +26,14 @@ export interface Lease {
 }
 
 /** Where one memory keeps its message log, summary nodes, saved view and images; whatever else a host keeps is its own business.
- * Memory loads once when it opens, then works in RAM and issues every write in order. */
+ * Memory loads metadata once when it opens and reads texts as it needs them; it issues every write in order. */
 export interface Store {
   load(): Maybe<Saved>;
+  /** Message `i`'s text, once its `append` has finished. Synchronous, so zoom, search and views stay synchronous: a Durable
+   * Object's SQLite reads synchronously, and FileStore keeps texts in RAM. */
+  text(i: number): string;
+  /** A node's text, once its `appendNode` has finished. */
+  summary(part: Part): string;
   /** Appends a message. Throws, writing nothing, if someone else appended since this store loaded. */
   append(entry: Entry): Write;
   /** Appends a summary node. */

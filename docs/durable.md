@@ -6,7 +6,8 @@
 
 ```ts
 const db = new DurableObjectSqliteDatabase(ctx.storage);         // the one Pi Durable's storage uses too
-const memory = await openMemory(new SqliteStore(db), createCompressor({ model, retryable }));
+const read = (sql, ...params) => ctx.storage.sql.exec(sql, ...params); // synchronous reads of memory's texts
+const memory = await openMemory(new SqliteStore(db, read), createCompressor({ model, retryable }));
 const memoryExtension = optchat({ memory });
 registry.install(memoryExtension.extension);
 const harness = await Harness.open(storage, { models: withCacheMarks(models), registry, onWake, settings: { compaction: { enabled: false } } }, context);
@@ -28,10 +29,9 @@ With the Agents SDK's `PiHarness` this goes in its `harness` factory, which supp
 - **Tools:** `zoom` and `date` (plus `search` with `search: true`), replay-safe.
 - **Cache marks:** `withCacheMarks(models)` adds OptChat's marks to Anthropic requests that carry a view, so a view that grows at its end is read from the cache. A request with its own `onPayload` is left alone.
 - **Summaries of a group chat:** a chat that isn't one user talking to OptChat, such as a housing board with several people, gives `createCompressor` its own `system` prompt and names each speaker in the text, like "[Kari] …".
-- **Storage:** tables `optchat_log`, `optchat_tree`, `optchat_view` and `optchat_images` beside Pi's `pi_*`, in the same database and queue. A message is stored in parts of 512K UTF-16 units, under the 2 MB row limit; an image must be under 2 MB.
+- **Storage:** tables `optchat_log`, `optchat_tree`, `optchat_view` and `optchat_images` beside Pi's `pi_*`, in the same database and queue. A message is stored in parts of 512K UTF-16 units, under the 2 MB row limit; an image must be under 2 MB. Memory keeps only metadata and node sizes in RAM (about 5 MB of heap for a 16,000-message log, measured in workerd) and reads texts through `read` as it needs them, synchronously, so zoom, search and views stay synchronous.
 
 Not done yet:
 - Refreshing the view mid-turn, as Pi's OptChat does. With compaction off, one run whose tool loop outgrows the model's window fails.
 - Images in messages: they are left out of memory.
-- Loading log text lazily. Memory keeps the whole log in RAM: about 60 MB of heap for a 16,000-message log, and a Durable Object's isolate has 128 MB. A board with years of email needs this first.
 - Imports: core's `planImport` and `runImport` (append or rebuild, #248) are on main, but the durable side doesn't wire them yet.

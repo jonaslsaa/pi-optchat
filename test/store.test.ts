@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { appendFileSync, existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openMemory, type Entry, type Summary } from '../src/core/memory.ts';
+import { isEntry, isSummary, openMemory, type Entry, type Part, type Summary } from '../src/core/memory.ts';
 import { FileStore, localDay } from '../src/store.ts';
 import type { Lease, Saved, Store } from '../src/core/store.ts';
 import { holdProfile, HEARTBEAT_MS, isWindows, ProfileBusyError, profileSocket } from '../src/profiles.ts';
@@ -12,9 +12,18 @@ import { DatabaseSync } from 'node:sqlite';
 import { NodeSqliteDatabase } from '@earendil-works/chord/sqlite/node';
 import { SqliteStore } from '../src/durable/index.ts';
 
-const entry = (i: number, text: string): Entry => ({ i, kind: 'user', text, size: 0, date: '2026-10-09T12:00:00.000Z' });
+const entry = (i: number, text: string): Entry => ({ i, kind: 'user', text, date: '2026-10-09T12:00:00.000Z' });
 const node = (i: number, text: string): Summary => ({ l: 0, i, text, size: 0 });
 const temp = () => mkdtempSync(join(tmpdir(), 'optchat-store-'));
+
+/** A store's log and tree as memory reads them: metadata from `load` (a store may leave texts out there) and texts from `text`/`summary`. */
+async function reload(store: Store) {
+  const { entries, tree, view } = await store.load();
+  const isPart = (value: unknown): value is Part => typeof value === 'object' && value !== null && 'l' in value && 'i' in value
+    && typeof value.l === 'number' && typeof value.i === 'number';
+  return { view, entries: entries.filter(e => typeof e === 'object' && e !== null).map((e, i) => ({ ...e, text: store.text(i) })),
+    tree: tree.filter(isPart).map(n => ({ ...n, text: store.summary(n) })) };
+}
 
 /** What every store must do, so a new one can run the same checks against itself. */
 function contract(name: string, open: (dir: string, warn: (s: string) => void) => Store) {
@@ -23,11 +32,11 @@ function contract(name: string, open: (dir: string, warn: (s: string) => void) =
     try {
       const store = open(dir, () => {});
       await store.load();
-      for (const [i, text] of ['one', 'two', 'three'].entries()) await store.append(entry(i, text));
+      for (const [i, text] of ['one', 'two', 'three \ud83d'].entries()) await store.append(entry(i, text));
       await store.appendNode(node(0, 'first summary'));
       await store.saveView('[[0,0]]'); await store.saveView('[[0,0],[0,1]]');
-      const saved = await open(dir, () => {}).load();
-      assert.deepEqual(saved.entries, ['one', 'two', 'three'].map((text, i) => entry(i, text)));
+      const saved = await reload(open(dir, () => {}));
+      assert.deepEqual(saved.entries, ['one', 'two', 'three \ud83d'].map((text, i) => entry(i, text)), 'an unpaired surrogate comes back as it was');
       assert.deepEqual(saved.tree, [node(0, 'first summary')]);
       assert.equal(saved.view, '[[0,0],[0,1]]');
     } finally { removeDir(dir); }
@@ -39,7 +48,7 @@ function contract(name: string, open: (dir: string, warn: (s: string) => void) =
       await a.load(); await b.load();
       await a.append(entry(0, 'from a'));
       await assert.rejects(async () => b.append(entry(0, 'from b')), /nothing was written/);
-      assert.deepEqual((await open(dir, () => {}).load()).entries, [entry(0, 'from a')]);
+      assert.deepEqual((await reload(open(dir, () => {}))).entries, [entry(0, 'from a')]);
     } finally { removeDir(dir); }
   });
   test(`${name}: images come back as they were put, and an unknown one is missing`, async () => {
@@ -58,22 +67,23 @@ function contract(name: string, open: (dir: string, warn: (s: string) => void) =
 contract('FileStore', (dir, warn) => new FileStore(dir, warn));
 // As in a Durable Object, every store on one profile shares its database: here one in-memory database per folder, which also
 // leaves no open file for Windows to refuse to delete.
-const databases = new Map<string, NodeSqliteDatabase>();
+const databases = new Map<string, DatabaseSync>();
 const sqlite = (dir: string) => {
   let db = databases.get(dir);
-  if (!db) databases.set(dir, db = new NodeSqliteDatabase(new DatabaseSync(':memory:')));
-  return new SqliteStore(db);
+  if (!db) databases.set(dir, db = new DatabaseSync(':memory:'));
+  const sync = db;
+  return new SqliteStore(new NodeSqliteDatabase(sync), (sql, ...params) => sync.prepare(sql).iterate(...params));
 };
 contract('SqliteStore', sqlite);
 
 test('SqliteStore: a message over the 2 MB row limit is saved in parts and loads back whole', async () => {
   const dir = temp();
   try {
-    // Over 3 MB of UTF-8, with an emoji whose surrogate pair straddles where a part would end (3 × 512Ki units, less the JSON's start).
-    const head = `{"i":0,"kind":"user","text":"`.length, text = `${'ø€'.repeat(700_000)}${'x'.repeat(3 * 524_288 - 1 - head - 1_400_000)}😀 end`;
+    // Over 3 MB of UTF-8, with an emoji whose surrogate pair straddles where a part would end (3 × 512Ki units, less the JSON's quote).
+    const text = `${'ø€'.repeat(700_000)}${'x'.repeat(3 * 524_288 - 1 - 1 - 1_400_000)}😀 end`;
     await sqlite(dir).load();
     await sqlite(dir).append(entry(0, text));
-    assert.deepEqual((await sqlite(dir).load()).entries, [entry(0, text)]);
+    assert.deepEqual((await reload(sqlite(dir))).entries, [entry(0, text)]);
   } finally { removeDir(dir); }
 });
 
@@ -116,7 +126,7 @@ test('a store with a lease holds the profile instead of the local lock, renews i
 
 /** A store that writes behind, each write landing sooner than the one before it, unless it was started while `fail` was set. */
 function behind() {
-  const landed: string[] = [];
+  const landed: string[] = [], texts: string[] = [], summaries = new Map<string, string>();
   let fail = false, delay = 20;
   const later = (text: string) => {
     const failing = fail, ms = Math.max(1, delay -= 3);
@@ -124,7 +134,9 @@ function behind() {
   };
   const store: Store = {
     load: async (): Promise<Saved> => ({ entries: [], tree: [] }),
-    append: e => later(e.text), appendNode: n => later(`node ${n.i}`), saveView: () => later('view'),
+    // A write-behind store can read a text only once its write has landed.
+    append: e => later(e.text).then(() => { texts[e.i] = e.text; }), appendNode: n => later(`node ${n.i}`).then(() => { summaries.set(`${n.l}:${n.i}`, n.text); }),
+    text: i => texts[i], summary: p => summaries.get(`${p.l}:${p.i}`)!, saveView: () => later('view'),
     putImage: () => later('image'), image: async () => undefined,
   };
   return { store, landed, failing: (on: boolean) => { fail = on; } };
@@ -135,9 +147,35 @@ test('a store that writes behind gets its writes one at a time, in the order Mem
   const memory = await openMemory(store, async () => 'unused', { warn: () => {} });
   for (const text of ['one', 'two', 'three']) memory.append('user', text);
   assert.equal(landed.length, 0, 'appends return before their writes land');
-  await memory.settle(undefined, 'tree'); await memory.close();
+  assert.equal(memory.text(2), 'three', 'a message reads back before its write lands');
+  await memory.settle(undefined, 'tree');
+  assert.equal(memory.zoom(0, 2), '0+1|user: one\n1+1|user: two');
+  await memory.close();
   assert.deepEqual(landed.filter(text => !text.startsWith('node') && text !== 'view'), ['one', 'two', 'three']);
   assert.ok(landed.indexOf('node 0') > landed.indexOf('one'), 'a node lands after its message');
+});
+
+test('a store that loads no texts gives the same memory as one that does, keeping none in RAM', async () => {
+  const dir = temp();
+  try {
+    const writer = await openMemory(new FileStore(dir), async ({ source }) => `summary of ${source.length} characters`, { warn: () => {}, budget: 2000 });
+    for (let i = 0; i < 40; i++) writer.append(i % 2 ? 'talk' : 'user', `message ${i} Blåbær ${'x'.repeat(i * 30)}`);
+    await writer.settle(undefined, 'tree'); await writer.close();
+    // Only metadata and the sizes Memory measured when it wrote the nodes: what a SQLite store would load.
+    class Lazy extends FileStore {
+      override load(): Saved {
+        const { entries, tree, view } = super.load();
+        return { entries: entries.filter(isEntry).map(({ text, ...meta }) => meta), tree: tree.filter(isSummary).map(({ text, ...node }) => node), view };
+      }
+    }
+    const [a, b] = await Promise.all([openMemory(new FileStore(dir), async () => 'unused'), openMemory(new Lazy(dir), async () => 'unused')]);
+    try {
+      assert.equal(b.render(), a.render());
+      assert.ok(b.root.every(m => !('text' in m)) && [...b.tree.values()].every(n => !('text' in n)));
+      for (let id = 0; id < 40; id += 8) assert.equal(b.zoom(id, 8), a.zoom(id, 8));
+      assert.deepEqual(b.search('BLÅBÆR', 30), a.search('BLÅBÆR', 30));
+    } finally { await a.close(); await b.close(); }
+  } finally { removeDir(dir); }
 });
 
 test('once a write-behind append fails, nothing more is written, summary nodes included, even if the store recovers', async () => {

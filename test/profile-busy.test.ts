@@ -223,6 +223,6 @@ test('a second writer that got past the lock is refused on its next turn, with t
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
   }
   const reopened = new Memory(join(dir, 'home', 'profiles', 'shared'), async () => 'summary', () => {});
-  try { assert.deepEqual(reopened.root.map(e => e.text), ['written by the other process']); }
+  try { assert.deepEqual(reopened.root.map(e => reopened.text(e.i)), ['written by the other process']); }
   finally { await reopened.close(); removeDir(dir); }
 });

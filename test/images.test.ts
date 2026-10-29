@@ -50,7 +50,7 @@ test('an image is kept once, unchanged when small, and zoom(id, 1) returns it on
   assert.deepEqual((await zoom.execute('call', { id: 1, n: 1, offset: PAGE })).content.slice(1), [small]);
   // The zoom's echo names each image once, through its page, so memory never points at a copy.
   logMessage(memory, { role: 'toolResult', toolCallId: 'call', toolName: 'zoom', content: whole.content, isError: false, timestamp: 1 });
-  assert.equal(memory.root[2].text.match(/\[image /g)?.length, 2);
+  assert.equal(memory.text(2).match(/\[image /g)?.length, 2);
 }));
 
 test('a large image is shrunk to 2048 px on its long side and about 1.5 MB', () => withMemory(async (memory, dir) => {
