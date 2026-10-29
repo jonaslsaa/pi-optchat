@@ -1,4 +1,5 @@
-import { NODE } from './memory.ts';
+import { ACCEPTED_BYTES } from './core/compactor.ts';
+import { NODE } from './core/memory.ts';
 
 /** Per-profile choices where OptChat departs from Victor's recipe. Each default is the recipe's behaviour unless noted. */
 export const SETTINGS = {
@@ -20,7 +21,7 @@ export const SETTINGS = {
   memorySearch: { kind: 'toggle', label: 'Memory search', default: false,
     description: 'Lets agents search original messages by plain text. Off: zoom and date only (Victor\'s recipe). Toggling re-caches the prompt once.',
     applies: 'Applies from the next turn and to new or resumed subagents.' },
-  summaryAcceptBytes: { kind: 'number', label: 'Summary size tolerance', default: NODE * 1.25, min: NODE, unit: 'bytes',
+  summaryAcceptBytes: { kind: 'number', label: 'Summary size tolerance', default: ACCEPTED_BYTES, min: NODE, unit: 'bytes',
     description: `Summary lines up to this size are kept instead of retried (the compactor aims for ${NODE}). ${NODE}: strict (Victor's recipe).`,
     applies: 'Applies to the next summary.' },
   jobs: { kind: 'number', label: 'Summaries at once', default: 8, min: 1, max: 64, unit: '',

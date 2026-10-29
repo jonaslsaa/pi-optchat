@@ -1,9 +1,10 @@
 import { existsSync, readFileSync, rmSync, cpSync, mkdirSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Memory, bytes, isEntry, type Entry, type Compressor } from '../memory.ts';
+import { Memory } from '../memory.ts';
+import { bytes, isEntry, type Entry, type Compressor } from '../core/memory.ts';
 import { atomicWrite } from '../store.ts';
-import { record } from '../cache.ts';
+import { record } from '../core/cache.ts';
 import { copyKey, type ImportedEntry } from './sources.ts';
 import { DEFAULT_SETTINGS } from '../settings.ts';
 
@@ -106,7 +107,7 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
   const plan: unknown[] = readFileSync(join(path, STAGED), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
   // Every line must parse, and the plan must be whole and in order, so a damaged plan can't drop messages silently.
   if (!plan.every(isEntry) || plan.length !== job.total || plan.some((e, i) => e.i !== i)) throw new Error('Import staging data is invalid; original memory remains intact.');
-  const memory = await Memory.open(path, compress, () => {}, undefined, jobs);
+  const memory = await Memory.open(path, compress, { warn: () => {}, jobs });
   const report = () => progress({ messages: memory.root.length - memory.pending, total: plan.length, summaries: memory.tree.size, error: memory.lastError });
   const timer = setInterval(report, 500);
   try {

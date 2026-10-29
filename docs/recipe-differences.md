@@ -4,7 +4,7 @@ The README has the summary table. This page has the detail: what changed in each
 
 ## Prompts
 
-`src/prompts.ts` holds every prompt sent to a model (the recipe's four, the subagent instruction paragraphs, the compaction task and its retry, the handoff prompts, the import note), each with a comment on where it goes. Tool descriptions stay with their tools. The recipe's prompts are lightly adapted:
+`src/core/prompts.ts` holds memory's prompts (the compactor's and the view doc from the recipe, the compaction task and its retry, the import note) and `src/prompts.ts` Pi's (the main agent's, the subagent instruction paragraphs, the handoff prompts), each with a comment on where it goes. Tool descriptions stay with their tools. The recipe's prompts are lightly adapted:
 
 - **Main agent.** The turn rules are the revised recipe's (2026-10-08) word for word, with three changes:
   - its paragraph on computers is left out;

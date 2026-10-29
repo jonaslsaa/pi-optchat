@@ -7,10 +7,11 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { getAgentDir, parseSkillBlock } from '@earendil-works/pi-coding-agent';
-import { record } from '../cache.ts';
-import { bytes, type Entry, type Kind, type Origin } from '../memory.ts';
+import { record } from '../core/cache.ts';
+import { bytes, type Entry, type Kind, type Origin } from '../core/memory.ts';
 
-export type Source = Origin['source'];
+/** The histories Pi's OptChat imports, as their entries' `origin.source`. */
+export type Source = 'claude' | 'claude-memory' | 'codex' | 'pi' | 'chatgpt';
 export type ImportedEntry = Omit<Entry, 'i' | 'size'>;
 export interface Conversation {
   source: Source; id: string; file: string; title: string; project: string; date: string; size: number;

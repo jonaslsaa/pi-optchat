@@ -213,6 +213,8 @@ Profile data lives in `~/.optchat/profiles/<name>/` (override the root with `OPT
 
 Git checkpoints and the pluggable `Store` seam (for memory on another machine): [docs/storage.md](docs/storage.md).
 
+OptChat's memory also runs outside Pi, for example in a Cloudflare Durable Object: `import ... from 'pi-optchat/core'`. See [docs/core.md](docs/core.md).
+
 ## Windows
 
 The same install and commands work on Windows, and the offline tests run there too. What differs:
@@ -242,7 +244,7 @@ OptChat keeps the recipe's numbers: 512-byte lines, binary merges, the 128,000 â
 
 | Area | Recipe | OptChat | Why |
 | --- | --- | --- | --- |
-| Prompts | The original and 2026-10-08 prompts | The same, lightly adapted, all in `src/prompts.ts`: reports start `[id]`, a note on `[OptChat status]`, "don't poll slow things", the size limit as a ceiling rather than a target | Fit OptChat's tools; the size wording gave less filler with no recall loss (#129) |
+| Prompts | The original and 2026-10-08 prompts | The same, lightly adapted, in `src/core/prompts.ts` and `src/prompts.ts`: reports start `[id]`, a note on `[OptChat status]`, "don't poll slow things", the size limit as a ceiling rather than a target | Fit OptChat's tools; the size wording gave less filler with no recall loss (#129) |
 | Compactor instructions | Gets your instructions | Doesn't | An A/B found they added nothing (#112) |
 | Summary size | Strict 512 bytes | Asked for 512, keeps up to 640 without a retry | Saves retries for a little view space |
 | Memory view | Sawtooth, 128,000 â†’ 64,000 bytes | Same, saved to `view.json` with the compactions' view and reloaded as they were | A restart keeps both prompt prefixes cached |

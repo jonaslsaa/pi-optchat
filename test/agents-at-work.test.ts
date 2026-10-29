@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { atWork, buildContext } from '../src/transcript.ts';
-import { cachePayload } from '../src/cache.ts';
+import { cachePayload } from '../src/core/cache.ts';
 import { MASTER } from '../src/prompts.ts';
 
 const user: AgentMessage = { role: 'user', content: 'question', timestamp: 0 };

@@ -10,12 +10,15 @@ import { Memory } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
 import { createCompressor, type ModelChoice } from './compactor.ts';
 import { createProfile, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
-import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, MASTER, modelsHint, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC } from './prompts.ts';
-import { cachePayload, record } from './cache.ts';
+import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC } from './core/prompts.ts';
+import { MASTER, modelsHint } from './prompts.ts';
+import { cachePayload, record } from './core/cache.ts';
 import { saveImages } from './images.ts';
-import { asUser, boundedMessage, atWork, buildContext, logMessage, previousExchange, refreshedRun, refreshBudget, refreshFraction, refreshPoint, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
+import { asUser, atWork, buildContext, logMessage, previousExchange, refreshFraction, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
+import { boundedMessage, refreshedRun, refreshBudget, refreshPoint } from './core/messages.ts';
 import { registerReportRenderer, type ReportDetails } from './report-message.ts';
-import { memoryTools, result, searchTool } from './tools.ts';
+import { memoryTools } from './tools.ts';
+import { result, searchTool } from './core/tools.ts';
 import { Children, loadedBuiltins, modelsTool, refreshContextFiles, TASKS } from './agents.ts';
 import { isActiveRun, type RunInfo } from './runs.ts';
 import { exportBrowser } from './browser.ts';
@@ -236,10 +239,10 @@ export default function optchat(pi: ExtensionAPI) {
       const pending = join(dir, 'pending-reports.json');
       const saved: unknown = existsSync(pending) ? JSON.parse(readFileSync(pending, 'utf8')) : [];
       if (!Array.isArray(saved) || !saved.every(isPendingReport)) throw new Error('Invalid pending report journal.');
-      const memory = await Memory.open(memoryDirectory(dir), createCompressor(ctx.modelRegistry, () => config.compactor, message => {
+      const memory = await Memory.open(memoryDirectory(dir), createCompressor(ctx.modelRegistry, () => config.compactor, { onUsage: message => {
         usage.compression(message, 'compactor', sessionId);
         status(ctx);
-      }, () => config.summaryAcceptBytes), warning => ctx.ui.notify(warning, 'error'), undefined, config.jobs);
+      }, accepted: () => config.summaryAcceptBytes }), { warn: warning => ctx.ui.notify(warning, 'error'), jobs: config.jobs });
       openingMemory = memory;
       const inbox = new Inbox(dir);
       const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
@@ -621,9 +624,9 @@ export default function optchat(pi: ExtensionAPI) {
           if (!job) return;
         }
         if (!closed) { await a.memory.close(); closed = true; }
-        const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, message => {
+        const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, { onUsage: message => {
           a.usage.compression(message, 'import', ctx.sessionManager.getSessionId());
-        }, () => a.config.summaryAcceptBytes);
+        }, accepted: () => a.config.summaryAcceptBytes });
         const completed = await showProgress(ctx, job, (signal, progress) => runImport(a.dir, compress, signal, a.config.jobs, progress), signal);
         ctx.ui.notify(completed ? `Imported ${job.added} messages into ${a.name}. Previous memory retained at ${job.previous === '.' ? a.dir : join(a.dir, job.previous)}.`
           : 'Import paused. Use /optchat import to resume. Other profiles remain available.', 'info');

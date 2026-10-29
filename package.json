@@ -2,6 +2,11 @@
   "name": "pi-optchat",
   "version": "0.10.2",
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./core": "./src/core/index.ts",
+    "./package.json": "./package.json"
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"
@@ -29,6 +34,20 @@
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-agent-core": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
   },
   "description": "OptChat memory for Pi: persistent profiles, zoomable history, background agents, and conversation imports.",
   "keywords": [

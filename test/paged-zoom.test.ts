@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Memory, CAP, PAGE } from '../src/memory.ts';
+import { Memory } from '../src/memory.ts';
+import { CAP, PAGE } from '../src/core/memory.ts';
 import { removeDir } from './support.ts';
 
 test('zoom pages a long message without splitting characters, and leaves short ones whole', async () => {

@@ -10,7 +10,7 @@ import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { registerReportRenderer, reportParts } from '../src/report-message.ts';
 import { REPORT_TYPE, textContent, withoutFullChat } from '../src/transcript.ts';
-import { COMPACT } from '../src/prompts.ts';
+import { COMPACT } from '../src/core/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { removeDir } from './support.ts';
 

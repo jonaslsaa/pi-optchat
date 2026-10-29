@@ -4,7 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Memory } from '../src/memory.ts';
-import { SEARCH_PAGE, searchPage } from '../src/tools.ts';
+import { SEARCH_PAGE, searchPage } from '../src/core/tools.ts';
 import { removeDir } from './support.ts';
 
 test('search finds original messages newest first, pages backwards, and never returns summaries or copies of memory', async () => {

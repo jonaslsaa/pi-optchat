@@ -8,7 +8,7 @@ import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { mainTitle, statusState, TabTitle, windowTitle, type StatusState } from '../src/title.ts';
-import { COMPACT } from '../src/prompts.ts';
+import { COMPACT } from '../src/core/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
 import { removeDir } from './support.ts';

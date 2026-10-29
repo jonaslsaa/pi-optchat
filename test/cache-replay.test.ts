@@ -13,11 +13,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { convertToLlm, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
-import { cachePayload } from '../src/cache.ts';
+import { cachePayload } from '../src/core/cache.ts';
 import { createCompressor } from '../src/compactor.ts';
 import { Memory } from '../src/memory.ts';
-import { COMPACT, MASTER } from '../src/prompts.ts';
-import type { Saved, Store } from '../src/store.ts';
+import { COMPACT } from '../src/core/prompts.ts';
+import { MASTER } from '../src/prompts.ts';
+import type { Saved, Store } from '../src/core/store.ts';
 import { buildContext, logMessage, textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
 

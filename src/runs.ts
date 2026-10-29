@@ -3,7 +3,7 @@ import { basename, join } from 'node:path';
 import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { atomicWrite } from './store.ts';
-import { record } from './cache.ts';
+import { record } from './core/cache.ts';
 import { textContent } from './transcript.ts';
 
 /** `paused`: interrupted by the user with nothing queued, alive and waiting for its next message. `interrupted` is a finished run cut off by Pi closing or a connected window ending. */

@@ -8,11 +8,12 @@ import { createAssistantMessageEventStream, type AssistantMessage, type Context 
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
-import { buildContext, messageChars, refreshBudget, refreshedRun, refreshFraction, refreshPoint, textContent } from '../src/transcript.ts';
+import { buildContext, refreshFraction, textContent } from '../src/transcript.ts';
+import { messageChars, refreshBudget, refreshedRun, refreshPoint } from '../src/core/messages.ts';
 import { parsePercent } from '../src/settings-page.ts';
 import { invalid } from '../src/settings.ts';
 import { subagentCompaction } from '../src/agents.ts';
-import { COMPACT, TURN_REFRESHED } from '../src/prompts.ts';
+import { COMPACT, TURN_REFRESHED } from '../src/core/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { removeDir } from './support.ts';
 

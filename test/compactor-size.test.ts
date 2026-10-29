@@ -6,10 +6,10 @@ import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { createCompressor } from '../src/compactor.ts';
-import { compaction } from '../src/prompts.ts';
+import { compaction } from '../src/core/prompts.ts';
 import { createHandoffSummarizer } from '../src/handoff.ts';
 import type { RunInfo } from '../src/runs.ts';
-import { bytes, NODE } from '../src/memory.ts';
+import { bytes, NODE } from '../src/core/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { removeDir } from './support.ts';
 
@@ -42,8 +42,8 @@ async function attempts(first: number, { source = 'user: ' + 'a long message '.r
     },
   });
   try {
-    const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }), undefined,
-      accepted === undefined ? undefined : () => accepted);
+    const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }),
+      { accepted: accepted === undefined ? undefined : () => accepted });
     const line = await compress({ context: '<chat>\n</chat>', source, part: merge ? { l: 1, i: 0 } : { l: 0, i: 0 } }, new AbortController().signal);
     return { calls, bytes: line.length };
   } finally { removeDir(dir); }

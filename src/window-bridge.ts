@@ -2,7 +2,7 @@ import { chmodSync } from 'node:fs';
 import { createConnection, createServer, type Socket } from 'node:net';
 import { INTERRUPTED, type Children } from './agents.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { record } from './cache.ts';
+import { record } from './core/cache.ts';
 import { checkSocketPath, isWindows, profileSocket, removeStaleSocket } from './profiles.ts';
 import { textContent } from './transcript.ts';
 import { isActiveRun, type RunInfo } from './runs.ts';
