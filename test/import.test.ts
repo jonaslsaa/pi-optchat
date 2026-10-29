@@ -757,7 +757,7 @@ test('core builds an import in any store: a paused rebuild resumes from what the
   const store: Store = { load: () => structuredClone(saved), append: e => void saved.entries.push(e), appendNode: n => void saved.tree.push(n),
     text: i => saved.entries[i].text, summary: p => saved.tree.findLast(n => n.l === p.l && n.i === p.i)!.text,
     saveView: view => void (saved.view = view), putImage: () => undefined, image: () => undefined };
-  const native: Entry = { i: 0, kind: 'user', text: 'native later', size: 0, date: '2026-06-01T00:00:00.000Z' };
+  const native: Entry = { i: 0, kind: 'user', text: 'native later', date: '2026-06-01T00:00:00.000Z' };
   const plan = planImport([native], [entry('a', date, 'large '.repeat(200)), entry('b', date, 'long '.repeat(200)), entry('a')], 'rebuild');
   assert.ok(plan); assert.equal(plan.kept, 0); assert.equal(plan.skipped, 1);
   // The first summary pauses the import, and waits until the import closes the memory.

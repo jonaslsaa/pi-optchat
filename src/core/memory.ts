@@ -13,9 +13,9 @@ export type Kind = typeof KINDS[number];
  * chooses, such as "claude" or "email". */
 export interface Origin { source: string; conversation: string; message: string; title: string; project?: string }
 /** A message as stores save it. */
-export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin }
+export interface Entry { i: number; kind: Kind; text: string; date: string; receipt?: string; origin?: Origin }
 /** A message as memory keeps it in RAM: its text stays in the store, and `Memory.text(i)` reads it. */
-export type Message = Omit<Entry, 'text' | 'size'>;
+export type Message = Omit<Entry, 'text'>;
 export interface Part { l: number; i: number }
 /** A summary node as stores save it. `size` is its line's bytes in a view. */
 export interface Summary extends Part { text: string; size: number }
@@ -105,9 +105,9 @@ export function isEntry(value: unknown): value is Entry {
   return isMessage(value) && typeof value.text === 'string';
 }
 /** A saved message, with its text or without it. */
-function isMessage(value: unknown): value is Message & { text?: unknown } {
+function isMessage(value: unknown): value is Message & { text?: string } {
   return object(value) && Number.isSafeInteger(value.i) && typeof value.kind === 'string'
-    && KINDS.some(kind => kind === value.kind) && typeof value.date === 'string';
+    && KINDS.some(kind => kind === value.kind) && typeof value.date === 'string' && (value.text === undefined || typeof value.text === 'string');
 }
 export function isSummary(value: unknown): value is Summary {
   return object(value) && Number.isSafeInteger(value.l) && Number.isSafeInteger(value.i) && typeof value.text === 'string';
@@ -164,7 +164,7 @@ export class Memory {
     this.store = store;
     const log = saved.entries;
     const entries = log.every(isMessage) ? log.sort((a, b) => a.i - b.i) : undefined;
-    if (!entries || entries.some((entry, i) => entry.i !== i || (entry.text !== undefined && typeof entry.text !== 'string')))
+    if (!entries || entries.some((entry, i) => entry.i !== i))
       throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
     for (const { i, kind, date, receipt, origin } of entries) this.root.push({ i, kind, date, ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}) });
     for (const value of saved.tree) {
@@ -183,7 +183,7 @@ export class Memory {
     if (this.stopped) throw new Error('Memory is closed.');
     if (this.failed) throw new Error(`Memory could not be saved: ${this.failed}`);
     const message: Message = { i: this.root.length, kind, date, ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}) };
-    const entry: Entry = { ...message, text, size: bytes(`${kind}: ${text}`) };
+    const entry: Entry = { ...message, text };
     void this.enqueue(this.keeping(this.unsaved.texts, entry.i, text, () => this.store.append(entry)), error => {
       this.failed ??= error instanceof Error ? error.message : String(error);
       this.warn(`Memory could not be saved: ${this.failed}`);
@@ -195,7 +195,7 @@ export class Memory {
   /** Message `i`'s text, from the store. */
   text(i: number) { return this.unsaved.texts.get(i) ?? this.store.text(i); }
   /** Every message with its text, read from the store: for imports, which plan from the whole log. */
-  entries(): Entry[] { return this.root.map(m => { const text = this.text(m.i); return { ...m, text, size: bytes(`${m.kind}: ${text}`) }; }); }
+  entries(): Entry[] { return this.root.map(m => ({ ...m, text: this.text(m.i) })); }
   /** A built node's text, from the store. */
   summary(part: Part) { return this.node(part) ? this.unsaved.summaries.get(key(part)) ?? this.store.summary(part) : undefined; }
   private line(part: Part) { return this.summary(part) ?? UNBUILT; }

@@ -5,7 +5,7 @@ import { bytes, isEntry, type Entry, type Memory } from './memory.ts';
 export type ImportMode = 'append' | 'rebuild';
 /** A message to import, before memory numbers it. Its `receipt` starts with `import:` and is stable per source message, so
  * importing the same history again adds nothing. */
-export type ImportedEntry = Omit<Entry, 'i' | 'size'>;
+export type ImportedEntry = Omit<Entry, 'i'>;
 
 /** Drops what memory already has: the same receipt, or the same `copyOf` key, the host's second identity for one message
  * (Pi: a Claude message copied into a forked session). */
@@ -44,7 +44,7 @@ export function planImport(existing: readonly Entry[], incoming: readonly Import
   const { added, skipped } = deduplicate(existing, incoming, copyOf);
   if (!added.length) return undefined;
   const all = mode === 'rebuild' ? chronological([...existing, ...added]) : [...existing, ...chronological(added)];
-  const entries: Entry[] = all.map((e, i) => ({ ...e, i, size: bytes(`${e.kind}: ${e.text}`) }));
+  const entries: Entry[] = all.map((e, i) => ({ ...e, i }));
   return { mode, entries, kept: mode === 'append' ? existing.length : 0, added: added.length, skipped,
     inputBytes: (mode === 'rebuild' ? entries : added).reduce((n, e) => n + bytes(e.text), 0) };
 }

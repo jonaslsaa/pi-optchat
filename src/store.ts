@@ -72,10 +72,11 @@ export class FileStore implements Store {
     let saved: string | undefined;
     if (existsSync(view)) try { saved = readFileSync(view, 'utf8'); } catch { saved = ''; }
     const tree = records(join(this.directory, 'tree'), this.warn);
-    // Memory checks the rest; a message without its text is as broken here as before.
+    // Memory checks the rest; a record without its text is as broken here as before.
     if (!entries.every(isEntry)) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
+    if (!tree.every(isSummary)) throw new Error('Invalid OptChat summary record.');
     for (const { i, text } of entries) this.texts[i] = text;
-    for (const value of tree) if (isSummary(value)) this.summaries.set(`${value.l}:${value.i}`, value.text);
+    for (const { l, i, text } of tree) this.summaries.set(`${l}:${i}`, text);
     return { entries, tree, view: saved };
   }
   text(i: number) { return this.texts[i]; }

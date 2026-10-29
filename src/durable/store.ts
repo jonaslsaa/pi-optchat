@@ -1,7 +1,7 @@
 import type { SqliteDatabase, SqliteValue } from '@earendil-works/pi-durable/storage/sqlite';
 import { isMime, type Entry, type Mime, type Part, type Saved, type Store, type Summary } from '../core/index.ts';
 
-/** A Durable Object's SQLite refuses a row over 2 MB. A message's text is stored in parts of at most this many UTF-16 units,
+/** A Durable Object's SQLite refuses a row over 2 MB. A message's text is stored as JSON in parts of at most this many UTF-16 units,
  * so a part is at most ~1.5 MB of UTF-8 however the text is written, and a huge pasted email still fits. */
 const PART = 512 * 1024;
 
@@ -10,10 +10,10 @@ CREATE TABLE IF NOT EXISTS optchat_tree (l INTEGER NOT NULL, i INTEGER NOT NULL,
 CREATE TABLE IF NOT EXISTS optchat_view (id INTEGER PRIMARY KEY CHECK (id = 0), json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS optchat_images (name TEXT PRIMARY KEY, mime TEXT NOT NULL, data BLOB NOT NULL);`;
 
-/** Splits `text` every PART units, never between the two halves of a surrogate pair. An empty text is one empty part. */
+/** Splits `text` every PART units, never between the two halves of a surrogate pair. */
 function parts(text: string) {
   const result: string[] = [];
-  for (let at = 0; at < text.length || !result.length;) {
+  for (let at = 0; at < text.length;) {
     let end = Math.min(text.length, at + PART);
     if (end < text.length && /[\ud800-\udbff]/.test(text[end - 1])) end--;
     result.push(text.slice(at, end)); at = end;
@@ -24,7 +24,14 @@ function parts(text: string) {
 /** A synchronous query on the same database, for the texts memory reads while it builds a view, zooms or searches. In a Durable
  * Object: `(sql, ...params) => ctx.storage.sql.exec(sql, ...params)`; on Node, node:sqlite's `(sql, ...params) => db.prepare(sql).iterate(...params)`. */
 export type Read = (sql: string, ...params: SqliteValue[]) => Iterable<Record<string, unknown>>;
-const texts = (rows: Iterable<Record<string, unknown>>) => [...rows].map(row => typeof row.text === 'string' ? row.text : '').join('');
+/** Texts are stored as JSON, which keeps an unpaired surrogate that SQLite's TEXT would replace. A text that isn't there throws. */
+function texts(rows: Iterable<Record<string, unknown>>, what: string) {
+  const found = [...rows].map(row => typeof row.text === 'string' ? row.text : '');
+  if (!found.length) throw new Error(`No ${what} in this store.`);
+  const text: unknown = JSON.parse(found.join(''));
+  if (typeof text !== 'string') throw new Error(`Invalid ${what} in this store.`);
+  return text;
+}
 
 /** OptChat's memory in any Chord `SqliteDatabase`, such as Node's (`NodeSqliteDatabase`) or a Durable Object's. Give it the
  * database Pi Durable's storage uses, so both share one queue: in a Durable Object, the `DurableObjectSqliteDatabase` over
@@ -41,14 +48,14 @@ export class SqliteStore implements Store {
     const view = await this.db.get<{ json: string }>('SELECT json FROM optchat_view');
     return { entries: log.map(row => JSON.parse(row.meta)), tree, view: view?.json };
   }
-  text(i: number) { return texts(this.read('SELECT text FROM optchat_log WHERE i = ? ORDER BY part', i)); }
-  summary({ l, i }: Part) { return texts(this.read('SELECT text FROM optchat_tree WHERE l = ? AND i = ?', l, i)); }
+  text(i: number) { return texts(this.read('SELECT text FROM optchat_log WHERE i = ? ORDER BY part', i), `message ${i}`); }
+  summary({ l, i }: Part) { return texts(this.read('SELECT text FROM optchat_tree WHERE l = ? AND i = ?', l, i), `summary ${l}/${i}`); }
   /** The primary key refuses a second message at an index, so a store that was not the last to append writes nothing. */
   async append(entry: Entry) {
     try {
       await this.db.transaction(async tx => {
         const { text, ...meta } = entry;
-        for (const [part, chunk] of parts(text).entries())
+        for (const [part, chunk] of parts(JSON.stringify(text)).entries())
           await tx.run('INSERT INTO optchat_log (i, part, meta, text) VALUES (?, ?, ?, ?)', entry.i, part, part ? null : JSON.stringify(meta), chunk);
       });
     } catch (error) {
@@ -58,7 +65,7 @@ export class SqliteStore implements Store {
     }
   }
   async appendNode(node: Summary) {
-    await this.db.run('INSERT OR REPLACE INTO optchat_tree (l, i, size, text) VALUES (?, ?, ?, ?)', node.l, node.i, node.size, node.text);
+    await this.db.run('INSERT OR REPLACE INTO optchat_tree (l, i, size, text) VALUES (?, ?, ?, ?)', node.l, node.i, node.size, JSON.stringify(node.text));
   }
   async saveView(view: string) {
     await this.db.run('INSERT OR REPLACE INTO optchat_view (id, json) VALUES (0, ?)', view);

@@ -12,7 +12,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { NodeSqliteDatabase } from '@earendil-works/chord/sqlite/node';
 import { SqliteStore } from '../src/durable/index.ts';
 
-const entry = (i: number, text: string): Entry => ({ i, kind: 'user', text, size: 0, date: '2026-10-09T12:00:00.000Z' });
+const entry = (i: number, text: string): Entry => ({ i, kind: 'user', text, date: '2026-10-09T12:00:00.000Z' });
 const node = (i: number, text: string): Summary => ({ l: 0, i, text, size: 0 });
 const temp = () => mkdtempSync(join(tmpdir(), 'optchat-store-'));
 
@@ -32,11 +32,11 @@ function contract(name: string, open: (dir: string, warn: (s: string) => void) =
     try {
       const store = open(dir, () => {});
       await store.load();
-      for (const [i, text] of ['one', 'two', 'three'].entries()) await store.append(entry(i, text));
+      for (const [i, text] of ['one', 'two', 'three \ud83d'].entries()) await store.append(entry(i, text));
       await store.appendNode(node(0, 'first summary'));
       await store.saveView('[[0,0]]'); await store.saveView('[[0,0],[0,1]]');
       const saved = await reload(open(dir, () => {}));
-      assert.deepEqual(saved.entries, ['one', 'two', 'three'].map((text, i) => entry(i, text)));
+      assert.deepEqual(saved.entries, ['one', 'two', 'three \ud83d'].map((text, i) => entry(i, text)), 'an unpaired surrogate comes back as it was');
       assert.deepEqual(saved.tree, [node(0, 'first summary')]);
       assert.equal(saved.view, '[[0,0],[0,1]]');
     } finally { removeDir(dir); }
@@ -79,8 +79,8 @@ contract('SqliteStore', sqlite);
 test('SqliteStore: a message over the 2 MB row limit is saved in parts and loads back whole', async () => {
   const dir = temp();
   try {
-    // Over 3 MB of UTF-8, with an emoji whose surrogate pair straddles where a part would end (3 × 512Ki units).
-    const text = `${'ø€'.repeat(700_000)}${'x'.repeat(3 * 524_288 - 1 - 1_400_000)}😀 end`;
+    // Over 3 MB of UTF-8, with an emoji whose surrogate pair straddles where a part would end (3 × 512Ki units, less the JSON's quote).
+    const text = `${'ø€'.repeat(700_000)}${'x'.repeat(3 * 524_288 - 1 - 1 - 1_400_000)}😀 end`;
     await sqlite(dir).load();
     await sqlite(dir).append(entry(0, text));
     assert.deepEqual((await reload(sqlite(dir))).entries, [entry(0, text)]);
