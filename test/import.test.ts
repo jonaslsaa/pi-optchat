@@ -763,7 +763,9 @@ test('core builds an import in any store: a paused rebuild resumes from what the
   const switched: Awaited<ReturnType<typeof openMemory>>[] = [];
   const run = (signal: AbortSignal) => runCore({ plan: plan.entries, total: plan.entries.length, activate: async () => void switched.push(await openMemory(store, short)),
     open: () => openMemory(store, compress, { warn: () => {}, jobs: 1 }) }, signal);
-  await assert.rejects(run(AbortSignal.timeout(50)));
+  // Not AbortSignal.timeout: its timer doesn't keep the event loop alive while the stalled import waits.
+  const pause = new AbortController(); setTimeout(() => pause.abort(), 50);
+  await assert.rejects(run(pause.signal));
   assert.equal(switched.length, 0);
   assert.ok(saved.entries.length > 0 && saved.entries.length < plan.entries.length, 'paused part way');
   stall = false;
