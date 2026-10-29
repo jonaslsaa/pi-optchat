@@ -774,3 +774,14 @@ test('core builds an import in any store: a paused rebuild resumes from what the
   assert.deepEqual(switched[0].root.map(e => e.text), plan.entries.map(e => e.text));
   assert.equal(switched[0].pending, 0);
 });
+
+test('core import does not switch to a staging log whose last write failed in a store that writes behind', async () => {
+  const saved: Saved = { entries: [], tree: [] };
+  const store: Store = { load: () => structuredClone(saved), appendNode: n => void saved.tree.push(n), saveView: view => void (saved.view = view),
+    append: async e => { if (e.text === 'Imported b') throw new Error('offline'); saved.entries.push(e); }, putImage: () => undefined, image: () => undefined };
+  const plan = planImport([], [entry('a'), entry('b')], 'rebuild'); assert.ok(plan);
+  let switched = false;
+  await assert.rejects(runCore({ plan: plan.entries, total: plan.entries.length, open: () => openMemory(store, short, { warn: () => {} }),
+    activate: () => { switched = true; } }, AbortSignal.timeout(5000)), /offline/);
+  assert.equal(switched, false);
+});
