@@ -5,6 +5,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./core": "./src/core/index.ts",
+    "./durable": "./src/durable/index.ts",
     "./package.json": "./package.json"
   },
   "pi": {
@@ -19,9 +20,11 @@
     "test:live": "tsx test/live.ts"
   },
   "devDependencies": {
+    "@earendil-works/chord": "1.4.0",
     "@earendil-works/pi-agent-core": "1.4.0",
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0",
     "@earendil-works/pi-tui": "1.4.0",
     "@types/node": "^22.20.5",
     "tsx": "^4.23.15",
@@ -32,6 +35,7 @@
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-durable": "~1.4.0",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
@@ -43,6 +47,9 @@
       "optional": true
     },
     "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-durable": {
       "optional": true
     },
     "@earendil-works/pi-tui": {

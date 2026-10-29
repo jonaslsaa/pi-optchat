@@ -172,7 +172,7 @@ test("a host's own compactor prompt is the one the model gets, and COMPACT is us
       return stream;
     } }) });
   const input = { context: '<chat>\n</chat>', source: 'x'.repeat(600), part: { l: 0, i: 0 } };
-  assert.equal(await compressor('Summarize a board chat with many people.')(input, new AbortController().signal), 'a line');
+  assert.equal(await compressor('Summarize a group chat with many people.')(input, new AbortController().signal), 'a line');
   await compressor()(input, new AbortController().signal);
-  assert.deepEqual(prompts, ['Summarize a board chat with many people.', COMPACT]);
+  assert.deepEqual(prompts, ['Summarize a group chat with many people.', COMPACT]);
 });

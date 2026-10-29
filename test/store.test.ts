@@ -8,6 +8,9 @@ import { FileStore, localDay } from '../src/store.ts';
 import type { Lease, Saved, Store } from '../src/core/store.ts';
 import { holdProfile, HEARTBEAT_MS, isWindows, ProfileBusyError, profileSocket } from '../src/profiles.ts';
 import { removeDir } from './support.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { NodeSqliteDatabase } from '@earendil-works/chord/sqlite/node';
+import { SqliteStore } from '../src/durable/index.ts';
 
 const entry = (i: number, text: string): Entry => ({ i, kind: 'user', text, size: 0, date: '2026-10-09T12:00:00.000Z' });
 const node = (i: number, text: string): Summary => ({ l: 0, i, text, size: 0 });
@@ -53,6 +56,26 @@ function contract(name: string, open: (dir: string, warn: (s: string) => void) =
   });
 }
 contract('FileStore', (dir, warn) => new FileStore(dir, warn));
+// As in a Durable Object, every store on one profile shares its database: here one in-memory database per folder, which also
+// leaves no open file for Windows to refuse to delete.
+const databases = new Map<string, NodeSqliteDatabase>();
+const sqlite = (dir: string) => {
+  let db = databases.get(dir);
+  if (!db) databases.set(dir, db = new NodeSqliteDatabase(new DatabaseSync(':memory:')));
+  return new SqliteStore(db);
+};
+contract('SqliteStore', sqlite);
+
+test('SqliteStore: a message over the 2 MB row limit is saved in parts and loads back whole', async () => {
+  const dir = temp();
+  try {
+    // Over 3 MB of UTF-8, with an emoji whose surrogate pair straddles where a part would end (3 × 512Ki units, less the JSON's start).
+    const head = `{"i":0,"kind":"user","text":"`.length, text = `${'ø€'.repeat(700_000)}${'x'.repeat(3 * 524_288 - 1 - head - 1_400_000)}😀 end`;
+    await sqlite(dir).load();
+    await sqlite(dir).append(entry(0, text));
+    assert.deepEqual((await sqlite(dir).load()).entries, [entry(0, text)]);
+  } finally { removeDir(dir); }
+});
 
 test('FileStore: a line torn by a crash is skipped with a warning, and the next append starts on a fresh line', () => {
   const dir = temp();

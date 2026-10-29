@@ -1,0 +1,37 @@
+# OptChat on Pi Durable
+
+`pi-optchat/durable` runs OptChat's memory in a [Pi Durable](https://www.npmjs.com/package/@earendil-works/pi-durable) agent, such as one in a Cloudflare Durable Object behind the Agents SDK's `PiHarness`. It is two things: `SqliteStore`, a `Store` over SQLite (in a Durable Object, the object's), and a Pi Durable extension that builds each request from OptChat's view. The Worker, its prompts and tools stay in the app. It needs `@earendil-works/pi-durable` 1.4.x (an optional peer dependency; tested on 1.4.0) and imports nothing from Pi's terminal app or Node; `test/core-boundary.test.ts` keeps it that way.
+
+## Wiring it up
+
+```ts
+const db = new DurableObjectSqliteDatabase(ctx.storage);         // the one Pi Durable's storage uses too
+const memory = await openMemory(new SqliteStore(db), createCompressor({ model, retryable }));
+const memoryExtension = optchat({ memory });
+registry.install(memoryExtension.extension);
+const harness = await Harness.open(storage, { models: withCacheMarks(models), registry, onWake, settings: { compaction: { enabled: false } } }, context);
+memoryExtension.attach(harness, context);
+```
+
+With the Agents SDK's `PiHarness` this goes in its `harness` factory, which supplies `storage`, `context` and `onWake` and resumes the Harness when an alarm wakes the object. A host without it passes an `onWake` that arms an alarm, and calls `harness.resume()` on open and on each alarm, or a task owed from before an eviction never runs.
+
+`examples/durable-object` is a Worker built this way, with the counters and endpoints its `proof.mjs` uses: it runs the Worker under `wrangler dev` with real model calls and checks a multi-turn chat, restarts and the cache.
+
+## How it works
+
+- **Each request** (`beforeRequest`, in the configured conversation only) is the system prompt, OptChat's view, the previous exchange and Pi's current context. The view and previous exchange are fixed for one context, so the requests of a tool loop share a cached prefix. Pi's older transcript is never sent.
+- **When the conversation is idle** (no run, nothing in the inbox, checked again inside the commit), the extension resets Pi's context and creates a background task, in one commit. The task logs what the reset ended into memory and waits for its summaries. Pi Durable runs the task and, after an eviction, its alarm wakes the object to finish it.
+- **The log's cursor** is the log itself: each message logged from a Pi entry carries the receipt `pi:<entry id>`, written with the message. On open, the newest entry in memory is read again and the records it already has are skipped, so an entry cut off between its records (an answer with tool calls makes several) is completed. A restart logs nothing twice and summarizes nothing again. Only Pi's user, assistant and tool result entries are logged, plus a reset's note (`Conversation.reset(text)`, a tool's `handoff`) as `[Handoff note] …`, once the context it starts has ended. One endless chat with no resets of your own is still the recommended setup.
+- **A failed save** stops memory's log: requests keep the view it has, and after a restart logging resumes from the receipts and Pi's transcript. Cloudflare resets the object itself only when a commit fails after the code ran (the output gate, which drops Pi's writes too); a write that throws at once, like `SQLITE_FULL` at the storage limit, doesn't, so the restart waits for idle eviction, a deploy, or the host's `ctx.abort()`, which the example calls from `warn`. `SQLITE_FULL` stops Pi's writes as well; the errors only memory's writes could hit (a row over 2 MB, a message index saved twice) are ruled out by the store's parts and by one Memory per database.
+- **Compaction:** turn Pi's off; the extension also declines any that starts. OptChat's summaries replace it.
+- **Large tool results** are sent as their head and tail (`boundedMessage`), capped as Pi does.
+- **Tools:** `zoom` and `date` (plus `search` with `search: true`), replay-safe.
+- **Cache marks:** `withCacheMarks(models)` adds OptChat's marks to Anthropic requests that carry a view, so a view that grows at its end is read from the cache. A request with its own `onPayload` is left alone.
+- **Summaries of a group chat:** a chat that isn't one user talking to OptChat, such as a group chat with several people, gives `createCompressor` its own `system` prompt and names each speaker in the text, like "[Alex] …".
+- **Storage:** tables `optchat_log`, `optchat_tree`, `optchat_view` and `optchat_images` beside Pi's `pi_*`, in the same database and queue. A message is stored in parts of 512K UTF-16 units, under the 2 MB row limit; an image must be under 2 MB.
+
+Not done yet:
+- Refreshing the view mid-turn, as Pi's OptChat does. With compaction off, one run whose tool loop outgrows the model's window fails.
+- Images in messages: they are left out of memory.
+- Loading log text lazily. Memory keeps the whole log in RAM: about 60 MB of heap for a 16,000-message log, and a Durable Object's isolate has 128 MB. A chat with years of history needs this first.
+- Imports: core's `planImport` and `runImport` (append or rebuild, #248) are on main, but the durable side doesn't wire them yet.
