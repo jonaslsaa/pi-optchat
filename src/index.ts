@@ -47,10 +47,6 @@ async function printReply(text: string) {
     catch (error) { if (!record(error) || error.code !== 'EAGAIN') throw error; await new Promise(resolve => setTimeout(resolve, 10)); }
   }
 }
-const toggle = (prompt: string, line: string, on: boolean, after: string) => on === prompt.includes(line) ? prompt : on ? prompt.replace(after, after + line) : prompt.replace(line, '');
-/** A report run while idle reuses the last built prompt, so Previous exchange and Memory search changes since then are applied here. */
-const promptFor = (prompt: string, { previousExchange, memorySearch }: ProfileConfig) =>
-  allowSearch(toggle(toggle(prompt, CONTINUITY, previousExchange, VIEW_DOC), SEARCH_DOC, memorySearch, previousExchange ? VIEW_DOC + CONTINUITY : VIEW_DOC), memorySearch);
 interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
 /** OptChat's own version, read from the package.json beside src/ (in the checkout and the npm package alike); none if unreadable. */
@@ -176,13 +172,11 @@ export default function optchat(pi: ExtensionAPI) {
       }
     }
   };
-  // Shown as a dark background box, not as the user's own message. Before this profile has run once there is no
-  // built system prompt to reuse, so that rare case still goes through Pi's normal prompt path as a user message.
+  // Shown as a dark background box, not as the user's own message.
   const sendReport = (report: Report) => {
     const { text, count } = report;
     report.steered = !idle();
-    if (prompt) pi.sendMessage<ReportDetails>({ customType: REPORT_TYPE, content: text, display: true, details: { count } }, { triggerTurn: true, deliverAs: 'steer' });
-    else pi.sendUserMessage(text, { deliverAs: 'steer', expandPromptTemplates: false });
+    pi.sendMessage<ReportDetails>({ customType: REPORT_TYPE, content: text, display: true, details: { count } }, { triggerTurn: true, deliverAs: 'steer' });
   };
   const deliverReport = async (text: string, { once = false, count }: { once?: boolean; count?: number } = {}) => {
     if (once && (active?.memory.root.some(e => e.receipt === reportReceipt(text)) || reports.some(r => r.text === text))) return;
@@ -407,21 +401,14 @@ export default function optchat(pi: ExtensionAPI) {
     }
     return { action: 'continue' };
   });
-  const startRun = (ctx: ExtensionContext) => {
-    flush(); run = []; logged = 0; keep = 0; view = undefined; runStarted = true;
-    const config = active?.config;
-    previous = config?.previousExchange ? previousExchange(ctx.sessionManager.getBranch(), config.previousExchangeKB * 1000) : [];
-    pi.appendEntry(RUN_BOUNDARY, { state: 'start' });
-  };
-  // A report sent while Pi is idle starts its run without before_agent_start; it reuses the last built prompt.
-  pi.on('agent_start', (_event, ctx) => {
-    working = true; showTitle(ctx);
-    if (active && !runStarted) startRun(ctx);
-  });
+  pi.on('agent_start', (_event, ctx) => { working = true; showTitle(ctx); });
+  // Every run starts here, reports sent while Pi is idle too (Pi 1.2+).
   pi.on('before_agent_start', (event, ctx) => {
     if (!active) return; // Plain Pi run: leave Pi's own prompt untouched.
-    startRun(ctx);
-    const a = required();
+    const a = active;
+    flush(); run = []; logged = 0; keep = 0; view = undefined; runStarted = true;
+    previous = a.config.previousExchange ? previousExchange(ctx.sessionManager.getBranch(), a.config.previousExchangeKB * 1000) : [];
+    pi.appendEntry(RUN_BOUNDARY, { state: 'start' });
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
     syncSearch(a.config);
     event.systemPromptOptions.customPrompt = allowSearch(`${MASTER}\n\n${modelsHint(a.config.subagent)}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}${a.config.memorySearch ? SEARCH_DOC : ''}`, a.config.memorySearch);
@@ -443,13 +430,12 @@ export default function optchat(pi: ExtensionAPI) {
     if (message.role === 'user') {
       try {
         const text = textContent(message.content);
-        // A report is shown as our custom message, or sent as plain text before the first run has a prompt to reuse.
-        if (bounded.role === 'custom' && bounded.customType === REPORT_TYPE || reports.some(r => !r.batch && r.text === text)) {
+        if (bounded.role === 'custom' && bounded.customType === REPORT_TYPE) {
           // A report sent again after a lost steer can still arrive twice (Pi kept the old steer after an abort): drop the extra copy.
           // Copies are counted, so a later report that happens to repeat an earlier text still arrives.
           const receipt = reportReceipt(text), copies = run.slice(logged).filter(m => receipts.get(m) === receipt).length;
           if (reports.filter(r => !r.batch && r.text === text).length <= copies && (copies > 0 || active.memory.root.some(e => e.receipt === receipt)))
-            return { message: bounded.role === 'custom' ? { ...bounded, content: DUPLICATE_REPORT, display: false } : { ...message, content: DUPLICATE_REPORT } };
+            return { message: { ...bounded, content: DUPLICATE_REPORT, display: false } };
           receipts.set(message, receipt);
         } else {
           // The inbox journaled the typed input: match without image references or Pi's image notes.
@@ -488,7 +474,7 @@ export default function optchat(pi: ExtensionAPI) {
         flush();
       }
       // Extensions that run after ours (Pi's built-in MCP adds <mcp_servers>) still change the prompt; send what Pi has now.
-      // A prompt without our preamble (a report run started while Pi was idle) keeps the last one we built.
+      // A prompt without our preamble keeps the last one we built.
       const current = ctx.getSystemPrompt();
       if (current.startsWith(MASTER.slice(0, 40))) prompt = current;
       // A turn past its budget moves its steps into the view, keeping the task and the last tool call whole (#146).
@@ -501,7 +487,7 @@ export default function optchat(pi: ExtensionAPI) {
         ctx.ui.notify(`OptChat moved ${Math.round(size / 4000)}k tokens of this turn into memory (${((Date.now() - began) / 1000).toFixed(1)}s).`, 'info');
       }
       // Built on every call, unlike the view, so it is never out of date; it goes last, after everything cached.
-      return { messages: buildContext(event.messages, refreshedRun(run, keep, TURN_REFRESHED), view, promptFor(prompt, a.config), previous, atWork(a.children.working)) };
+      return { messages: buildContext(event.messages, refreshedRun(run, keep, TURN_REFRESHED), view, prompt, previous, atWork(a.children.working)) };
     } catch (error) {
       // Pi catches extension errors. Explicitly abort so it cannot fall back to old context.
       ctx.abort();
@@ -541,7 +527,6 @@ export default function optchat(pi: ExtensionAPI) {
   pi.registerTool(zoom); pi.registerTool(date);
   pi.registerTool({ ...searchTool(() => required().memory), defaultActive: false });
   // The tool and its prompt line change together, once per toggle, so the cached prefix is otherwise stable.
-  // Synced on save too: a report turn started while idle reuses the tool set without before_agent_start.
   const syncSearch = ({ memorySearch }: ProfileConfig) => {
     const tools = pi.getActiveTools();
     if (tools.includes('search') !== memorySearch) pi.setActiveTools(memorySearch ? [...tools, 'search'] : tools.filter(name => name !== 'search'));
@@ -563,7 +548,7 @@ export default function optchat(pi: ExtensionAPI) {
   /** The settings page's options: every model Pi is logged in to, with the thinking levels it takes, sorted so each provider's models sit together. */
   const settingsOptions = (ctx: ExtensionContext, a: Active) => ({ profile: a.name, config: a.config,
     models: ctx.modelRegistry.getAvailable().map(m => ({ name: `${m.provider}/${m.id}`, thinking: getSupportedThinkingLevels(m) })).sort((x, y) => x.name.localeCompare(y.name)),
-    save: (config: ProfileConfig) => { saveConfig(a.dir, config); syncSearch(config); } });
+    save: (config: ProfileConfig) => saveConfig(a.dir, config) });
   const pickModel = async (ctx: ExtensionContext, role: 'compactor' | 'subagent') => {
     const a = required();
     if (ctx.mode !== 'tui') throw new Error('Choosing a model requires interactive Pi. Edit config.json in the profile directory instead.');
