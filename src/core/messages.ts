@@ -1,9 +1,9 @@
-import type { ImageContent, Message, UserMessage } from '@earendil-works/pi-ai';
+import type { ImageContent, Message, TextContent, UserMessage } from '@earendil-works/pi-ai';
 import { CAP, cap, type Kind, type Memory } from './memory.ts';
 import { isImage } from './images.ts';
 
 /** A turn's messages as core reads them: pi-ai's, plus a host's own (Pi's custom messages), which pass through untouched. */
-export type AnyMessage = Message | { role: string; timestamp: number; content?: unknown };
+export type AnyMessage = Message | { role: string; timestamp: number; content?: string | (TextContent | ImageContent)[] };
 const is = <R extends Message['role']>(message: AnyMessage, role: R): message is Extract<Message, { role: R }> => message.role === role;
 /** Names an image in memory's text, as `[image <16 hex digits>]` (see loadImages). */
 export type ImageRef = (image: ImageContent) => string;
@@ -71,16 +71,12 @@ export function completedExchange(history: readonly AnyMessage[], imageRef?: Ima
 /** Pi's own estimate for an image when it decides to compact: 4,800 characters, about 1,200 tokens. */
 const IMAGE_CHARS = 4_800;
 /** Characters a message adds to a request: its text, thinking, tool-call arguments and images, as Pi estimates them. Framing is left out. */
-export function messageChars({ content }: AnyMessage) {
+export function messageChars({ content = [] }: AnyMessage) {
   if (typeof content === 'string') return content.length;
-  if (!Array.isArray(content)) return 0;
-  return content.reduce((sum: number, block: unknown) => {
-    if (typeof block !== 'object' || block === null || !('type' in block)) return sum;
-    if (block.type === 'text' && 'text' in block && typeof block.text === 'string') return sum + block.text.length;
-    if (block.type === 'thinking' && 'thinking' in block && typeof block.thinking === 'string') return sum + block.thinking.length;
-    if (block.type === 'toolCall' && 'arguments' in block) return sum + JSON.stringify(block.arguments).length;
-    return block.type === 'image' ? sum + IMAGE_CHARS : sum;
-  }, 0);
+  let sum = 0;
+  for (const block of content) sum += block.type === 'text' ? block.text.length : block.type === 'thinking' ? block.thinking.length
+    : block.type === 'toolCall' ? JSON.stringify(block.arguments).length : block.type === 'image' ? IMAGE_CHARS : 0;
+  return sum;
 }
 /** The share of the model's window a turn's verbatim messages may fill (#146) in characters, at ~4 characters a token; none when
  * off or the window is unknown. */

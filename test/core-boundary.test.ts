@@ -6,11 +6,14 @@ import { readdirSync, readFileSync } from 'node:fs';
 // from Pi or Node at runtime.
 test('core imports only itself, typebox and pi-ai types, and uses no Node globals', () => {
   const dir = new URL('../src/core/', import.meta.url);
-  const problems = readdirSync(dir).filter(file => file.endsWith('.ts')).flatMap(file => {
-    const source = readFileSync(new URL(file, dir), 'utf8');
-    const imports = [...source.matchAll(/^(?:import|export)\b(.*?)\bfrom '([^']+)'/gms)].flatMap(([, what, from]) =>
-      /^\.\/[\w-]+\.ts$/.test(from) || from === 'typebox' || (from === '@earendil-works/pi-ai' && /^ type\b/.test(what)) ? [] : [`${file}: ${from}`]);
-    const others = [...source.matchAll(/^import '[^']+'|\bimport\(|\b(Buffer|process|require|__dirname)\s*[.(]/gm)].map(([match]) => `${file}: ${match}`);
+  const problems = readdirSync(dir, { recursive: true, encoding: 'utf8' }).filter(file => file.endsWith('.ts')).flatMap(file => {
+    const url = new URL(file, dir), source = readFileSync(url, 'utf8');
+    // One statement at a time: `[^;]` keeps a match from running on into the next one.
+    const imports = [...source.matchAll(/^(?:import|export)\b([^;]*?)\bfrom\s*(['"])([^'"]+)\2/gm)].flatMap(([, what, , from]) =>
+      from.startsWith('.') ? new URL(from, url).href.startsWith(dir.href) ? [] : [`${file}: ${from}`]
+      : from === 'typebox' || (from === '@earendil-works/pi-ai' && /^\s*type\b/.test(what)) ? [] : [`${file}: ${from}`]);
+    const others = [...source.matchAll(/^import\s*['"][^'"]+['"]|\bimport\(|\b(?:Buffer|process|require|__dirname|__filename|setImmediate)\s*(?:\?\.|[.([])/gm)]
+      .map(([match]) => `${file}: ${match}`);
     return [...imports, ...others];
   });
   assert.deepEqual(problems, []);

@@ -42,8 +42,8 @@ async function attempts(first: number, { source = 'user: ' + 'a long message '.r
     },
   });
   try {
-    const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }), undefined,
-      accepted === undefined ? undefined : () => accepted);
+    const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }),
+      { accepted: accepted === undefined ? undefined : () => accepted });
     const line = await compress({ context: '<chat>\n</chat>', source, part: merge ? { l: 1, i: 0 } : { l: 0, i: 0 } }, new AbortController().signal);
     return { calls, bytes: line.length };
   } finally { removeDir(dir); }

@@ -35,17 +35,18 @@ export function runPage(text: string, offset = 0, limit = PAGE) {
   return `${text.slice(from, to)}\n[characters ${from}-${to} of ${text.length}${to < text.length ? `; go on with offset ${to}` : ''}]`;
 }
 
-/** `runs` gives a subagent's transcript by run id, live or finished, as the host writes it; undefined for no such run. */
+/** `runs`, for a host with subagents, gives one's transcript by run id, live or finished, as the host writes it; undefined for
+ * no such run. Without it, zoom says nothing of runs. */
 export function memoryTools(memory: () => Memory, runs?: (id: string) => string | undefined) {
   return [
-    { name: 'zoom', label: 'Zoom memory', description: `Open the line id+n of the view into the two lines of n/2 under it; n = 1 (the default) gives the message whole. A message over ${PAGE.toLocaleString('en-US')} characters comes in pages; offset and limit (characters) read any part of it, and are not needed for a shorter one. A message's images come back with it. zoom("<run id>") gives a subagent's whole chat so far, in the same pages.`,
+    { name: 'zoom', label: 'Zoom memory', description: `Open the line id+n of the view into the two lines of n/2 under it; n = 1 (the default) gives the message whole. A message over ${PAGE.toLocaleString('en-US')} characters comes in pages; offset and limit (characters) read any part of it, and are not needed for a shorter one. A message's images come back with it.${runs ? ' zoom("<run id>") gives a subagent\'s whole chat so far, in the same pages.' : ''}`,
       parameters: zoomParameters,
       async execute(_id: string, { id, n = 1, offset, limit }: Static<typeof zoomParameters>) {
         if (typeof id === 'string') {
           const transcript = runs?.(id);
           if (transcript !== undefined) return result(runPage(transcript, offset, limit));
           // A model may quote a message id; eight digits can be a run id (Pi's are eight hex digits), so those never open a message.
-          if (!/^\d+$/.test(id) || id.length === 8) throw new Error(`No run ${id}.`);
+          if (!/^\d+$/.test(id) || (runs && id.length === 8)) throw new Error(runs ? `No run ${id}.` : `No message ${id}.`);
         }
         const m = memory(), text = m.zoom(Number(id), n, offset, limit), page = result(text);
         // A message's images come back with its text, as read returns a PNG; summaries stay text.

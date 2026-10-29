@@ -25,7 +25,8 @@ const UNBUILT = '(not summarized yet: zoom it)';
 const CLIPPED = '(not summarized: zoom it)';
 export const start = ({ l, i }: Part) => i * 2 ** l;
 export const end = (part: Part) => start(part) + 2 ** part.l;
-const encoder = new TextEncoder(), decoder = new TextDecoder();
+// ignoreBOM keeps a leading U+FEFF, as Buffer did.
+const encoder = new TextEncoder(), decoder = new TextDecoder('utf-8', { ignoreBOM: true });
 export const bytes = (s: string) => encoder.encode(s).length;
 const UNBUILT_BYTES = bytes(UNBUILT);
 export const flat = (s: string) => s.replace(/[\r\n]+/g, ' ');
@@ -414,7 +415,9 @@ export class Memory {
   }
 }
 
+/** `jobs`: summaries built at once (8). `retryMs`: how long a failed summary waits before it is tried again. */
+export interface MemoryOptions { warn?: (s: string) => void; budget?: number; jobs?: number; retryMs?: number }
 /** Loads a store and opens its memory. */
-export async function openMemory(store: Store, compress: Compressor, { warn, budget, jobs }: { warn?: (s: string) => void; budget?: number; jobs?: number } = {}) {
-  return new Memory({ store, saved: await store.load() }, compress, warn, budget, jobs);
+export async function openMemory(store: Store, compress: Compressor, { warn, budget, jobs, retryMs }: MemoryOptions = {}) {
+  return new Memory({ store, saved: await store.load() }, compress, warn, budget, jobs, retryMs);
 }

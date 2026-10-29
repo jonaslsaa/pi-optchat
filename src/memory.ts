@@ -1,4 +1,4 @@
-import { Memory as CoreMemory, VIEW, type Compressor } from './core/memory.ts';
+import { Memory as CoreMemory, VIEW, type Compressor, type MemoryOptions } from './core/memory.ts';
 import type { Saved, Store } from './core/store.ts';
 import { FileStore, storeFor } from './store.ts';
 
@@ -6,7 +6,7 @@ import { FileStore, storeFor } from './store.ts';
 export class Memory extends CoreMemory {
   readonly directory: string;
   /** Opens the memory in `directory` through the store `storeFor` picks, after its load. */
-  static async open(directory: string, compress: Compressor, warn: (s: string) => void = console.error, budget = VIEW, jobs = 8) {
+  static async open(directory: string, compress: Compressor, { warn = console.error, budget, jobs }: MemoryOptions = {}) {
     const store = storeFor(directory, warn);
     return new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs);
   }

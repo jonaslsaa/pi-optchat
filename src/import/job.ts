@@ -107,7 +107,7 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
   const plan: unknown[] = readFileSync(join(path, STAGED), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
   // Every line must parse, and the plan must be whole and in order, so a damaged plan can't drop messages silently.
   if (!plan.every(isEntry) || plan.length !== job.total || plan.some((e, i) => e.i !== i)) throw new Error('Import staging data is invalid; original memory remains intact.');
-  const memory = await Memory.open(path, compress, () => {}, undefined, jobs);
+  const memory = await Memory.open(path, compress, { warn: () => {}, jobs });
   const report = () => progress({ messages: memory.root.length - memory.pending, total: plan.length, summaries: memory.tree.size, error: memory.lastError });
   const timer = setInterval(report, 500);
   try {

@@ -40,7 +40,7 @@ async function setup() {
       return stream;
     },
   });
-  const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }), undefined, undefined, [0, 0]);
+  const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'compactor', thinking: 'off' }), { retryDelays: [0, 0] });
   // Long enough for a cache mark, so the first 50k characters are a shared, cacheable prefix.
   const view = `<chat>\n${'0+1|user: an old remembered line\n'.repeat(2000)}</chat>`;
   // The compactor only sees sources over NODE bytes; the fake model reads just the last line.

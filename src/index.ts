@@ -239,10 +239,10 @@ export default function optchat(pi: ExtensionAPI) {
       const pending = join(dir, 'pending-reports.json');
       const saved: unknown = existsSync(pending) ? JSON.parse(readFileSync(pending, 'utf8')) : [];
       if (!Array.isArray(saved) || !saved.every(isPendingReport)) throw new Error('Invalid pending report journal.');
-      const memory = await Memory.open(memoryDirectory(dir), createCompressor(ctx.modelRegistry, () => config.compactor, message => {
+      const memory = await Memory.open(memoryDirectory(dir), createCompressor(ctx.modelRegistry, () => config.compactor, { onUsage: message => {
         usage.compression(message, 'compactor', sessionId);
         status(ctx);
-      }, () => config.summaryAcceptBytes), warning => ctx.ui.notify(warning, 'error'), undefined, config.jobs);
+      }, accepted: () => config.summaryAcceptBytes }), { warn: warning => ctx.ui.notify(warning, 'error'), jobs: config.jobs });
       openingMemory = memory;
       const inbox = new Inbox(dir);
       const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
@@ -624,9 +624,9 @@ export default function optchat(pi: ExtensionAPI) {
           if (!job) return;
         }
         if (!closed) { await a.memory.close(); closed = true; }
-        const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, message => {
+        const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, { onUsage: message => {
           a.usage.compression(message, 'import', ctx.sessionManager.getSessionId());
-        }, () => a.config.summaryAcceptBytes);
+        }, accepted: () => a.config.summaryAcceptBytes });
         const completed = await showProgress(ctx, job, (signal, progress) => runImport(a.dir, compress, signal, a.config.jobs, progress), signal);
         ctx.ui.notify(completed ? `Imported ${job.added} messages into ${a.name}. Previous memory retained at ${job.previous === '.' ? a.dir : join(a.dir, job.previous)}.`
           : 'Import paused. Use /optchat import to resume. Other profiles remain available.', 'info');
