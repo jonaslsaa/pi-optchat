@@ -19,9 +19,9 @@ const text = (content: unknown) => typeof content === 'string' ? content
   : (content as { type: string; text?: string }[]).map(block => block.text ?? `[${block.type}]`).join('');
 
 /** One OptChat agent on Pi Durable, over one SQLite database as in a Durable Object: Pi's tables `pi_*`, memory's `optchat_*`. */
-async function open(file: string, replies: FauxResponseStep[], compress: Compressor = async ({ part }) => `line ${part.l}/${part.i}`) {
+async function open(file: string, replies: FauxResponseStep[], compress: Compressor = async ({ part }) => `line ${part.l}/${part.i}`, contextWindow?: number) {
   const sync = new DatabaseSync(file), db = new NodeSqliteDatabase(sync);
-  const faux = fauxProvider(), models = createModels();
+  const faux = fauxProvider(contextWindow ? { models: [{ id: 'small', contextWindow }] } : {}), models = createModels();
   models.setProvider(faux.provider);
   const sent: Sent[] = [];
   faux.setResponses(replies.map(reply => (request, ...rest) => {
@@ -57,6 +57,7 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
 // A test may close a database and open it again, so the folders go once every test is done.
 const dirs: string[] = [];
 after(() => dirs.forEach(removeDir));
+const read = (n: number) => fauxAssistantMessage(fauxToolCall('date', { id: n }), { stopReason: 'toolUse' });
 const file = () => { const dir = mkdtempSync(join(tmpdir(), 'optchat-durable-')); dirs.push(dir); return join(dir, 'agent.sqlite'); };
 
 test('each request is the view, the previous exchange and the current context; what a reset ended is in memory', async () => {
@@ -188,8 +189,9 @@ test('a reset\'s note reaches the model once, and is in memory once, also after 
   } finally { await after.close(); }
 });
 
-test('after a save fails, requests still carry the view memory has', async () => {
-  const agent = await open(file(), ['one', 'two', 'three', 'four'].map(text => fauxAssistantMessage(`re ${text}`)));
+test('after a save fails, requests still carry the view memory has, and a long run is sent whole', async () => {
+  const agent = await open(file(), [...['one', 'two', 'three', 'four'].map(text => fauxAssistantMessage(`re ${text}`)),
+    read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('done')], undefined, 150);
   try {
     await agent.ask('one');
     const { store } = agent.memory;
@@ -201,6 +203,10 @@ test('after a save fails, requests still carry the view memory has', async () =>
     await agent.ask('four');
     const [first] = agent.sent[3].filter(m => m.role === 'user').map(m => text(m.content));
     assert.match(first, /^<chat>\n[^]*\|user: two\n[^]*<\/chat>/);
+    // Past the refresh threshold, nothing is cut: memory couldn't keep the steps a refresh would drop.
+    await agent.ask('read them all');
+    assert.equal(agent.sent.at(-1)?.filter(m => m.role === 'toolResult').length, 6);
+    assert.ok(agent.sent.every(request => !request.some(m => text(m.content).includes('this turn grew long'))));
   } finally { await agent.close(); }
 });
 
@@ -220,4 +226,63 @@ test('cache marks go on an Anthropic request that carries the view; a request wi
   const own = { onPayload: (p: unknown) => p };
   spy.streamSimple(model, request, own);
   assert.equal(given, own);
+});
+
+test('a run past the refresh share of the window moves its steps into memory and goes on with the task and its last step', async () => {
+  // A window of 150 tokens: a refresh once the run passes 180 characters (30%), each step here about 55.
+  const agent = await open(file(), [read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('done')], undefined, 150);
+  try {
+    await agent.ask('read them all');
+    const runs = agent.sent.map(request => request.filter(m => m.role !== 'system').map(m => `${m.role}: ${text(m.content)}`));
+    const refreshed = runs.findIndex(run => run[0].includes('this turn grew long'));
+    assert.ok(refreshed > 0, 'a request was refreshed');
+    // The task, then only the last step; the steps before it are view lines, each logged once.
+    assert.deepEqual(runs[refreshed].map(line => line.split(':')[0]), ['user', 'assistant', 'toolResult']);
+    assert.match(runs[refreshed][0], /\|tool: date \{"id":0\}/);
+    assert.ok(runs.every(run => run.length <= runs[refreshed - 1].length));
+    assert.deepEqual(agent.memory.root.map(e => e.kind), ['user', ...Array(6).fill(['tool', 'echo']).flat(), 'talk']);
+  } finally { await agent.close(); }
+});
+
+test('a refresh keeps the task of the run being answered, not an earlier run queued into the same context', async () => {
+  const agent = await open(file(), [fauxAssistantMessage('A done'), read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('B done')], undefined, 150);
+  try {
+    const a = await agent.root.submit({ type: 'input', content: 'task A' }, context), b = await agent.root.submit({ type: 'input', content: 'task B' }, context);
+    await a.wait(context); await b.wait(context); await agent.idle();
+    const refreshed = agent.sent.map(request => request.filter(m => m.role !== 'system').map(m => text(m.content))).find(run => run[0].includes('this turn grew long'));
+    // Run A is in the view now; task B is the one sent whole.
+    assert.match(refreshed?.[0] ?? '', /\|talk: A done\n[^]*<\/chat>\n\ntask B\n\n\[OptChat: this turn grew long/);
+  } finally { await agent.close(); }
+});
+
+test('a run queued behind a refreshed one is sent without it: the earlier run is in memory whole', async () => {
+  const agent = await open(file(), [read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('A done'), fauxAssistantMessage('B done')], undefined, 150);
+  try {
+    const a = await agent.root.submit({ type: 'input', content: 'task A' }, context), b = await agent.root.submit({ type: 'input', content: 'task B' }, context);
+    await a.wait(context); await b.wait(context); await agent.idle();
+    const first = agent.sent[7].filter(m => m.role !== 'system').map(m => text(m.content));
+    assert.equal(first.length, 1);
+    assert.match(first[0], /\|talk: A done\n<\/chat>\n\ntask B$/);
+    assert.deepEqual(agent.memory.root.map(e => e.kind), ['user', ...Array(6).fill(['tool', 'echo']).flat(), 'talk', 'user', 'talk']);
+  } finally { await agent.close(); }
+});
+
+test('reopened mid-run after a refresh, the run is sent from where the log says', async () => {
+  const path = file();
+  // The sixth request, the one after the first refresh, answers only once aborted: the object is evicted while it waits. Reopened, it must
+  // send the task and the two steps since the cut again, not cut once more.
+  const evicted: FauxResponseStep = (_request, options) => new Promise((_resolve, reject) => options?.signal?.addEventListener('abort', () => reject(new Error('Evicted'))));
+  const before = await open(path, [read(0), read(1), read(2), read(3), read(4), evicted], undefined, 150);
+  await before.root.submit({ type: 'input', content: 'read them all' }, context);
+  while (before.sent.length < 6) await new Promise(resolve => setTimeout(resolve, 5));
+  const cutOff = before.sent[5].filter(m => m.role !== 'system').map(m => text(m.content));
+  await before.close();
+  const after = await open(path, [fauxAssistantMessage('done')], undefined, 150);
+  try {
+    await after.idle();
+    assert.ok(cutOff[0].includes('this turn grew long') && cutOff.length === 5);
+    assert.deepEqual(after.sent[0].filter(m => m.role !== 'system').map(m => text(m.content)), cutOff);
+    // Five steps before the eviction, each logged once although the refresh logged some of them before it.
+    assert.deepEqual(after.memory.root.map(e => e.kind), ['user', ...Array(5).fill(['tool', 'echo']).flat(), 'talk']);
+  } finally { await after.close(); }
 });
