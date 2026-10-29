@@ -111,8 +111,6 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
         if (logged + 1 > head - 1) return;
         const page = await conversation.entries({ order: 'ascending', minEntryId: logged + 1 as EntryId, maxEntryId: head - 1 as EntryId }, 256, cursor, ctx);
         for (const entry of page.items) {
-          // Once a save failed, memory refuses appends: requests keep the view it has, and a restart logs the rest from Pi's transcript.
-          if (memory.saveError) return;
           const messages = remembered(entry), name = await imageNames(messages);
           // Kept before the message is logged, so the image its text names is there for zoom; one that can't be kept is only named.
           // An image sent again, or read again after a restart, is written again under its name.
@@ -120,6 +118,9 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
             try { await memory.store.putImage(name(image), image.mimeType, decode(image.data)); }
             catch (error) { console.error(`OptChat could not keep an image: ${error instanceof Error ? error.message : String(error)}`); }
           }
+          // Once a save failed (also one queued before, failing during the awaits above), memory refuses appends: requests keep the
+          // view it has, and a restart logs the rest from Pi's transcript.
+          if (memory.saveError) return;
           for (const message of messages) logMessage(resumed, message, { receipt: `${RECEIPT}${entry.id}`, imageRef: imageRef(name) });
           logged = entry.id;
         }
