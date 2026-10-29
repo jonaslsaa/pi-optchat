@@ -9,7 +9,9 @@ export const SOURCE = 100_000;
 export const PAGE = 25_000;
 export const KINDS = ['user', 'talk', 'tool', 'echo', 'note', 'work'] as const;
 export type Kind = typeof KINDS[number];
-export interface Origin { source: 'claude' | 'claude-memory' | 'codex' | 'pi' | 'chatgpt'; conversation: string; message: string; title: string; project?: string }
+/** Marks an entry as imported history: the summarizer treats it as historical, not as a new request. `source` is a label the host
+ * chooses, such as "claude" or "email". */
+export interface Origin { source: string; conversation: string; message: string; title: string; project?: string }
 export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin }
 export interface Part { l: number; i: number }
 export interface Summary extends Part { text: string; size: number }

@@ -27,7 +27,7 @@ const [zoom, date] = memoryTools(() => memory);    // VIEW_DOC tells the model h
 ```
 
 - `openMemory(store, compress, { warn, budget, jobs, retryMs })`, and `Memory`: `append`, `render`, `settle(signal?, 'turn' | 'tree' | 'ahead')`, `zoom`, `search`, `date`, `onChange`, `close`, plus `root`, `tree`, `view`, `pending`, `lastError`.
-- `Store`, `Saved`, `Lease`, `Mime`, `isMime`, and the record types `Entry`, `Summary`, `Origin`, `Kind`.
+- `Store`, `Saved`, `Lease`, `Mime`, `isMime`, and the record types `Entry`, `Summary`, `Origin`, `Kind`. An entry with an `origin` is imported history, which the summarizer treats as historical; `origin.source` is any label the host picks ("email").
 - `createCompressor({ model, retryable, onUsage?, accepted?, retryDelays?, system? })` (`system`: the compactor's prompt, `COMPACT` by default), `ACCEPTED_BYTES`.
 - `logMessage(memory, message, { kind?, receipt?, imageRef? })` (every entry it appends gets `receipt`, so a host can use it as a cursor), `textContent`, `withView`, `boundedMessage`, `completedExchange`, and the mid-turn refresh helpers (`refreshBudget`, `refreshPoint`, `refreshedRun`).
 - `memoryTools(memory, runs?)` (zoom and date; `runs` adds zooming into a subagent's chat), `searchTool`, `loadImages`, `isImage`.
