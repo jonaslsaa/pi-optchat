@@ -2,13 +2,14 @@ import { existsSync, readFileSync, rmSync, cpSync, mkdirSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Memory } from '../memory.ts';
-import { bytes, isEntry, type Entry, type Compressor } from '../core/memory.ts';
+import type { Entry, Compressor } from '../core/memory.ts';
+import { deduplicate as dedupe, planImport, runImport as build, type ImportMode } from '../core/import.ts';
 import { atomicWrite } from '../store.ts';
 import { record } from '../core/cache.ts';
 import { copyKey, type ImportedEntry } from './sources.ts';
 import { DEFAULT_SETTINGS } from '../settings.ts';
 
-export type ImportMode = 'append' | 'rebuild';
+export type { ImportMode };
 export interface ImportJob {
   id: string; mode: ImportMode; previous: string; target: string; created: string;
   added: number; skipped: number; total: number; inputBytes: number;
@@ -40,41 +41,14 @@ export function pendingImport(dir: string): ImportJob | undefined {
   return { id: j.id, mode: j.mode === 'append' ? 'append' : 'rebuild', previous: j.previous, target: `memories/${j.id}`,
     created: j.created, added: Number(j.added), skipped: Number(j.skipped), total: Number(j.total), inputBytes: Number(j.inputBytes) };
 }
-export function deduplicate(existing: readonly Entry[], incoming: readonly ImportedEntry[]) {
-  const receipts = new Set(existing.map(e => e.receipt).filter(Boolean));
-  const copies = new Set(existing.map(copyKey).filter(Boolean));
-  const added: ImportedEntry[] = []; let skipped = 0;
-  for (const entry of incoming) {
-    if (!entry.receipt?.startsWith('import:')) throw new Error('Imported entry has no stable source identity.');
-    const copy = copyKey(entry);
-    if (receipts.has(entry.receipt) || copy && copies.has(copy)) { skipped++; continue; }
-    receipts.add(entry.receipt); if (copy) copies.add(copy); added.push(entry);
-  }
-  return { added, skipped };
-}
-/** Imported conversations remain contiguous; existing native history is grouped by user turn. */
-export function chronological(entries: readonly ImportedEntry[]) {
-  const groups = new Map<string, { date: string; entries: ImportedEntry[] }>();
-  let native = 0;
-  for (const entry of entries) {
-    if (!entry.origin && entry.kind === 'user') native++;
-    const id = entry.origin ? JSON.stringify([entry.origin.source, entry.origin.conversation]) : `native:${native}`;
-    const group = groups.get(id) ?? { date: entry.date, entries: [] };
-    group.date = group.date < entry.date ? group.date : entry.date;
-    group.entries.push(entry); groups.set(id, group);
-  }
-  return [...groups.values()].sort((a, b) => a.date.localeCompare(b.date)).flatMap(g => g.entries);
-}
+/** Pi also drops a Claude message copied into a forked session (`copyKey`). */
+export const deduplicate = (existing: readonly Entry[], incoming: readonly ImportedEntry[]) => dedupe(existing, incoming, copyKey);
 /** Call only while holding the profile lock, after closing its old Memory worker. */
 export function prepareImport(dir: string, old: Memory, incoming: readonly ImportedEntry[], mode: ImportMode): ImportJob | undefined {
   if (pendingImport(dir)) throw new Error('Resume or discard the pending import first.');
-  const { added, skipped } = deduplicate(old.root, incoming);
-  if (!added.length) return undefined;
-  const id = randomUUID(), target = `memories/${id}`, path = generationPath(dir, target);
-  // Append copies existing summaries without changing their indices. Rebuild regenerates every node.
-  const all = mode === 'rebuild' ? chronological([...old.root, ...added]) : [...old.root, ...chronological(added)];
-  const entries: Entry[] = all.map((e, i) => ({ ...e, i, size: bytes(`${e.kind}: ${e.text}`) }));
-  const kept = mode === 'append' ? old.root.length : 0;
+  const plan = planImport(old.root, incoming, mode, copyKey);
+  if (!plan) return undefined;
+  const { entries, kept } = plan, id = randomUUID(), target = `memories/${id}`, path = generationPath(dir, target);
   for (const sub of ['main', 'tree']) mkdirSync(join(path, sub), { recursive: true, mode: 0o700 });
   if (kept) atomicWrite(join(path, 'main', '000-import.jsonl'), entries.slice(0, kept).map(e => JSON.stringify(e)).join('\n') + '\n');
   atomicWrite(join(path, STAGED), entries.map(e => JSON.stringify(e)).join('\n') + '\n');
@@ -84,8 +58,7 @@ export function prepareImport(dir: string, old: Memory, incoming: readonly Impor
     if (existsSync(join(old.directory, 'view.json'))) cpSync(join(old.directory, 'view.json'), join(path, 'view.json'));
   }
   const job: ImportJob = { id, mode, previous: relative(dir, old.directory).split(sep).join('/') || '.', target,
-    created: new Date().toISOString(), added: added.length, skipped, total: entries.length,
-    inputBytes: (mode === 'rebuild' ? entries : added).reduce((n, e) => n + bytes(e.text), 0) };
+    created: new Date().toISOString(), added: plan.added, skipped: plan.skipped, total: entries.length, inputBytes: plan.inputBytes };
   atomicWrite(pendingFile(dir), JSON.stringify(job, null, 2));
   return job;
 }
@@ -105,22 +78,14 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
   if (memoryDirectory(dir) === path) { finish(); return job; }
   if (!existsSync(join(path, STAGED))) throw new Error('Import staging data is missing; original memory remains intact.');
   const plan: unknown[] = readFileSync(join(path, STAGED), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
-  // Every line must parse, and the plan must be whole and in order, so a damaged plan can't drop messages silently.
-  if (!plan.every(isEntry) || plan.length !== job.total || plan.some((e, i) => e.i !== i)) throw new Error('Import staging data is invalid; original memory remains intact.');
-  const memory = await Memory.open(path, compress, { warn: () => {}, jobs });
-  const report = () => progress({ messages: memory.root.length - memory.pending, total: plan.length, summaries: memory.tree.size, error: memory.lastError });
+  let memory: Memory | undefined;
+  const report = () => memory && progress({ messages: memory.root.length - memory.pending, total: plan.length, summaries: memory.tree.size, error: memory.lastError });
   const timer = setInterval(report, 500);
   try {
-    if (memory.root.length > plan.length || memory.root.some((e, i) => e.text !== plan[i].text)) throw new Error('Import staging data does not match its log; original memory remains intact.');
-    report();
-    // Recipe §10: imported messages are compressed like any other. Each is logged once its node can start, as a burst of live
-    // messages is, so up to `jobs` summaries run at once (the "Summaries at once" setting). Unlike a turn, an import waits through failures (its progress shows the error).
-    for (const e of plan.slice(memory.root.length)) { await memory.settle(signal, 'ahead'); memory.append(e.kind, e.text, e.date, e.receipt, e.origin); }
-    await memory.settle(signal, 'tree'); signal.throwIfAborted();
-    // Close all writers before the single atomic pointer swap. The previous generation stays intact.
-    await memory.close();
-    atomicWrite(join(dir, 'imports', `${job.id}.json`), JSON.stringify({ ...job, completed: new Date().toISOString() }, null, 2));
-    atomicWrite(join(dir, 'active-memory.json'), JSON.stringify(job.target));
+    await build({ plan, total: job.total, open: async () => { memory = await Memory.open(path, compress, { warn: () => {}, jobs }); report(); return memory; }, activate: () => {
+      atomicWrite(join(dir, 'imports', `${job.id}.json`), JSON.stringify({ ...job, completed: new Date().toISOString() }, null, 2));
+      atomicWrite(join(dir, 'active-memory.json'), JSON.stringify(job.target));
+    } }, signal);
     finish(); report(); return job;
-  } finally { clearInterval(timer); await memory.close(); }
+  } finally { clearInterval(timer); }
 }

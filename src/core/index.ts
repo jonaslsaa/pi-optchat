@@ -9,3 +9,4 @@ export { allowSearch, COMPACT, CONTINUITY, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC 
 export { boundedMessage, completedExchange, logMessage, refreshBudget, refreshedRun, refreshPoint, textContent, withView, type AnyMessage, type ImageRef } from './messages.ts';
 export { memoryTools, searchTool } from './tools.ts';
 export { isImage, loadImages } from './images.ts';
+export { deduplicate, planImport, runImport, type ImportedEntry, type ImportMode, type ImportPlan } from './import.ts';

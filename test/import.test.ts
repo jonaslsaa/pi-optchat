@@ -9,10 +9,12 @@ import { crc32, deflateRawSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { Memory } from '../src/memory.ts';
-import { bytes, type Compressor } from '../src/core/memory.ts';
+import { bytes, openMemory, type Compressor, type Entry } from '../src/core/memory.ts';
+import type { Saved, Store } from '../src/core/store.ts';
 import { localDay } from '../src/store.ts';
 import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
-import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate, chronological } from '../src/import/job.ts';
+import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate } from '../src/import/job.ts';
+import { chronological, planImport, runImport as runCore } from '../src/core/import.ts';
 import { chooseImport, showProgress } from '../src/import/ui.ts';
 import { removeDir } from './support.ts';
 
@@ -747,4 +749,26 @@ test('a Claude memory with a folded or literal YAML description imports the text
     assert.deepEqual(texts.get('plain')?.slice(1, 3), ['one line', '']);
     for (const lines of texts.values()) assert.match(lines[0], /· type user · /, 'a key after the block still parses');
   } finally { removeDir(root); }
+});
+
+test('core builds an import in any store: a paused rebuild resumes from what the store holds and switches once, when complete', async () => {
+  const saved: Saved = { entries: [], tree: [] };
+  const store: Store = { load: () => structuredClone(saved), append: e => void saved.entries.push(e), appendNode: n => void saved.tree.push(n),
+    saveView: view => void (saved.view = view), putImage: () => undefined, image: () => undefined };
+  const native: Entry = { i: 0, kind: 'user', text: 'native later', size: 0, date: '2026-06-01T00:00:00.000Z' };
+  const plan = planImport([native], [entry('a', date, 'large '.repeat(200)), entry('b', date, 'long '.repeat(200)), entry('a')], 'rebuild');
+  assert.ok(plan); assert.equal(plan.kept, 0); assert.equal(plan.skipped, 1);
+  let stall = true;
+  const compress: Compressor = (input, signal) => stall ? new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })) : short(input, signal);
+  const switched: Awaited<ReturnType<typeof openMemory>>[] = [];
+  const run = (signal: AbortSignal) => runCore({ plan: plan.entries, total: plan.entries.length, activate: async () => void switched.push(await openMemory(store, short)),
+    open: () => openMemory(store, compress, { warn: () => {}, jobs: 1 }) }, signal);
+  await assert.rejects(run(AbortSignal.timeout(50)));
+  assert.equal(switched.length, 0);
+  assert.ok(saved.entries.length > 0 && saved.entries.length < plan.entries.length, 'paused part way');
+  stall = false;
+  await run(AbortSignal.timeout(5000));
+  assert.equal(switched.length, 1); await switched[0].close();
+  assert.deepEqual(switched[0].root.map(e => e.text), plan.entries.map(e => e.text));
+  assert.equal(switched[0].pending, 0);
 });
