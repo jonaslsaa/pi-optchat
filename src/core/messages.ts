@@ -20,20 +20,20 @@ export function textContent(content: unknown, imageRef?: ImageRef): string {
   }).filter(Boolean).join('\n');
 }
 /** Logs a message as the recipe's kinds: a user message as `kind` (`user`, or `work` for a subagent's report), a reply's text as
- * `talk`, its tool calls as `tool`, tool results and a failed reply as `echo`. Other roles are not logged. */
+ * `talk`, its tool calls as `tool`, tool results and a failed reply as `echo`, each with `receipt`. Other roles are not logged. */
 export function logMessage(memory: Memory, message: AnyMessage, { kind = 'user', receipt, imageRef }: { kind?: Kind; receipt?: string; imageRef?: ImageRef } = {}) {
   const date = new Date(message.timestamp).toISOString();
   if (is(message, 'user')) memory.append(kind, textContent(message.content, imageRef), date, receipt);
   else if (is(message, 'assistant')) {
     for (const block of message.content) {
-      if (block.type === 'text' && block.text.trim()) memory.append('talk', block.text, date);
-      if (block.type === 'toolCall') memory.append('tool', `${block.name} ${JSON.stringify(block.arguments)}`, date);
+      if (block.type === 'text' && block.text.trim()) memory.append('talk', block.text, date, receipt);
+      if (block.type === 'toolCall') memory.append('tool', `${block.name} ${JSON.stringify(block.arguments)}`, date, receipt);
     }
     if (message.stopReason === 'error' || message.stopReason === 'aborted')
-      memory.append('echo', `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`, date);
+      memory.append('echo', `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`, date, receipt);
   } else if (is(message, 'toolResult'))
     // A zoom's page already names the images it returns.
-    memory.append('echo', cap(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom' ? imageRef : undefined)}`), date);
+    memory.append('echo', cap(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom' ? imageRef : undefined)}`), date, receipt);
 }
 /** A tool result over CAP keeps its head and tail, and its images. */
 export function boundedMessage<M extends AnyMessage>(message: M): M {
