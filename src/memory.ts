@@ -6,9 +6,9 @@ import { FileStore, storeFor } from './store.ts';
 export class Memory extends CoreMemory {
   readonly directory: string;
   /** Opens the memory in `directory` through the store `storeFor` picks, after its load. */
-  static async open(directory: string, compress: Compressor, { warn = console.error, budget, jobs }: MemoryOptions = {}) {
+  static async open(directory: string, compress: Compressor, { warn = console.error, budget, jobs, retryMs }: MemoryOptions = {}) {
     const store = storeFor(directory, warn);
-    return new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs);
+    return new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs, retryMs);
   }
   /** A directory alone opens a FileStore there. */
   constructor(source: string | { directory: string; store: Store; saved: Saved }, compress: Compressor,
