@@ -19,9 +19,9 @@ const text = (content: unknown) => typeof content === 'string' ? content
   : (content as { type: string; text?: string }[]).map(block => block.text ?? `[${block.type}]`).join('');
 
 /** One OptChat agent on Pi Durable, over one SQLite database as in a Durable Object: Pi's tables `pi_*`, memory's `optchat_*`. */
-async function open(file: string, replies: FauxResponseStep[], compress: Compressor = async ({ part }) => `line ${part.l}/${part.i}`) {
+async function open(file: string, replies: FauxResponseStep[], compress: Compressor = async ({ part }) => `line ${part.l}/${part.i}`, contextWindow?: number) {
   const sync = new DatabaseSync(file), db = new NodeSqliteDatabase(sync);
-  const faux = fauxProvider(), models = createModels();
+  const faux = fauxProvider(contextWindow ? { models: [{ id: 'small', contextWindow }] } : {}), models = createModels();
   models.setProvider(faux.provider);
   const sent: Sent[] = [];
   faux.setResponses(replies.map(reply => (request, ...rest) => {
@@ -220,4 +220,41 @@ test('cache marks go on an Anthropic request that carries the view; a request wi
   const own = { onPayload: (p: unknown) => p };
   spy.streamSimple(model, request, own);
   assert.equal(given, own);
+});
+
+const read = (n: number) => fauxAssistantMessage(fauxToolCall('date', { id: n }), { stopReason: 'toolUse' });
+
+test('a run past the refresh share of the window moves its steps into memory and goes on with the task and its last step', async () => {
+  // A window of 150 tokens: a refresh once the run passes 180 characters (30%), each step here about 55.
+  const agent = await open(file(), [read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('done')], undefined, 150);
+  try {
+    await agent.ask('read them all');
+    const runs = agent.sent.map(request => request.filter(m => m.role !== 'system').map(m => `${m.role}: ${text(m.content)}`));
+    const refreshed = runs.findIndex(run => run[0].includes('this turn grew long'));
+    assert.ok(refreshed > 0, 'a request was refreshed');
+    // The task, then only the last step; the steps before it are view lines, each logged once.
+    assert.deepEqual(runs[refreshed].map(line => line.split(':')[0]), ['user', 'assistant', 'toolResult']);
+    assert.match(runs[refreshed][0], /\|tool: date \{"id":0\}/);
+    assert.ok(runs.every(run => run.length <= runs[refreshed - 1].length));
+    assert.deepEqual(agent.memory.root.map(e => e.kind), ['user', ...Array(6).fill(['tool', 'echo']).flat(), 'talk']);
+  } finally { await agent.close(); }
+});
+
+test('reopened mid-run after a refresh, the run is sent from where the log says', async () => {
+  const path = file();
+  // The sixth request, the one after the first refresh, never answers: the object is evicted while it waits. Reopened, it must
+  // send the task and the two steps since the cut again, not cut once more.
+  const before = await open(path, [read(0), read(1), read(2), read(3), read(4), () => new Promise(() => {})], undefined, 150);
+  await before.root.submit({ type: 'input', content: 'read them all' }, context);
+  while (before.sent.length < 6) await new Promise(resolve => setTimeout(resolve, 5));
+  const cutOff = before.sent[5].filter(m => m.role !== 'system').map(m => text(m.content));
+  await Promise.race([before.close(), new Promise(resolve => setTimeout(resolve, 500))]);
+  const after = await open(path, [fauxAssistantMessage('done')], undefined, 150);
+  try {
+    await after.idle();
+    assert.ok(cutOff[0].includes('this turn grew long') && cutOff.length === 5);
+    assert.deepEqual(after.sent[0].filter(m => m.role !== 'system').map(m => text(m.content)), cutOff);
+    // Five steps before the eviction, each logged once although the refresh logged some of them before it.
+    assert.deepEqual(after.memory.root.map(e => e.kind), ['user', ...Array(5).fill(['tool', 'echo']).flat(), 'talk']);
+  } finally { await after.close(); }
 });

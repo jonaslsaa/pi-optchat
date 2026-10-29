@@ -4,7 +4,7 @@ import {
   type HarnessOptions, type ToolExecutionResult,
 } from '@earendil-works/pi-durable';
 import type { Static, TSchema } from 'typebox';
-import { allowSearch, boundedMessage, cachePayload, completedExchange, CONTINUITY, logMessage, memoryTools, SEARCH_DOC, searchTool, textContent, VIEW_DOC, withView, type Memory } from '../core/index.ts';
+import { allowSearch, boundedMessage, cachePayload, completedExchange, CONTINUITY, logMessage, memoryTools, refreshBudget, refreshedRun, refreshPoint, SEARCH_DOC, searchTool, textContent, TURN_REFRESHED, VIEW_DOC, withView, type Memory } from '../core/index.ts';
 
 type Context = Parameters<Harness['commit']>[1];
 type Message = Parameters<GenerationHooks['beforeRequest']>[0]['messages'][number];
@@ -42,6 +42,9 @@ export interface OptChatOptions {
   search?: boolean;
   /** The previous exchange is sent in full after the view when it is at most this many bytes; 0 never sends it. */
   previousExchangeBytes?: number;
+  /** When a run's messages since the last refresh pass this share of the model's window, they move into memory and the run goes
+   * on with a fresh view, as Pi's Turn refresh threshold (#146). 0.3 by default; 0 is off. */
+  refreshAt?: number;
 }
 
 /** OptChat's memory for one Pi Durable conversation. Install `extension` in the registry Harness.open gets, then `attach` the opened
@@ -49,7 +52,7 @@ export interface OptChatOptions {
  * never sees Pi's older transcript. When the conversation goes idle, OptChat resets Pi's context and a background task logs what the
  * reset ended into memory and builds its summaries; Pi Durable runs that task, and wakes the Durable Object for it after an eviction.
  * Turn Pi's own compaction off (`settings.compaction.enabled: false`); the extension also declines any that starts. */
-export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, prompt, search = false, previousExchangeBytes = 16_000 }: OptChatOptions) {
+export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, prompt, search = false, previousExchangeBytes = 16_000, refreshAt = 0.3 }: OptChatOptions) {
   let harness: Harness | undefined;
   let context: Context | undefined;
   /** The Pi entry logging resumes after: messages before the context's head are logged, the rest are sent as they are. On open it is
@@ -110,7 +113,7 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
   const beforeRequest: GenerationHooks['beforeRequest'] = async ({ messages }, api, ctx) => {
     if (api.conversationId !== id) return undefined;
     const conversation = await handle(ctx);
-    const { head } = await conversation.context(ctx);
+    const { head, entries } = await conversation.context(ctx);
     if (!turn || turn.head !== head?.id) {
       if (head) await logUpTo(conversation, head.id, ctx);
       await memory.settle(ctx.abortSignal);
@@ -119,7 +122,27 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
     const at = messages.findIndex(m => m.role !== 'system');
     if (at < 0) return undefined;
     // A tool result over 30K characters is sent as its head and tail, as in Pi.
-    return { messages: withView([...messages.slice(0, at), ...turn.previous, ...messages.slice(at).map(boundedMessage)], turn.view) };
+    const run = messages.slice(at).map(boundedMessage);
+    /** Where an answer of the run is: Pi Durable's messages are copies of its entries', so an answer is found by its first tool
+     * call's id, or its timestamp without one. */
+    const answer = (m: Message) => m.role === 'assistant' ? m.content.find(c => c.type === 'toolCall')?.id ?? m.timestamp : undefined;
+    const step = (entry: EntryRecord) => {
+      const sent = AssistantEntry.is(entry) && entry.model?.[0];
+      return sent ? run.findIndex(m => answer(m) === answer(sent)) : -1;
+    };
+    // A refresh logs the run up to the answer it cuts at, so the log says where the run is sent from, after a restart too.
+    let keep = 0;
+    if (logged > (head?.id ?? 0)) for (const entry of entries) if (entry.id > logged && (keep = Math.max(0, step(entry)))) break;
+    const { model } = await conversation.agent(ctx);
+    const refresh = refreshPoint(run, keep, refreshBudget(model && api.models.getModel(model.provider, model.modelId)?.contextWindow, refreshAt));
+    const cut = refresh && entries.find(entry => step(entry) === refresh.cut);
+    if (refresh && cut) {
+      await logUpTo(conversation, cut.id, ctx);
+      await memory.settle(ctx.abortSignal);
+      turn.view = memory.render();
+      keep = refresh.cut;
+    }
+    return { messages: withView([...messages.slice(0, at), ...turn.previous, ...refreshedRun(run, keep, TURN_REFRESHED)], turn.view) };
   };
 
   const Remember = defineTask<Record<string, never>, { phase: 'remember' }, null>({
