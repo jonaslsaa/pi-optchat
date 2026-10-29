@@ -1,9 +1,10 @@
 import { existsSync, readFileSync, rmSync, cpSync, mkdirSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Memory, bytes, isEntry, type Entry, type Compressor } from '../memory.ts';
+import { Memory } from '../memory.ts';
+import { bytes, isEntry, type Entry, type Compressor } from '../core/memory.ts';
 import { atomicWrite } from '../store.ts';
-import { record } from '../cache.ts';
+import { record } from '../core/cache.ts';
 import { copyKey, type ImportedEntry } from './sources.ts';
 import { DEFAULT_SETTINGS } from '../settings.ts';
 

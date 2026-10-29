@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { appendFileSync, existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Memory, type Entry, type Summary } from '../src/memory.ts';
-import { FileStore, localDay, type Lease, type Saved, type Store } from '../src/store.ts';
+import { openMemory, type Entry, type Summary } from '../src/core/memory.ts';
+import { FileStore, localDay } from '../src/store.ts';
+import type { Lease, Saved, Store } from '../src/core/store.ts';
 import { holdProfile, HEARTBEAT_MS, isWindows, ProfileBusyError, profileSocket } from '../src/profiles.ts';
 import { removeDir } from './support.ts';
 
@@ -108,7 +109,7 @@ function behind() {
 
 test('a store that writes behind gets its writes one at a time, in the order Memory made them', async () => {
   const { store, landed } = behind();
-  const memory = new Memory({ directory: temp(), store, saved: await store.load() }, async () => 'unused', () => {});
+  const memory = await openMemory(store, async () => 'unused', { warn: () => {} });
   for (const text of ['one', 'two', 'three']) memory.append('user', text);
   assert.equal(landed.length, 0, 'appends return before their writes land');
   await memory.settle(undefined, 'tree'); await memory.close();
@@ -120,7 +121,7 @@ test('once a write-behind append fails, nothing more is written, summary nodes i
   const { store, landed, failing } = behind(), warnings: string[] = [];
   let release = () => {};
   const gate = new Promise<void>(resolve => { release = resolve; });
-  const memory = new Memory({ directory: temp(), store, saved: await store.load() }, async () => { await gate; return 'summary'; }, text => warnings.push(text));
+  const memory = await openMemory(store, async () => { await gate; return 'summary'; }, { warn: text => warnings.push(text) });
   const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   await wait(30); landed.length = 0;
   // Long enough to need the compactor, so its node is written only after the failed append has settled and the queue is empty.

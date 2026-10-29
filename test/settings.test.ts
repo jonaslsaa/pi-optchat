@@ -11,7 +11,7 @@ import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { createProfile, defaults, loadConfig, profilePath, saveConfig, type ProfileConfig } from '../src/profiles.ts';
 import { settingsPage } from '../src/settings-page.ts';
-import { COMPACT, SEARCH_DOC } from '../src/prompts.ts';
+import { COMPACT, SEARCH_DOC } from '../src/core/prompts.ts';
 import { REPORT_TYPE, textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { removeDir } from './support.ts';

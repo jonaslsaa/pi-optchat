@@ -1,7 +1,8 @@
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { AssistantMessage } from '@earendil-works/pi-ai';
-import { reasoningFor, retryTransient, type ModelChoice } from './compactor.ts';
+import { isRetryableAssistantError, type AssistantMessage } from '@earendil-works/pi-ai';
+import { reasoningFor, type ModelChoice } from './compactor.ts';
+import { retryTransient } from './core/compactor.ts';
 import { HANDOFF } from './prompts.ts';
 import { undelivered, type RunInfo } from './runs.ts';
 import { textContent } from './transcript.ts';
@@ -53,7 +54,7 @@ export function createHandoffSummarizer(registry: ModelRegistry, choice: () => M
       const reply = await retryTransient(() => registry.streamSimple(model, {
         systemPrompt: HANDOFF,
         messages: [{ role: 'user', timestamp: Date.now(), content: prefix + transcript.subarray(offset, end).toString('utf8') }],
-      }, { reasoning: reasoningFor(model, selected.thinking), maxTokens, signal: AbortSignal.any([AbortSignal.timeout(300_000), ...signal ? [signal] : []]) }).result(), usage, retryDelays, signal);
+      }, { reasoning: reasoningFor(model, selected.thinking), maxTokens, signal: AbortSignal.any([AbortSignal.timeout(300_000), ...signal ? [signal] : []]) }).result(), usage, isRetryableAssistantError, retryDelays, signal);
       summary = handoffText(reply);
       offset = end;
     }

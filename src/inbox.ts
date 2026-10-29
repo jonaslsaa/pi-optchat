@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { record } from './cache.ts';
+import { record } from './core/cache.ts';
 import { atomicWrite } from './store.ts';
 import type { Memory } from './memory.ts';
 

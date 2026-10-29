@@ -8,8 +8,10 @@ import { createAssistantMessageEventStream, type AssistantMessage } from '@earen
 import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { Children } from '../src/agents.ts';
-import { Memory, PAGE } from '../src/memory.ts';
-import { memoryTools, result } from '../src/tools.ts';
+import { Memory } from '../src/memory.ts';
+import { PAGE } from '../src/core/memory.ts';
+import { memoryTools } from '../src/tools.ts';
+import { result } from '../src/core/tools.ts';
 import { runTranscript } from '../src/transcript.ts';
 import { reportParts } from '../src/report-message.ts';
 import { removeDir } from './support.ts';

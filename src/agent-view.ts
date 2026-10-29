@@ -8,7 +8,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Children } from './agents.ts';
 import { isHandingOff, type RunInfo } from './runs.ts';
 import { textContent } from './transcript.ts';
-import { record } from './cache.ts';
+import { record } from './core/cache.ts';
 import { agentLabel, elapsed, fit, oneLine } from './inspector.ts';
 import { isReport } from './report-message.ts';
 

@@ -1,5 +1,4 @@
-import { EventEmitter } from 'node:events';
-import { FileStore, storeFor, type Saved, type Store } from './store.ts';
+import type { Saved, Store } from './store.ts';
 
 export const NODE = 512;
 export const VIEW = 128_000;
@@ -26,11 +25,12 @@ const UNBUILT = '(not summarized yet: zoom it)';
 const CLIPPED = '(not summarized: zoom it)';
 export const start = ({ l, i }: Part) => i * 2 ** l;
 export const end = (part: Part) => start(part) + 2 ** part.l;
-export const bytes = (s: string) => Buffer.byteLength(s, 'utf8');
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+export const bytes = (s: string) => encoder.encode(s).length;
 const UNBUILT_BYTES = bytes(UNBUILT);
 export const flat = (s: string) => s.replace(/[\r\n]+/g, ' ');
 /** The first NODE bytes, without a split character at the end. */
-export const cut = (s: string) => Buffer.from(s).subarray(0, NODE).toString('utf8').replace(/\uFFFD+$/, '');
+export const cut = (s: string) => decoder.decode(encoder.encode(s).subarray(0, NODE)).replace(/\uFFFD+$/, '');
 const lineBytes = (s: string) => bytes(flat(s));
 const notice = (omitted: number) => `\n[${omitted} characters omitted; head and tail retained]\n`;
 const VIEW_OPEN = '<chat>\n';
@@ -109,7 +109,7 @@ function isSummary(value: unknown): value is Summary {
 export class Memory {
   readonly root: Entry[] = [];
   readonly tree = new Map<number, Summary>();
-  private readonly events = new EventEmitter();
+  private readonly listeners = new Set<() => void>();
   private readonly controller = new AbortController();
   private readonly busy = new Map<number, Promise<void>>();
   private readonly retryAt = new Map<number, number>();
@@ -127,26 +127,17 @@ export class Memory {
   /** The last store write still running, if any. Once an append fails, later writes are skipped and appends throw, as after a failed file write. */
   private writing?: Promise<void>;
   private failed?: string;
-  /** Where this memory's local files live: all of it for a FileStore, and the browser page, runs and imports for any store. */
-  readonly directory: string;
   readonly store: Store;
   lastError?: string;
 
-  /** Opens the memory in `directory` through the store `storeFor` picks, after its load. */
-  static async open(directory: string, compress: Compressor, warn: (s: string) => void = console.error, budget = VIEW, jobs = 8) {
-    const store = storeFor(directory, warn);
-    return new Memory({ directory, store, saved: await store.load() }, compress, warn, budget, jobs);
-  }
-  /** A directory alone opens a FileStore there. `jobs`: summaries built at once, and how many unbuilt lines a new message's node
-   * waits behind. Chat and imports pass the "Summaries at once" setting. */
-  constructor(source: string | { directory: string; store: Store; saved: Saved }, private readonly compress: Compressor,
+  /** `saved` is what `store.load()` gave (see `openMemory`). `jobs`: summaries built at once, and how many unbuilt lines a new
+   * message's node waits behind. Pi's chat and imports pass the "Summaries at once" setting. */
+  constructor({ store, saved }: { store: Store; saved: Saved }, private readonly compress: Compressor,
     private readonly warn: (s: string) => void = console.error,
     readonly budget = VIEW, private readonly jobs = 8, private readonly retryMs = 10_000) {
     this.chat = new Sawtooth(budget, budget / 2, part => this.node(part));
     this.compaction = new Sawtooth(budget / 4, budget / 8, part => this.node(part));
-    let saved: Saved;
-    if (typeof source === 'string') { const store = new FileStore(source, warn); this.directory = source; this.store = store; saved = store.load(); }
-    else ({ directory: this.directory, store: this.store, saved } = source);
+    this.store = store;
     const log = saved.entries;
     const entries = log.every(isEntry) ? log.sort((a, b) => a.i - b.i) : undefined;
     if (!entries || entries.some((entry, i) => entry.i !== i)) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
@@ -244,7 +235,8 @@ export class Memory {
     return { done: this.peak - this.owed(), total: this.peak, retryIn: Number.isFinite(due) ? due - now : undefined };
   }
   private owed() { return this.expectedNodes() - this.tree.size; }
-  onChange(listener: () => void) { this.events.on('change', listener); return () => { this.events.off('change', listener); }; }
+  onChange(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
+  private emit() { for (const listener of [...this.listeners]) listener(); }
   /** The view line covering message `at`. */
   covering(at: number) { return this.chat.covering(at); }
   /** Returns whether either view, or its batch state, changed. */
@@ -254,7 +246,7 @@ export class Memory {
     const compacted = this.compaction.fit(total, merged);
     const owed = this.owed();
     this.peak = owed > 0 ? Math.max(this.peak, owed) : 0;
-    this.events.emit('change');
+    this.emit();
     return merged || compacted || merging[0] !== this.chat.merging || merging[1] !== this.compaction.merging;
   }
   private schedule() {
@@ -276,7 +268,7 @@ export class Memory {
         this.retryAt.set(id, Date.now() + this.retryMs);
         if (!this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.schedule(); }, this.retryMs);
       // Schedule before telling waiters, so a turn never mistakes the gap before the next pump for a stall.
-      }).finally(() => { this.busy.delete(id); this.schedule(); this.events.emit('change'); });
+      }).finally(() => { this.busy.delete(id); this.schedule(); this.emit(); });
       this.busy.set(id, promise);
     };
     // A message's node starts once fewer than `jobs` lines before it are unbuilt; a merge, once both halves are built. They start
@@ -292,7 +284,7 @@ export class Memory {
     // A later failure can have a later deadline than the timer installed by the first.
     const deadlines = [...this.retryAt.values()].filter(t => t > now);
     if (deadlines.length && !this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.schedule(); }, Math.max(1, Math.min(...deadlines) - now));
-    if (this.stalled) this.events.emit('change');
+    if (this.stalled) this.emit();
   }
   /** Nothing is being built, nothing more can start, and something failed: only a retry can make progress. */
   private get stalled() { return this.busy.size === 0 && !this.scheduled && this.retryAt.size > 0; }
@@ -356,10 +348,10 @@ export class Memory {
     if (done()) return;
     if (this.stopped || signal?.aborted) throw new Error('Memory wait cancelled.');
     await new Promise<void>((resolve, reject) => {
-      const cleanup = () => { this.events.off('change', check); signal?.removeEventListener('abort', abort); };
+      const cleanup = () => { this.listeners.delete(check); signal?.removeEventListener('abort', abort); };
       const abort = () => { cleanup(); reject(new Error('Memory wait cancelled.')); };
       const check = () => { if (this.stopped) abort(); else if (done()) { cleanup(); resolve(); } };
-      this.events.on('change', check); signal?.addEventListener('abort', abort, { once: true }); check();
+      this.listeners.add(check); signal?.addEventListener('abort', abort, { once: true }); check();
     });
   }
   private expectedNodes() {
@@ -418,6 +410,11 @@ export class Memory {
   }
   async close() {
     this.stopped = true; this.controller.abort(); clearTimeout(this.retryTimer);
-    this.events.emit('change'); await Promise.allSettled(this.busy.values()); await this.writing;
+    this.emit(); await Promise.allSettled(this.busy.values()); await this.writing;
   }
+}
+
+/** Loads a store and opens its memory. */
+export async function openMemory(store: Store, compress: Compressor, { warn, budget, jobs }: { warn?: (s: string) => void; budget?: number; jobs?: number } = {}) {
+  return new Memory({ store, saved: await store.load() }, compress, warn, budget, jobs);
 }

@@ -4,8 +4,9 @@ import { createConnection, createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { ModelChoice } from './compactor.ts';
-import { record } from './cache.ts';
-import { atomicWrite, type Store } from './store.ts';
+import { record } from './core/cache.ts';
+import { atomicWrite } from './store.ts';
+import type { Store } from './core/store.ts';
 import { DEFAULT_SETTINGS, readSettings, type Settings } from './settings.ts';
 
 export const isWindows = process.platform === 'win32';

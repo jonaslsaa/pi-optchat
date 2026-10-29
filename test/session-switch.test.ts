@@ -9,7 +9,7 @@ import { TuiMainScreen, type Terminal } from '@earendil-works/pi-tui';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { textContent } from '../src/transcript.ts';
-import { COMPACT } from '../src/prompts.ts';
+import { COMPACT } from '../src/core/prompts.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { removeDir } from './support.ts';
 

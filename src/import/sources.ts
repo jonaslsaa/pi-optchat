@@ -7,8 +7,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { getAgentDir, parseSkillBlock } from '@earendil-works/pi-coding-agent';
-import { record } from '../cache.ts';
-import { bytes, type Entry, type Kind, type Origin } from '../memory.ts';
+import { record } from '../core/cache.ts';
+import { bytes, type Entry, type Kind, type Origin } from '../core/memory.ts';
 
 export type Source = Origin['source'];
 export type ImportedEntry = Omit<Entry, 'i' | 'size'>;

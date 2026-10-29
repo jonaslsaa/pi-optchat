@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { ImageContent } from '@earendil-works/pi-ai';
 import { resizeImage } from '@earendil-works/pi-coding-agent';
-import { isMime, type Store } from './store.ts';
+import { isImage } from './core/images.ts';
+import { isMime, type Store } from './core/store.ts';
 
 /** Kept images fit 2048 px on the long side and ~1.5 MB (2 MB as base64), re-encoded as JPEG 85 only when they don't already. */
 export const IMAGE_LIMITS = { maxWidth: 2048, maxHeight: 2048, maxBytes: 2 * 1024 * 1024, jpegQuality: 85 };
@@ -9,10 +10,6 @@ export const IMAGE_LIMITS = { maxWidth: 2048, maxHeight: 2048, maxBytes: 2 * 102
 const hash = (image: ImageContent) => createHash('sha256').update(image.data).digest('hex').slice(0, 16);
 /** How a message's image reads in memory: named by the image as the message holds it, before any shrinking, so it always gets the same name. */
 export const imageRef = (image: ImageContent) => `[image ${hash(image)}]`;
-const REF = /\[image ([0-9a-f]{16})\]/g;
-
-export const isImage = (part: unknown): part is ImageContent => typeof part === 'object' && part !== null
-  && 'type' in part && part.type === 'image' && 'data' in part && typeof part.data === 'string' && 'mimeType' in part && typeof part.mimeType === 'string';
 
 /** Keeps each image of a message's content in the store, once per distinct image, shrunk to IMAGE_LIMITS. */
 export async function saveImages(store: Store, content: unknown) {
@@ -24,11 +21,4 @@ export async function saveImages(store: Store, content: unknown) {
     const kept = await resizeImage(Buffer.from(image.data, 'base64'), image.mimeType, IMAGE_LIMITS) ?? image;
     if (isMime(kept.mimeType)) await store.putImage(name, kept.mimeType, Buffer.from(kept.data, 'base64'));
   }
-}
-
-/** The kept images a text refers to, in order, each once; ones never kept are skipped. */
-export async function loadImages(store: Store, text: string): Promise<ImageContent[]> {
-  const names = [...new Set(Array.from(text.matchAll(REF), match => match[1]))];
-  return (await Promise.all(names.map(name => store.image(name))))
-    .flatMap(kept => kept ? [{ type: 'image' as const, data: Buffer.from(kept.data).toString('base64'), mimeType: kept.mimeType }] : []);
 }

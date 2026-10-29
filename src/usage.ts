@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AssistantMessage, Usage } from '@earendil-works/pi-ai';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
-import { record } from './cache.ts';
+import { record } from './core/cache.ts';
 import { appendJson } from './store.ts';
 
 export type UsageRole = 'main' | 'subagent' | 'compactor' | 'import';

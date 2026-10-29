@@ -1,18 +1,10 @@
-import { setTimeout as sleep } from 'node:timers/promises';
-import { clampThinkingLevel, isRetryableAssistantError, type Api, type AssistantMessage, type Message, type Model } from '@earendil-works/pi-ai';
-import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
-import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
+import type { Api, AssistantMessage, isRetryableAssistantError, Message, Model, Models, SimpleStreamOptions } from '@earendil-works/pi-ai';
 import { COMPACT, compaction, IMPORT_GUIDANCE, tooLong } from './prompts.ts';
-import { bytes, cut, Refused, type Compressor } from './memory.ts';
+import { bytes, cut, NODE, Refused, type Compressor } from './memory.ts';
 import { cachePayload, splitView } from './cache.ts';
-import { DEFAULT_SETTINGS } from './settings.ts';
 
-export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
-/** A level the model can't take would be sent as no level, which Sonnet 5.5 runs at high effort; Pi's own sessions clamp the same way. */
-export const reasoningFor = (model: Model<Api>, level: ThinkingLevel) => {
-  const thinking = clampThinkingLevel(model, level);
-  return thinking === 'off' ? undefined : thinking;
-};
+/** The longest line kept without asking again, unless the host sets its own (Pi's "Summary size tolerance"). */
+export const ACCEPTED_BYTES = NODE * 1.25;
 const WARM_MS = 4 * 60_000; // Anthropic's short cache lives 5 minutes from its last use.
 
 /** Parallel calls can't read a cache entry that isn't written yet, so one call primes a cold prefix and the rest wait until it answers.
@@ -42,27 +34,46 @@ function primeFirst() {
     };
   };
 }
+const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
+  signal?.throwIfAborted();
+  const abort = () => { clearTimeout(timer); reject(signal?.reason); };
+  const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, ms);
+  signal?.addEventListener('abort', abort, { once: true });
+});
+/** Whether a failed reply is worth asking again: pi-ai's `isRetryableAssistantError`, passed in by the host. */
+export type Retryable = typeof isRetryableAssistantError;
 /** Pi's agent loop retries a dropped connection itself; streamSimple doesn't, so a transient error is asked again before it surfaces. */
-export async function retryTransient(ask: () => Promise<AssistantMessage>, onReply: (reply: AssistantMessage) => void,
+export async function retryTransient(ask: () => Promise<AssistantMessage>, onReply: (reply: AssistantMessage) => void, retryable: Retryable,
   delays: readonly number[] = [1000, 2000], signal?: AbortSignal) {
   for (let retry = 0; ; retry++) {
     const reply = await ask();
     onReply(reply);
-    if (retry >= delays.length || !isRetryableAssistantError(reply)) return reply;
-    await sleep(delays[retry], undefined, { signal });
+    if (retry >= delays.length || !retryable(reply)) return reply;
+    await sleep(delays[retry], signal);
   }
 }
 
-/** The model is asked for 512 bytes; `accepted` is the longest line kept without a retry (the profile's summary size tolerance). */
-export function createCompressor(registry: ModelRegistry, choice: () => ModelChoice,
-  onUsage: (message: AssistantMessage) => void = () => {}, accepted = () => DEFAULT_SETTINGS.summaryAcceptBytes,
-  retryDelays?: readonly number[]): Compressor {
+/** The compactor's model for one call, as the host resolves it: `stream` is pi-ai's `Models.streamSimple`, or Pi's
+ * `ModelRegistry.streamSimple`, which has its shape. */
+export interface CompactorModel { model: Model<Api>; reasoning?: SimpleStreamOptions['reasoning']; stream: Models['streamSimple'] }
+export interface CompressorOptions {
+  /** Resolves the model for each call, so a settings change applies to the next summary. Throws if it is unavailable. */
+  model: () => CompactorModel;
+  retryable: Retryable;
+  onUsage?: (reply: AssistantMessage) => void;
+  /** The longest line kept without a retry; ACCEPTED_BYTES unless the host has a setting for it. */
+  accepted?: () => number;
+  retryDelays?: readonly number[];
+  /** The compactor's system prompt: COMPACT, unless the host's chat isn't one user and OptChat. */
+  system?: string;
+}
+
+/** Builds summary lines with the model `model` resolves. The model is asked for 512 bytes. */
+export function createCompressor({ model: resolve, retryable, onUsage = () => {}, accepted = () => ACCEPTED_BYTES, retryDelays,
+  system = COMPACT }: CompressorOptions): Compressor {
   const gate = primeFirst();
   return async (input, signal) => {
-    const selected = choice();
-    const model = registry.find(selected.provider, selected.model);
-    if (!model) throw new Error(`Compactor model unavailable: ${selected.provider}/${selected.model}. Use /optchat model.`);
-    const thinking = reasoningFor(model, selected.thinking);
+    const { model, reasoning: thinking, stream: streamSimple } = resolve();
     const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}${compaction(input)}`;
     // OpenAI joins text blocks with nothing between them, so the task starts its own paragraph after the view.
     const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: `\n\n${step}` }], timestamp: Date.now() }];
@@ -72,7 +83,7 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
     const ask = async () => {
       const warmed = prefix ? await gate(prefix, signal) : () => {};
       try {
-        const stream = registry.streamSimple(model, { systemPrompt: COMPACT, messages }, {
+        const stream = streamSimple(model, { systemPrompt: system, messages }, {
           // A shared session id is the OpenAI prompt-cache key; SSE because over a websocket Codex would chain unrelated parallel calls on one cached connection.
           sessionId: 'optchat-compactor', transport: 'sse',
           reasoning: thinking, signal, cacheRetention: 'short',
@@ -83,12 +94,12 @@ export function createCompressor(registry: ModelRegistry, choice: () => ModelCho
         return await stream.result();
       } finally { warmed(false); }
     };
-    const answer = () => retryTransient(ask, onUsage, retryDelays, signal);
+    const answer = () => retryTransient(ask, onUsage, retryable, retryDelays, signal);
     for (let attempt = 0; attempt < 5; attempt++) {
       const reply = await answer();
       // A stop reason means the model answered: a refusal or a content filter, which asking again repeats.
       // A provider's own 'error' stop (Mistral) is a failure on its side, not an answer: a plain error, tried again later.
-      if (reply.stopReason === 'error' && reply.rawStopReason !== undefined && reply.rawStopReason !== 'error' && !isRetryableAssistantError(reply))
+      if (reply.stopReason === 'error' && reply.rawStopReason !== undefined && reply.rawStopReason !== 'error' && !retryable(reply))
         throw new Refused(reply.errorMessage ?? `Compactor stopped: ${reply.rawStopReason}`);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
       // A reply cut off at the token limit, or one that calls a tool, is no summary: ask again.
