@@ -21,7 +21,7 @@ pi install npm:pi-web-access   # optional, for web search and page fetching
 
 Or from GitHub: `pi install git:github.com/jonaslsaa/pi-optchat`.
 
-Requirements: Pi 1.0.2 or compatible, Node.js 22.19+, and Git. Tested on macOS; the offline tests also run on Linux and Windows.
+Requirements: Pi 1.4.0 or compatible, Node.js 22.19+, and Git. Tested on macOS; the offline tests also run on Linux and Windows.
 
 Web access is not bundled. Subagents load the Pi extensions you have installed (except pi-optchat itself), so installing `pi-web-access` gives web tools to the main agent and every subagent.
 
