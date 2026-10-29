@@ -35,7 +35,7 @@ test('tree covers all history, fits incrementally, and exact originals survive r
     assert.ok(memory.view.some(p => p.l > 0));
     assert.ok(calls.every(c => !c.context.includes('not summarized yet')));
     assert.match(memory.zoom(17, 1), /Original 17:/);
-    const originals = memory.root.map(e => e.text);
+    const originals = memory.root.map(e => memory.text(e.i));
     const parts = [...memory.view];
     memory.append('talk', 'One short new reply.');
     await memory.settle(AbortSignal.timeout(5000), 'tree');
@@ -43,7 +43,7 @@ test('tree covers all history, fits incrementally, and exact originals survive r
     await memory.close();
     memory = new Memory(dir, compress, () => {}, 1500);
     await memory.settle(AbortSignal.timeout(5000), 'tree');
-    assert.deepEqual(memory.root.slice(0, 48).map(e => e.text), originals);
+    assert.deepEqual(memory.root.slice(0, 48).map(e => memory.text(e.i)), originals);
     assert.match(memory.zoom(17, 1), /valuable detail/);
     assert.throws(() => memory.zoom(3, 4), /No line/);
   } finally { await memory.close(); removeDir(dir); }
@@ -143,7 +143,7 @@ test('torn final line is reported and the next append remains readable', async (
   memory = new Memory(dir, async () => 'summary', text => warnings.push(text));
   memory.append('user', 'second'); await memory.close();
   memory = new Memory(dir, async () => 'summary', () => {});
-  try { assert.equal(warnings.length, 1); assert.deepEqual(memory.root.map(e => e.text), ['first', 'second']); }
+  try { assert.equal(warnings.length, 1); assert.deepEqual(memory.root.map(e => memory.text(e.i)), ['first', 'second']); }
   finally { await memory.close(); removeDir(dir); }
 });
 
@@ -159,7 +159,7 @@ test('a second writer on one profile is refused before it writes, and the profil
     assert.throws(() => second.append('user', 'a retry'), /Another process wrote/);
   } finally { await first.close(); await second.close(); }
   const reopened = new Memory(dir, compress, () => {});
-  try { assert.deepEqual(reopened.root.map(e => e.text), ['from the first writer']); }
+  try { assert.deepEqual(reopened.root.map(e => reopened.text(e.i)), ['from the first writer']); }
   finally { await reopened.close(); removeDir(dir); }
 });
 
@@ -172,7 +172,7 @@ test('a second writer that has seen today\'s file is refused after the other app
     assert.throws(() => second.append('user', 'three'), /Another process wrote .*nothing was written/);
   } finally { await first.close(); await second.close(); }
   const reopened = new Memory(dir, compress, () => {});
-  try { assert.deepEqual(reopened.root.map(e => e.text), ['one', 'two']); }
+  try { assert.deepEqual(reopened.root.map(e => reopened.text(e.i)), ['one', 'two']); }
   finally { await reopened.close(); removeDir(dir); }
 });
 
@@ -192,7 +192,7 @@ test('a day file that another process created first is caught, and an ordinary m
     b.append('user', 'b again');
   } finally { mock.timers.reset(); await Promise.all(opened.map(m => m.close())); }
   const reopened = new Memory(dir, compress, () => {});
-  try { assert.deepEqual(reopened.root.map(e => e.text), ['before midnight', 'after midnight', 'b on the third', 'b again']); }
+  try { assert.deepEqual(reopened.root.map(e => reopened.text(e.i)), ['before midnight', 'after midnight', 'b on the third', 'b again']); }
   finally { await reopened.close(); removeDir(dir); }
 });
 
@@ -208,7 +208,7 @@ test('a second writer whose first write starts a new day file is refused when th
     assert.equal(b.root.length, 0);
   } finally { mock.timers.reset(); await Promise.all(opened.map(m => m.close())); }
   const reopened = new Memory(dir, compress, () => {});
-  try { assert.deepEqual(reopened.root.map(e => e.text), ['a on the first']); }
+  try { assert.deepEqual(reopened.root.map(e => reopened.text(e.i)), ['a on the first']); }
   finally { await reopened.close(); removeDir(dir); }
 });
 
@@ -561,7 +561,7 @@ test('next turn excludes old conversation; current tool loop and reasoning remai
   assert.deepEqual(projected[1].role === 'user' && projected[1].content, [{ type: 'text', text: '<chat>\n0+1|old summary\n</chat>' }, { type: 'text', text: '\n\nnew question' }],
     'the user\'s words start their own paragraph, since OpenAI joins text blocks with nothing between them');
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-')); const memory = new Memory(dir, async () => 'summary');
-  try { logMessage(memory, assistant); assert.equal(memory.root.length, 1); assert.equal(memory.root[0].text, 'visible reply'); }
+  try { logMessage(memory, assistant); assert.equal(memory.root.length, 1); assert.equal(memory.text(0), 'visible reply'); }
   finally { await memory.close(); removeDir(dir); }
 });
 
@@ -631,8 +631,8 @@ test('a node the model refuses or leaves empty keeps the start of its source ins
     memory.append('user', `empty ${'y'.repeat(600)}`);
     memory.append('user', 'z'.repeat(3 * SOURCE));
     await memory.settle(AbortSignal.timeout(5000), 'tree');
-    assert.equal(memory.node({ l: 0, i: 0 })?.text, `(not summarized: zoom it) user: refuse ${'x'.repeat(NODE - 39)}`);
-    assert.match(memory.node({ l: 0, i: 1 })?.text ?? '', /^\(not summarized: zoom it\) user: empty y+$/);
+    assert.equal(memory.summary({ l: 0, i: 0 }), `(not summarized: zoom it) user: refuse ${'x'.repeat(NODE - 39)}`);
+    assert.match(memory.summary({ l: 0, i: 1 }) ?? '', /^\(not summarized: zoom it\) user: empty y+$/);
     assert.deepEqual(calls.filter(c => c.part.l === 0).map(c => c.part.i), [0, 1, 2], 'each leaf is asked once');
     assert.ok(calls[2].source.length <= SOURCE);
     assert.ok(memory.node({ l: 1, i: 0 }), 'the refused leaves still merge');
@@ -790,7 +790,7 @@ test('a log whose day files sort against the order of the entries still opens, a
     memory.append('user', 'c'); await memory.close();
     assert.deepEqual(readdirSync(join(dir, 'main')).sort(), ['2026-10-05.jsonl', '2026-10-06.jsonl']);
     memory = new Memory(dir, compress, () => {}); opened.push(memory);
-    assert.deepEqual(memory.root.map(e => e.text), ['a', 'b', 'c']);
+    assert.deepEqual(memory.root.map(e => memory.text(e.i)), ['a', 'b', 'c']);
     await memory.close();
   } finally {
     mock.timers.reset();
@@ -846,7 +846,7 @@ test('a torn tail that Memory loaded is repaired by its next append without trip
     assert.equal(warnings.length, 1);
   } finally { await memory.close(); }
   memory = new Memory(dir, compress, () => {});
-  try { assert.deepEqual(memory.root.map(e => e.text), ['first', 'second', 'third']); }
+  try { assert.deepEqual(memory.root.map(e => memory.text(e.i)), ['first', 'second', 'third']); }
   finally { await memory.close(); removeDir(dir); }
 });
 

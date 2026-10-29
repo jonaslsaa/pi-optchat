@@ -59,7 +59,7 @@ export async function runImport({ plan, total, open, activate }: { plan: readonl
   if (!plan.every(isEntry) || plan.length !== total || plan.some((e, i) => e.i !== i)) throw new Error('Import staging data is invalid; original memory remains intact.');
   const memory = await open();
   try {
-    if (memory.root.length > plan.length || memory.root.some((e, i) => e.text !== plan[i].text)) throw new Error('Import staging data does not match its log; original memory remains intact.');
+    if (memory.root.length > plan.length || memory.root.some((_, i) => memory.text(i) !== plan[i].text)) throw new Error('Import staging data does not match its log; original memory remains intact.');
     // Recipe §10: imported messages are compressed like any other. Each is logged once its node can start, as a burst of live
     // messages is, so up to `jobs` summaries run at once. Unlike a turn, an import waits through failures (`lastError` says why).
     for (const e of plan.slice(memory.root.length)) { await memory.settle(signal, 'ahead'); memory.append(e.kind, e.text, e.date, e.receipt, e.origin); }

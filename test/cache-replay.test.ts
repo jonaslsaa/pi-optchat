@@ -19,6 +19,7 @@ import { Memory } from '../src/memory.ts';
 import { COMPACT } from '../src/core/prompts.ts';
 import { MASTER } from '../src/prompts.ts';
 import type { Saved, Store } from '../src/core/store.ts';
+import type { Entry, Summary } from '../src/core/memory.ts';
 import { buildContext, logMessage, textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
 
@@ -86,9 +87,11 @@ function fakeAnthropic() {
 
 /** The memory in RAM: persistence isn't under test, and a file store's fsyncs would take most of the run. */
 function ramStore(): Store {
-  const saved: Saved = { entries: [], tree: [] };
-  return { load: () => structuredClone(saved), append: e => void saved.entries.push(e), appendNode: n => void saved.tree.push(n),
-    saveView: view => void (saved.view = view), putImage: () => undefined, image: () => undefined };
+  const entries: Entry[] = [], tree = new Map<string, Summary>();
+  let view: string | undefined;
+  return { load: (): Saved => structuredClone({ entries, tree: [...tree.values()], view }), append: e => void entries.push(e), appendNode: n => void tree.set(`${n.l}:${n.i}`, n),
+    text: i => entries[i].text, summary: p => tree.get(`${p.l}:${p.i}`)!.text,
+    saveView: v => void (view = v), putImage: () => undefined, image: () => undefined };
 }
 
 test('turns and compactions read nearly all their input from the cache, also after a long tool run and a cold restart', { timeout: 60_000 }, async t => {

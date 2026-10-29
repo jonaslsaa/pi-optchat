@@ -9,8 +9,8 @@ import { crc32, deflateRawSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { Memory } from '../src/memory.ts';
-import { bytes, openMemory, type Compressor, type Entry } from '../src/core/memory.ts';
-import type { Saved, Store } from '../src/core/store.ts';
+import { bytes, openMemory, type Compressor, type Entry, type Summary } from '../src/core/memory.ts';
+import type { Store } from '../src/core/store.ts';
 import type { Memory as CoreMemory } from '../src/core/memory.ts';
 import { localDay } from '../src/store.ts';
 import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
@@ -547,11 +547,11 @@ test('append activates only after complete indexing, retains original summaries,
     assert.equal(pendingImport(dir), undefined); assert.notEqual(memoryDirectory(dir), dir);
     activated = new Memory(memoryDirectory(dir), short);
     assert.deepEqual(activated.node({ l: 0, i: 0 }), original);
-    assert.equal(activated.root[0].text, 'original exact message');
+    assert.equal(activated.text(0), 'original exact message');
     assert.equal(activated.root[1].receipt, 'import:one');
     assert.deepEqual(activated.root[1].origin, entry('one').origin);
     assert.match(activated.zoom(1, 1), /Imported one/);
-    assert.deepEqual(deduplicate(activated.root, [entry('one')]), { added: [], skipped: 1 });
+    assert.deepEqual(deduplicate(activated.entries(), [entry('one')]), { added: [], skipped: 1 });
     assert.ok(existsSync(join(dir, 'main')));
     // A second import starts from the generation the first one made, which the journal names as a portable path.
     await activated.close();
@@ -577,7 +577,7 @@ test('paused imports retain completed summaries, resume from disk, and preserve 
     assert.ok(saved >= 1);
     await runImport(dir, short, AbortSignal.timeout(5000));
     current = new Memory(memoryDirectory(dir), short);
-    assert.equal(current.root[0].receipt, 'import:a'); assert.equal(current.root.at(-1)?.text, 'native later');
+    assert.equal(current.root[0].receipt, 'import:a'); assert.equal(current.text(current.root.length - 1), 'native later');
     assert.ok(current.tree.size >= saved);
     assert.ok(readFileSync(join(dir, 'main', localDay() + '.jsonl'), 'utf8').includes('native later'));
   } finally { await old.close(); await current?.close(); removeDir(dir); }
@@ -753,8 +753,9 @@ test('a Claude memory with a folded or literal YAML description imports the text
 });
 
 test('core builds an import in any store: a paused rebuild resumes from what the store holds and switches once, when complete', async () => {
-  const saved: Saved = { entries: [], tree: [] };
+  const saved = { entries: [] as Entry[], tree: [] as Summary[], view: undefined as string | undefined };
   const store: Store = { load: () => structuredClone(saved), append: e => void saved.entries.push(e), appendNode: n => void saved.tree.push(n),
+    text: i => saved.entries[i].text, summary: p => saved.tree.findLast(n => n.l === p.l && n.i === p.i)!.text,
     saveView: view => void (saved.view = view), putImage: () => undefined, image: () => undefined };
   const native: Entry = { i: 0, kind: 'user', text: 'native later', size: 0, date: '2026-06-01T00:00:00.000Z' };
   const plan = planImport([native], [entry('a', date, 'large '.repeat(200)), entry('b', date, 'long '.repeat(200)), entry('a')], 'rebuild');
@@ -773,13 +774,14 @@ test('core builds an import in any store: a paused rebuild resumes from what the
   stall = false;
   await run(AbortSignal.timeout(5000));
   assert.equal(switched.length, 1); await switched[0].close();
-  assert.deepEqual(switched[0].root.map(e => e.text), plan.entries.map(e => e.text));
+  assert.deepEqual(switched[0].entries().map(e => e.text), plan.entries.map(e => e.text));
   assert.equal(switched[0].pending, 0);
 });
 
 test('core import does not switch to a staging log whose last write failed in a store that writes behind', async () => {
-  const saved: Saved = { entries: [], tree: [] };
+  const saved = { entries: [] as Entry[], tree: [] as Summary[], view: undefined as string | undefined };
   const store: Store = { load: () => structuredClone(saved), appendNode: n => void saved.tree.push(n), saveView: view => void (saved.view = view),
+    text: i => saved.entries[i].text, summary: p => saved.tree.findLast(n => n.l === p.l && n.i === p.i)!.text,
     append: async e => { if (e.text === 'Imported b') throw new Error('offline'); saved.entries.push(e); }, putImage: () => undefined, image: () => undefined };
   const plan = planImport([], [entry('a'), entry('b')], 'rebuild'); assert.ok(plan);
   let switched = false;

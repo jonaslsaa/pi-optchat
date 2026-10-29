@@ -12,9 +12,15 @@ export type Kind = typeof KINDS[number];
 /** Marks an entry as imported history: the summarizer treats it as historical, not as a new request. `source` is a label the host
  * chooses, such as "claude" or "email". */
 export interface Origin { source: string; conversation: string; message: string; title: string; project?: string }
+/** A message as stores save it. */
 export interface Entry { i: number; kind: Kind; text: string; size: number; date: string; receipt?: string; origin?: Origin }
+/** A message as memory keeps it in RAM: its text stays in the store, and `Memory.text(i)` reads it. */
+export type Message = Omit<Entry, 'text' | 'size'>;
 export interface Part { l: number; i: number }
+/** A summary node as stores save it. `size` is its line's bytes in a view. */
 export interface Summary extends Part { text: string; size: number }
+/** A summary node as memory keeps it in RAM: `Memory.summary(part)` reads its text from the store. */
+export type Node = Omit<Summary, 'text'>;
 /** `part` is the node to build: a message's leaf, or the merge of its two halves. `call` is the tool call a tool result's leaf
  * answers, raw, since its own line is often not built yet (#153). */
 export interface Compression { context: string; source: string; part: Part; historical?: boolean; call?: { i: number; text: string } }
@@ -64,7 +70,7 @@ class Sawtooth {
   readonly parts: Part[] = [];
   private measured = 0;
   merging = false;
-  constructor(private readonly high: number, private readonly low: number, private readonly node: (part: Part) => Summary | undefined) {}
+  constructor(private readonly high: number, private readonly low: number, private readonly node: (part: Part) => Node | undefined) {}
   private lineSize(part: Part) { return bytes(`${start(part)}+${2 ** part.l}|\n`) + (this.node(part)?.size ?? UNBUILT_BYTES); }
   get size() { return VIEW_FRAME_BYTES + this.measured + (this.parts.length ? 0 : 1); } // render() keeps a blank line in an empty view.
   push(part: Part) { this.parts.push(part); this.measured += this.lineSize(part); }
@@ -96,13 +102,22 @@ function object(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 export function isEntry(value: unknown): value is Entry {
-  return object(value) && Number.isSafeInteger(value.i) && typeof value.kind === 'string'
-    && KINDS.some(kind => kind === value.kind)
-    && typeof value.text === 'string' && typeof value.date === 'string';
+  return isMessage(value) && typeof value.text === 'string';
 }
-function isSummary(value: unknown): value is Summary {
-  return object(value) && Number.isSafeInteger(value.l) && Number.isSafeInteger(value.i)
-    && typeof value.text === 'string';
+/** A saved message, with its text or without it. */
+function isMessage(value: unknown): value is Message & { text?: unknown } {
+  return object(value) && Number.isSafeInteger(value.i) && typeof value.kind === 'string'
+    && KINDS.some(kind => kind === value.kind) && typeof value.date === 'string';
+}
+export function isSummary(value: unknown): value is Summary {
+  return object(value) && Number.isSafeInteger(value.l) && Number.isSafeInteger(value.i) && typeof value.text === 'string';
+}
+/** A saved node without its text. Its line size is measured from the text, or, from a store that loads no texts, is the size
+ * memory measured when it wrote the node. */
+function savedNode(value: unknown): Node | undefined {
+  if (!object(value) || typeof value.l !== 'number' || typeof value.i !== 'number' || !Number.isSafeInteger(value.l) || !Number.isSafeInteger(value.i)) return;
+  const size = typeof value.text === 'string' ? lineBytes(value.text) : value.size;
+  return typeof size === 'number' && Number.isSafeInteger(size) ? { l: value.l, i: value.i, size } : undefined;
 }
 
 /** The log is authoritative. The tree and the view follow the recipe: the view grows a line per message and, once it passes
@@ -110,8 +125,11 @@ function isSummary(value: unknown): value is Summary {
  * Compactions get their own view (recipe §4): the chat's merged further, to between an eighth and a quarter of the budget,
  * and again whenever the chat's merges, so parallel compactions read it from the cache. */
 export class Memory {
-  readonly root: Entry[] = [];
-  readonly tree = new Map<number, Summary>();
+  readonly root: Message[] = [];
+  readonly tree = new Map<number, Node>();
+  /** Texts whose store write hasn't finished (a store that writes behind can't read them yet) or was skipped after a failed save,
+   * by message index and by node. */
+  private readonly unsaved = { texts: new Map<number, string>(), summaries: new Map<number, string>() };
   private readonly listeners = new Set<() => void>();
   private readonly controller = new AbortController();
   private readonly busy = new Map<number, Promise<void>>();
@@ -145,13 +163,14 @@ export class Memory {
     this.compaction = new Sawtooth(budget / 4, budget / 8, part => this.node(part));
     this.store = store;
     const log = saved.entries;
-    const entries = log.every(isEntry) ? log.sort((a, b) => a.i - b.i) : undefined;
-    if (!entries || entries.some((entry, i) => entry.i !== i)) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
-    for (const value of entries) this.root.push({ ...value, size: bytes(`${value.kind}: ${value.text}`) });
+    const entries = log.every(isMessage) ? log.sort((a, b) => a.i - b.i) : undefined;
+    if (!entries || entries.some((entry, i) => entry.i !== i || (entry.text !== undefined && typeof entry.text !== 'string')))
+      throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
+    for (const { i, kind, date, receipt, origin } of entries) this.root.push({ i, kind, date, ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}) });
     for (const value of saved.tree) {
-      if (!isSummary(value) || value.l < 0 || value.i < 0 || end(value) > this.root.length)
-        throw new Error('Invalid OptChat summary record.');
-      this.tree.set(key(value), { ...value, size: lineBytes(value.text) });
+      const node = savedNode(value);
+      if (!node || node.l < 0 || node.i < 0 || end(node) > this.root.length) throw new Error('Invalid OptChat summary record.');
+      this.tree.set(key(node), node);
     }
     for (const node of this.tree.values()) this.queueParent(node);
     for (let i = 0; i < this.root.length; i++) if (!this.node({ l: 0, i })) this.unbuilt.add(i);
@@ -163,16 +182,29 @@ export class Memory {
   append(kind: Kind, text: string, date = new Date().toISOString(), receipt?: string, origin?: Origin) {
     if (this.stopped) throw new Error('Memory is closed.');
     if (this.failed) throw new Error(`Memory could not be saved: ${this.failed}`);
-    const entry: Entry = { i: this.root.length, kind, text, date, size: bytes(`${kind}: ${text}`), ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}) };
-    void this.enqueue(() => this.store.append(entry), error => {
+    const message: Message = { i: this.root.length, kind, date, ...(receipt ? { receipt } : {}), ...(origin ? { origin } : {}) };
+    const entry: Entry = { ...message, text, size: bytes(`${kind}: ${text}`) };
+    void this.enqueue(this.keeping(this.unsaved.texts, entry.i, text, () => this.store.append(entry)), error => {
       this.failed ??= error instanceof Error ? error.message : String(error);
       this.warn(`Memory could not be saved: ${this.failed}`);
     });
-    this.root.push(entry); this.push(entry.i); if (this.fit()) this.save(); this.schedule();
+    this.root.push(message); this.push(entry.i); if (this.fit()) this.save(); this.schedule();
     return entry;
   }
   node(part: Part) { return this.tree.get(key(part)); }
-  private text(part: Part) { return this.node(part)?.text ?? UNBUILT; }
+  /** Message `i`'s text, from the store. */
+  text(i: number) { return this.unsaved.texts.get(i) ?? this.store.text(i); }
+  /** Every message with its text, read from the store: for imports, which plan from the whole log. */
+  entries(): Entry[] { return this.root.map(m => { const text = this.text(m.i); return { ...m, text, size: bytes(`${m.kind}: ${text}`) }; }); }
+  /** A built node's text, from the store. */
+  summary(part: Part) { return this.node(part) ? this.unsaved.summaries.get(key(part)) ?? this.store.summary(part) : undefined; }
+  private line(part: Part) { return this.summary(part) ?? UNBUILT; }
+  /** `write`, with `text` kept in `unsaved` until the write has finished. */
+  private keeping(unsaved: Map<number, string>, id: number, text: string, write: () => Promise<void> | undefined) {
+    unsaved.set(id, text);
+    const saved = () => { unsaved.delete(id); };
+    return () => { const done = write(); if (done) return done.then(saved); saved(); return undefined; };
+  }
   /** Runs a store write at once when none is running, so a store that finishes its writes as it returns (FileStore) throws here
    * as before; otherwise after the running ones, so writes land in the order Memory makes them. Returns the queued write, settled
    * through `failed`, unless it finished at once. */
@@ -230,7 +262,7 @@ export class Memory {
     if (!this.node(part)) this.unbuilt.add(i);
   }
   get view(): readonly Part[] { return this.chat.parts; }
-  render() { return `${VIEW_OPEN}${this.view.map(p => `${start(p)}+${2 ** p.l}|${flat(this.text(p))}`).join('\n')}\n</chat>`; }
+  render() { return `${VIEW_OPEN}${this.view.map(p => `${start(p)}+${2 ** p.l}|${flat(this.line(p))}`).join('\n')}\n</chat>`; }
   get ready() { return this.view.every(p => this.node(p)); }
   get pending() { return this.unbuilt.size; }
   get active() { return this.busy.size; }
@@ -295,15 +327,15 @@ export class Memory {
   /** Nothing is being built, nothing more can start, and something failed: only a retry can make progress. */
   private get stalled() { return this.busy.size === 0 && !this.scheduled && this.retryAt.size > 0; }
   private async build(part: Part) {
-    const source = part.l === 0 ? `${this.root[part.i].kind}: ${this.root[part.i].text}`
-      : [0, 1].map(offset => this.text({ l: part.l - 1, i: 2 * part.i + offset })).join('\n');
-    const mergeSource = part.l > 0 ? [0, 1].map(offset => flat(this.text({ l: part.l - 1, i: 2 * part.i + offset }))).join('\n') : source;
+    const source = part.l === 0 ? `${this.root[part.i].kind}: ${this.text(part.i)}`
+      : [0, 1].map(offset => this.line({ l: part.l - 1, i: 2 * part.i + offset })).join('\n');
+    const mergeSource = part.l > 0 ? [0, 1].map(offset => flat(this.line({ l: part.l - 1, i: 2 * part.i + offset }))).join('\n') : source;
     const call = part.l === 0 ? this.callOf(part.i) : undefined;
     let text = source;
     if (bytes(source) > NODE) try {
       text = (await this.compress({ context: this.compactionView(part), source: cap(mergeSource, SOURCE), part,
         historical: this.root.slice(start(part), end(part)).some(entry => !!entry.origin),
-        ...(call ? { call: { i: call.i, text: cap(`tool: ${call.text}`, 4000) } } : {}) }, this.controller.signal)).trim();
+        ...(call !== undefined ? { call: { i: call, text: cap(`tool: ${this.text(call)}`, 4000) } } : {}) }, this.controller.signal)).trim();
       if (!text) throw new Refused('Compactor returned an empty summary.');
     } catch (error) {
       if (!(error instanceof Refused) || this.stopped) throw error;
@@ -313,9 +345,9 @@ export class Memory {
     if (this.stopped) return;
     const node = { ...part, text, size: lineBytes(text) };
     // A failed node write fails the build, which is retried.
-    const written = this.enqueue(() => this.store.appendNode(node), error => { throw error; });
+    const written = this.enqueue(this.keeping(this.unsaved.summaries, key(part), text, () => this.store.appendNode(node)), error => { throw error; });
     if (written) await written;
-    this.tree.set(key(part), node); this.retryAt.delete(key(part)); this.merges.delete(key(part)); this.queueParent(part);
+    this.tree.set(key(part), { ...part, size: node.size }); this.retryAt.delete(key(part)); this.merges.delete(key(part)); this.queueParent(part);
     if (!part.l) { this.unbuilt.delete(part.i); this.chat.built(part.i); this.compaction.built(part.i); }
     if (!this.retryAt.size) this.lastError = undefined;
     if (this.fit()) this.save();
@@ -328,14 +360,14 @@ export class Memory {
     while (this.root[results - 1]?.kind === 'echo') results--;
     let calls = results;
     while (this.root[calls - 1]?.kind === 'tool') calls--;
-    const call = calls + i - results < results ? this.root[calls + i - results] : undefined;
-    return call && this.root[i].text.startsWith(`${call.text.split(' ', 1)[0]}:`) ? call : undefined;
+    const call = calls + i - results;
+    return call < results && this.text(i).startsWith(`${this.text(call).split(' ', 1)[0]}:`) ? call : undefined;
   }
   /** The compactions' view up to the node. A line still being built shows as a placeholder instead of ending the view: an A/B on
    * real turns (#101) found that cutting there also hid the built lines after it, such as an echo's own tool call. */
   private compactionView(part: Part) {
     const boundary = part.l === 0 ? start(part) : end(part), lines: string[] = [];
-    for (const p of this.compaction.parts) { if (end(p) > boundary) break; lines.push(`${start(p)}+${2 ** p.l}|${flat(this.text(p))}`); }
+    for (const p of this.compaction.parts) { if (end(p) > boundary) break; lines.push(`${start(p)}+${2 ** p.l}|${flat(this.line(p))}`); }
     return `${VIEW_OPEN}${lines.join('\n')}\n</chat>`;
   }
   private queueParent({ l, i }: Part) {
@@ -371,7 +403,7 @@ export class Memory {
     if (!Number.isSafeInteger(id) || id < 0 || !Number.isSafeInteger(n) || n < 1 || !Number.isInteger(Math.log2(n)) || id % n || id + n > this.root.length)
       throw new Error(`No line ${id}+${n}: n is a power of 2, id a multiple of n. The tree's roots: ${this.roots() || 'none, the chat is empty'}.`);
     if (n === 1) {
-      const { kind, text } = this.root[id], page = Math.min(limit ?? PAGE, PAGE);
+      const { kind } = this.root[id], text = this.text(id), page = Math.min(limit ?? PAGE, PAGE);
       if (!Number.isSafeInteger(page) || page < 1) throw new Error('limit must be a positive integer.');
       if (offset === undefined && text.length <= page) return `${id}+1|${kind}: ${text}`;
       if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0 || offset >= Math.max(1, text.length)))
@@ -389,7 +421,7 @@ export class Memory {
     // A half not built yet shows as in the view, so the other half still comes back.
     return [0, 1].map(offset => {
       const part = { l, i: i + offset };
-      return `${start(part)}+${2 ** l}|${flat(this.text(part))}`;
+      return `${start(part)}+${2 ** l}|${flat(this.line(part))}`;
     }).join('\n');
   }
   /** The largest whole lines covering the chat, oldest first: one per power of two in the message count. */
@@ -402,11 +434,11 @@ export class Memory {
   /** Original messages containing `text`, ignoring case, newest first, older than message `before`. Never summaries,
    * nor the logged zoom/search calls and results, which only copy memory. */
   search(text: string, before = this.root.length) {
-    const needle = text.toLowerCase(), hits: Entry[] = [];
+    const needle = text.toLowerCase(), hits: Message[] = [];
     for (let i = Math.min(before, this.root.length) - 1; i >= 0; i--) {
-      const entry = this.root[i];
-      if ((entry.kind === 'tool' || entry.kind === 'echo') && /^(zoom|search)[ :]/.test(entry.text)) continue;
-      if (entry.text.toLowerCase().includes(needle)) hits.push(entry);
+      const message = this.root[i], body = this.text(i);
+      if ((message.kind === 'tool' || message.kind === 'echo') && /^(zoom|search)[ :]/.test(body)) continue;
+      if (body.toLowerCase().includes(needle)) hits.push(message);
     }
     return hits;
   }

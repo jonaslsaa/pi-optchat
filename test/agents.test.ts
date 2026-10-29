@@ -111,7 +111,7 @@ test('by default (Group subagent reports off), real SDK children stream, deliver
     await children.tell(root, 'Please include tests.', 'user');
     await until(() => children.history.records.get(root)?.guidance[0].state === 'delivered');
     assert.equal(children.history.records.get(great)?.state, 'running', 'guidance must wake an idle parent before its descendant completes');
-    assert.ok(memory.root.some(entry => entry.kind === 'user' && entry.text.includes(`Direct guidance to subagent [${root}]`)));
+    assert.ok(memory.root.some(entry => entry.kind === 'user' && memory.text(entry.i).includes(`Direct guidance to subagent [${root}]`)));
     releases.get('great-grandchild')!();
     await until(() => !children.active);
     assert.equal(reports.length, 4, 'descendants report only to their immediate parent, not directly to the manager');
@@ -659,7 +659,7 @@ test('a stopped agent\'s report says who stopped it and that tell resumes it', a
     assert.equal(await children.interrupt(idle), 'paused');
     await until(() => children.history.records.get(idle)?.state === 'paused');
     await children.close();
-    const closed = memory.root.filter(e => e.kind === 'work' && e.text.startsWith(`[${idle}]`)).map(e => withoutFullChat(e.text));
+    const closed = memory.root.filter(e => e.kind === 'work' && memory.text(e.i).startsWith(`[${idle}]`)).map(e => withoutFullChat(memory.text(e.i)));
     assert.equal(closed.length, 1);
     assert.match(closed[0], /^\[\w+\] Stopped because Pi closed or reloaded while it waited for the user\. It is not resumed on its own; .*tell resumes it/, 'a paused run Pi stops on close says so, since it is not resumed on its own');
   } finally { await children.close(); removeDir(dir); }
@@ -868,7 +868,7 @@ test('deleting a running agent stops it and the agents it started, delivers its 
   const dir = mkdtempSync(join(tmpdir(), 'optchat-delete-'));
   const reports: string[] = [];
   const { children, asked, memory } = await busyChildren(dir, reports);
-  const deleted = () => memory.root.filter(e => e.kind === 'work' && e.text.endsWith('deleted by the user')).map(e => e.text);
+  const deleted = () => memory.root.filter(e => e.kind === 'work' && memory.text(e.i).endsWith('deleted by the user')).map(e => memory.text(e.i));
   try {
     const [boss, done] = await children.spawn([{ task: 'boss' }, { task: 'done' }], dir);
     const [worker] = await children.spawn([{ task: 'worker' }], dir, undefined, boss);

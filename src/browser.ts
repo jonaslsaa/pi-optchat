@@ -10,8 +10,8 @@ const SOURCES = { claude: 'Claude Code', 'claude-memory': 'Claude Code memory', 
 export function exportBrowser(memory: Memory, profile: string, directory = memory.directory) {
   const data = JSON.stringify({
     profile, sources: SOURCES, budget: memory.budget, size: memory.size, view: memory.view,
-    root: memory.root.map(({ i, kind, text, date, origin }) => ({ i, kind, text, date, ...(origin ? { origin: { source: origin.source, title: origin.title } } : {}) })),
-    tree: [...memory.tree.values()].map(({ l, i, text }) => ({ l, i, text })),
+    root: memory.root.map(({ i, kind, date, origin }) => ({ i, kind, text: memory.text(i), date, ...(origin ? { origin: { source: origin.source, title: origin.title } } : {}) })),
+    tree: [...memory.tree.values()].map(({ l, i }) => ({ l, i, text: memory.summary({ l, i }) })),
   }).replace(/</g, '\\u003c');
   const path = join(directory, 'memory.html'); atomicWrite(path, PAGE.replace('__DATA__', () => data)); return path;
 }

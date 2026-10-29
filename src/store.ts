@@ -1,6 +1,6 @@
 import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import type { Entry, Summary } from './core/memory.ts';
+import { isEntry, isSummary, type Entry, type Part, type Summary } from './core/memory.ts';
 import { EXTENSIONS, type Mime, type Saved, type Store } from './core/store.ts';
 
 const MIMES = new Map<string, Mime>((Object.keys(EXTENSIONS) as Mime[]).map(mime => [EXTENSIONS[mime], mime]));
@@ -59,6 +59,9 @@ function records(dir: string, warn: (s: string) => void): unknown[] {
 export class FileStore implements Store {
   /** Each log file's size as this store last left it, so a write by another process is refused instead of interleaved. */
   private readonly lastSeenBytes = new Map<string, number>();
+  /** Texts stay in RAM, as before lazy text: Pi has the room, and reads stay as fast. */
+  private readonly texts: string[] = [];
+  private readonly summaries = new Map<string, string>();
   constructor(readonly directory: string, private readonly warn: (s: string) => void = console.error) {}
   load(): Saved {
     for (const sub of ['main', 'tree']) mkdirSync(join(this.directory, sub), { recursive: true, mode: 0o700 });
@@ -68,18 +71,26 @@ export class FileStore implements Store {
     // An unreadable view is rebuilt, as a damaged one is.
     let saved: string | undefined;
     if (existsSync(view)) try { saved = readFileSync(view, 'utf8'); } catch { saved = ''; }
-    return { entries, tree: records(join(this.directory, 'tree'), this.warn), view: saved };
+    const tree = records(join(this.directory, 'tree'), this.warn);
+    // Memory checks the rest; a message without its text is as broken here as before.
+    if (!entries.every(isEntry)) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
+    for (const { i, text } of entries) this.texts[i] = text;
+    for (const value of tree) if (isSummary(value)) this.summaries.set(`${value.l}:${value.i}`, value.text);
+    return { entries, tree, view: saved };
   }
+  text(i: number) { return this.texts[i]; }
+  summary({ l, i }: Part) { return this.summaries.get(`${l}:${i}`)!; }
   append(entry: Entry): undefined {
     const file = join(this.directory, 'main', `${localDay()}.jsonl`);
     if (!this.lastSeenBytes.has(file)) this.checkLog(file);
     this.lastSeenBytes.set(file, appendJson(file, entry, this.lastSeenBytes.get(file) ?? 0));
+    this.texts[entry.i] = entry.text;
   }
   private checkLog(next: string) {
     const main = dirname(next), names = readdirSync(main).filter(n => n.endsWith('.jsonl'));
     if (names.length !== this.lastSeenBytes.size || names.some(n => statSync(join(main, n)).size !== this.lastSeenBytes.get(join(main, n)))) throw otherWriter(next);
   }
-  appendNode(node: Summary): undefined { appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), node); }
+  appendNode(node: Summary): undefined { appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), node); this.summaries.set(`${node.l}:${node.i}`, node.text); }
   saveView(view: string): undefined { atomicWrite(join(this.directory, 'view.json'), view); }
   putImage(name: string, mimeType: Mime, data: Uint8Array): undefined { atomicWrite(join(this.directory, 'images', `${name}.${EXTENSIONS[mimeType]}`), data); }
   image(name: string) {

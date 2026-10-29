@@ -46,7 +46,7 @@ export const deduplicate = (existing: readonly Entry[], incoming: readonly Impor
 /** Call only while holding the profile lock, after closing its old Memory worker. */
 export function prepareImport(dir: string, old: Memory, incoming: readonly ImportedEntry[], mode: ImportMode): ImportJob | undefined {
   if (pendingImport(dir)) throw new Error('Resume or discard the pending import first.');
-  const plan = planImport(old.root, incoming, mode, copyKey);
+  const plan = planImport(old.entries(), incoming, mode, copyKey);
   if (!plan) return undefined;
   const { entries, kept } = plan, id = randomUUID(), target = `memories/${id}`, path = generationPath(dir, target);
   for (const sub of ['main', 'tree']) mkdirSync(join(path, sub), { recursive: true, mode: 0o700 });

@@ -20,7 +20,7 @@ const text = (content: unknown) => typeof content === 'string' ? content
 
 /** One OptChat agent on Pi Durable, over one SQLite database as in a Durable Object: Pi's tables `pi_*`, memory's `optchat_*`. */
 async function open(file: string, replies: FauxResponseStep[], compress: Compressor = async ({ part }) => `line ${part.l}/${part.i}`) {
-  const db = new NodeSqliteDatabase(new DatabaseSync(file));
+  const sync = new DatabaseSync(file), db = new NodeSqliteDatabase(sync);
   const faux = fauxProvider(), models = createModels();
   models.setProvider(faux.provider);
   const sent: Sent[] = [];
@@ -28,7 +28,7 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
     sent.push(request.messages.map(m => ({ role: m.role, content: 'content' in m ? m.content : undefined })));
     return typeof reply === 'function' ? reply(request, ...rest) : reply;
   }));
-  const memory = await openMemory(new SqliteStore(db), compress);
+  const memory = await openMemory(new SqliteStore(db, (sql, ...params) => sync.prepare(sql).iterate(...params)), compress);
   const memoryExtension = optchat({ memory });
   const registry = createRegistry();
   registry.install(memoryExtension.extension);
@@ -68,7 +68,7 @@ test('each request is the view, the previous exchange and the current context; w
   try {
     await agent.ask('hello');
     await agent.ask('what did I say first?');
-    assert.deepEqual(agent.memory.root.map(e => `${e.kind}: ${e.text.split(' GMT')[0]}`), [
+    assert.deepEqual(agent.memory.entries().map(e => `${e.kind}: ${e.text.split(' GMT')[0]}`), [
       'user: hello', 'talk: Hi Jonas', 'user: what did I say first?', 'tool: date {"id":0}',
       `echo: date: ${new Date(agent.memory.root[0].date).toString().split(' GMT')[0]}`, 'talk: You said hello first.',
     ]);
@@ -110,7 +110,7 @@ test('an input queued behind a run keeps its context: the context is reset only 
     await agent.idle();
     // The follow-up ran right after the first answer, in the same context: it sees that run in full.
     assert.deepEqual(agent.sent[1].filter(m => m.role !== 'system').map(m => text(m.content)), ['<chat>\n\n</chat>\n\none', 'first answer', 'two']);
-    assert.deepEqual(agent.memory.root.map(e => e.text), ['one', 'first answer', 'two', 'second answer']);
+    assert.deepEqual(agent.memory.entries().map(e => e.text), ['one', 'first answer', 'two', 'second answer']);
   } finally { await agent.close(); }
 });
 
@@ -121,7 +121,7 @@ test('reopened on the same database, memory logs nothing twice and makes no summ
   const before = await open(path, [fauxAssistantMessage(long('answer one')), fauxAssistantMessage(long('answer two'))], compress);
   await before.ask(long('question one'));
   await before.ask(long('question two'));
-  const logged = before.memory.root.map(e => e.text);
+  const logged = before.memory.entries().map(e => e.text);
   await before.close();
   assert.ok(calls > 0);
   calls = 0;
@@ -129,7 +129,7 @@ test('reopened on the same database, memory logs nothing twice and makes no summ
   try {
     assert.equal(calls, 0);
     await after.ask('question three');
-    assert.deepEqual(after.memory.root.map(e => e.text), [...logged, 'question three', 'answer three']);
+    assert.deepEqual(after.memory.entries().map(e => e.text), [...logged, 'question three', 'answer three']);
   } finally { await after.close(); }
 });
 
@@ -143,7 +143,7 @@ test('reopened before the run was remembered, memory logs that run once, after t
   const after = await open(path, []);
   try {
     await after.idle();
-    assert.deepEqual(after.memory.root.map(e => e.text), ['question one', 'answer one', 'question two', 'answer two']);
+    assert.deepEqual(after.memory.entries().map(e => e.text), ['question one', 'answer one', 'question two', 'answer two']);
   } finally { await after.close(); }
 });
 
@@ -153,7 +153,7 @@ test('an entry cut off between its records is completed on reopen, without loggi
     fauxAssistantMessage([fauxText('Let me check.'), fauxToolCall('date', { id: 0 })], { stopReason: 'toolUse' }), fauxAssistantMessage('It was today.'),
   ]);
   await before.ask('when did I first write?');
-  const logged = before.memory.root.map(e => `${e.kind}: ${e.text}`);
+  const logged = before.memory.entries().map(e => `${e.kind}: ${e.text}`);
   await before.close();
   // The answer with a tool call made two records; as if the object died after saving the first, memory ends with it.
   const cut = logged.indexOf('talk: Let me check.') + 1, db = new DatabaseSync(path);
@@ -163,7 +163,7 @@ test('an entry cut off between its records is completed on reopen, without loggi
   try {
     assert.equal(after.memory.root.length, cut);
     await after.ask('hi');
-    assert.deepEqual(after.memory.root.map(e => `${e.kind}: ${e.text}`), [...logged, 'user: hi', 'talk: Hello again.']);
+    assert.deepEqual(after.memory.entries().map(e => `${e.kind}: ${e.text}`), [...logged, 'user: hi', 'talk: Hello again.']);
   } finally { await after.close(); }
 });
 
@@ -176,7 +176,7 @@ test('a reset\'s note reaches the model once, and is in memory once, also after 
   // Pi sends the note in the context it starts; the view, built before that context ended, does not have it.
   assert.equal(JSON.stringify(before.sent[1]).split(note).length - 1, 1);
   await before.ask('thanks');
-  const notes = (memory: typeof before.memory) => memory.root.filter(e => e.text.includes(note)).map(e => `${e.kind}: ${e.text}`);
+  const notes = (memory: typeof before.memory) => memory.entries().filter(e => e.text.includes(note)).map(e => `${e.kind}: ${e.text}`);
   assert.deepEqual(notes(before.memory), [`user: [Handoff note] ${note}`]);
   // Now only in the view.
   assert.equal(JSON.stringify(before.sent[2]).split(note).length - 1, 1);

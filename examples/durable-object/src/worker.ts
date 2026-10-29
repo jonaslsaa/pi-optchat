@@ -38,7 +38,7 @@ export class Agent extends DurableObject<Env> {
           onUsage: reply => { this.stats.summaries.push(reply.usage); this.saveBoot(); },
         });
         // The adapter shares Pi's queue on this storage, so OptChat's writes never interleave with a Pi transaction.
-        const memory = await openMemory(new SqliteStore(new DurableObjectSqliteDatabase(this.ctx.storage)), compress,
+        const memory = await openMemory(new SqliteStore(new DurableObjectSqliteDatabase(this.ctx.storage), (sql, ...params) => this.ctx.storage.sql.exec(sql, ...params)), compress,
           { budget: Number(this.env.BUDGET), warn: s => {
             this.stats.warnings.push(s);
             // A failed save stops memory's log until the object restarts, which then logs the rest from Pi's transcript: restart now.
@@ -93,7 +93,7 @@ export class Agent extends DurableObject<Env> {
       }
       case '/stats': return Response.json({ ...this.report(), alarm: await this.ctx.storage.getAlarm() });
       case '/view': return new Response(memory.render());
-      case '/log': return Response.json(memory.root.map(({ i, kind, text, receipt }) => ({ i, kind, text: text.slice(0, 120), receipt })));
+      case '/log': return Response.json(memory.root.map(({ i, kind, receipt }) => ({ i, kind, text: memory.text(i).slice(0, 120), receipt })));
       case '/tables': return Response.json(this.ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").toArray().map(row => row.name));
     }
     return new Response('not found', { status: 404 });
