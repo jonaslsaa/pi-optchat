@@ -87,5 +87,5 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
       atomicWrite(join(dir, 'active-memory.json'), JSON.stringify(job.target));
     } }, signal);
     finish(); report(); return job;
-  } finally { clearInterval(timer); }
+  } finally { clearInterval(timer); await memory?.close(); } // Also when `open` fails after opening: a throwing progress callback.
 }
