@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { createCompressor } from '../src/compactor.ts';
+import { createCompressor as coreCompressor } from '../src/core/compactor.ts';
+import { COMPACT } from '../src/core/prompts.ts';
 import { Refused } from '../src/core/memory.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
@@ -155,4 +157,22 @@ test('a refusal the model itself stops with is final, without asking again', { t
   calls[0].fail('The model refused to complete the request', 'refusal');
   await assert.rejects(reply, Refused);
   assert.equal(calls.length, 1);
+});
+
+test("a host's own compactor prompt is the one the model gets, and COMPACT is used without one", async () => {
+  const prompts: (string | undefined)[] = [];
+  const compressor = (system?: string) => coreCompressor({ retryable: () => false, system, model: () => ({
+    model: { id: 'compactor', name: 'compactor', api: 'openai-completions', provider: 'host', baseUrl: 'https://invalid.local', reasoning: false,
+      input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1000 },
+    stream: (model, context) => {
+      prompts.push(context.systemPrompt);
+      const stream = createAssistantMessageEventStream(), message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'a line' }],
+        api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+      stream.push({ type: 'done', reason: 'stop', message }); stream.end();
+      return stream;
+    } }) });
+  const input = { context: '<chat>\n</chat>', source: 'x'.repeat(600), part: { l: 0, i: 0 } };
+  assert.equal(await compressor('Summarize a board chat with many people.')(input, new AbortController().signal), 'a line');
+  await compressor()(input, new AbortController().signal);
+  assert.deepEqual(prompts, ['Summarize a board chat with many people.', COMPACT]);
 });

@@ -64,10 +64,13 @@ export interface CompressorOptions {
   /** The longest line kept without a retry; ACCEPTED_BYTES unless the host has a setting for it. */
   accepted?: () => number;
   retryDelays?: readonly number[];
+  /** The compactor's system prompt: COMPACT, unless the host's chat isn't one user and OptChat. */
+  system?: string;
 }
 
 /** Builds summary lines with the model `model` resolves. The model is asked for 512 bytes. */
-export function createCompressor({ model: resolve, retryable, onUsage = () => {}, accepted = () => ACCEPTED_BYTES, retryDelays }: CompressorOptions): Compressor {
+export function createCompressor({ model: resolve, retryable, onUsage = () => {}, accepted = () => ACCEPTED_BYTES, retryDelays,
+  system = COMPACT }: CompressorOptions): Compressor {
   const gate = primeFirst();
   return async (input, signal) => {
     const { model, reasoning: thinking, stream: streamSimple } = resolve();
@@ -80,7 +83,7 @@ export function createCompressor({ model: resolve, retryable, onUsage = () => {}
     const ask = async () => {
       const warmed = prefix ? await gate(prefix, signal) : () => {};
       try {
-        const stream = streamSimple(model, { systemPrompt: COMPACT, messages }, {
+        const stream = streamSimple(model, { systemPrompt: system, messages }, {
           // A shared session id is the OpenAI prompt-cache key; SSE because over a websocket Codex would chain unrelated parallel calls on one cached connection.
           sessionId: 'optchat-compactor', transport: 'sse',
           reasoning: thinking, signal, cacheRetention: 'short',
