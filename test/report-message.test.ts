@@ -97,7 +97,7 @@ test('a report reaches an idle or busy main agent as a user message to the model
     const report = (text: string) => session!.sendCustomMessage({ customType: REPORT_TYPE, content: text, display: true }, { triggerTurn: true, deliverAs: 'steer' });
 
     await session.prompt('Start a subagent.');
-    // Idle: Pi runs the report without before_agent_start, so OptChat must start the run itself.
+    // Idle: the report starts its own run.
     await report('[8964a512] Message from subagent (still running): step 1 done');
     await session.agent.waitForIdle();
     const idle = captured.at(-1)!.messages;

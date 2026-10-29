@@ -258,7 +258,7 @@ test('turning Previous exchange off also reaches a turn that a subagent report s
     await session.sendCustomMessage({ customType: REPORT_TYPE, content: '[8964a512] Done.', display: true }, { triggerTurn: true, deliverAs: 'steer' });
     await session.agent.waitForIdle();
     assert.equal(systems.length, 2);
-    assert.ok(!systems.at(-1)!.includes(said), 'the report turn reuses the built prompt, without the replay sentence');
+    assert.ok(!systems.at(-1)!.includes(said), 'the report turn is built without the replay sentence');
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
@@ -300,7 +300,7 @@ test('Memory search turned on and off in /optchat settings adds and removes the 
     assert.deepEqual(search(turns.at(-1)!), [false, false, false], 'off by default');
     await session.prompt('/optchat settings');
     assert.equal(loadConfig(profilePath('fixture')).memorySearch, true);
-    // A report turn started while idle skips before_agent_start, and still gets the change.
+    // A report turn started while idle gets the change too.
     await session.sendCustomMessage({ customType: REPORT_TYPE, content: '[8964a512] Done.', display: true }, { triggerTurn: true, deliverAs: 'steer' });
     await session.agent.waitForIdle();
     assert.deepEqual(search(turns.at(-1)!), [true, true, true]);
