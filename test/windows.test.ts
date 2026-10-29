@@ -657,13 +657,15 @@ test('attaching borrows an existing background session without spawning, changin
   const f = await fixture();
   const events: WindowEvent[] = [];
   const close = await serveWindows(f.dir, f.children, () => true, async text => { f.reports.push(text); });
-  const [id] = await f.children.spawn([{ task: 'hold work original background' }], f.dir);
+  const [id] = await f.children.spawn([{ task: 'hold work original background', title: 'Original work' }], f.dir);
   await until(() => !!f.children.live(id)?.streaming);
   const original = f.children.live(id)!.session;
+  assert.deepEqual(await listAttachableAgents(f.dir), [{ id, task: 'hold work original background', title: 'Original work', state: 'running' }], 'the picker gets the title');
   const client = await connectWindow(f.dir, e => events.push(e), () => {});
   try {
     await client.request('attach', id);
     assert.equal(events.find(e => e.name === 'started')?.text, id);
+    assert.equal(events.find(e => e.name === 'started')?.title, 'Original work', 'the window can show the title');
     assert.equal(f.children.history.records.size, 1);
     assert.equal(f.children.live(id)?.session, original);
     assert.equal(f.children.history.records.get(id)?.connected, undefined);

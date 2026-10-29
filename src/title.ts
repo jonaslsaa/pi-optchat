@@ -4,8 +4,9 @@ export type WindowState = StatusState | 'done' | 'disconnected';
 
 const agents = (count: number) => count > 0 ? ` · ${count} ${count === 1 ? 'agent' : 'agents'}` : '';
 export const mainTitle = (profile: string, working: boolean, running: number) => `${working ? '● ' : ''}π ${profile}${agents(running)}`;
-export const windowTitle = (profile: string, state: WindowState) =>
-  `${state === 'working' ? '● ' : ''}↳ ${profile}${state === 'done' || state === 'disconnected' ? ` · ${state}` : ''}`;
+/** `label`: the spawn title of the subagent an attached window shows. */
+export const windowTitle = (profile: string, state: WindowState, label?: string) =>
+  `${state === 'working' ? '● ' : ''}↳ ${profile}${label ? ` · ${label}` : ''}${state === 'done' || state === 'disconnected' ? ` · ${state}` : ''}`;
 /** A connected window's agent is working while it runs or stops, or waits on agents of its own; waiting with none means waiting for you. */
 export const statusState = (state: string, agents = 0): StatusState =>
   state === 'running' || state === 'stopping' || state === 'waiting' && agents > 0 ? 'working' : 'waiting';

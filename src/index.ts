@@ -24,7 +24,7 @@ import { checkpoint } from './checkpoint.ts';
 import { memoryDirectory, pendingImport, prepareImport, runImport, discardImport } from './import/job.ts';
 import { chooseImport, showProgress } from './import/ui.ts';
 import { UsageLedger } from './usage.ts';
-import { oneLine, showInspector, type InspectorPage } from './inspector.ts';
+import { agentLabel, oneLine, showInspector, type InspectorPage } from './inspector.ts';
 import { showAgentView } from './agent-view.ts';
 import { inspectorShortcut, mountNavigation } from './navigation.ts';
 import { joinHeadless, listAttachableAgents, serveWindows } from './window-bridge.ts';
@@ -321,7 +321,7 @@ export default function optchat(pi: ExtensionAPI) {
           const listed = settled ? undefined : await listAttachableAgents(profilePath(name)).catch(() => undefined);
           const agents = listed ?? [];
           const hint = listed?.length === 0 ? '\nNo background agents are running. Ask the main agent to start one.' : '';
-          const labels = new Map(agents.map(agent => [`Open subagent ${agent.id} · ${agent.state} · ${oneLine(agent.task).slice(0, 80)}`, agent.id]));
+          const labels = new Map(agents.map(agent => [`Open subagent ${agent.id} · ${agent.state} · ${agentLabel(agent).slice(0, 80)}`, agent.id]));
           const choice = await ctx.ui.select(`${name} is open in another window\n${error.owner}${hint}`,
             [CONNECT, ...labels.keys(), ...(settled ? [] : [BACK])]);
           const agentId = choice && labels.get(choice);
