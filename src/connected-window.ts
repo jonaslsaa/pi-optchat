@@ -87,8 +87,8 @@ class LiveTurn implements Component {
 export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContext, profile: string, setTitle: (title: string) => void = title => ctx.ui.setTitle(title), agentId?: string, activeOnly = false) {
   // Each window draws with its own transcript, so nothing from an earlier window carries over.
   transcript = undefined;
-  let started = false, ended = false, liveTurn: LiveTurn | undefined, live: LiveState | undefined, turn: AgentMessage[] = [];
-  const title = (state: WindowState) => setTitle(windowTitle(profile, state));
+  let label: string | undefined, started = false, ended = false, liveTurn: LiveTurn | undefined, live: LiveState | undefined, turn: AgentMessage[] = [];
+  const title = (state: WindowState) => setTitle(windowTitle(profile, state, label));
   const display = (text: string, details: Details = {}) => pi.sendMessage<Details>({ customType: 'optchat-connected', content: text, display: true, details }, { triggerTurn: false });
   const refresh = () => { if (liveTurn) { liveTurn.turn = turn; liveTurn.live = live; liveTurn.update(); } };
   /** A reply moves into the chat once all its tool calls have results, as Pi's own chat does when a tool finishes. */
@@ -103,8 +103,8 @@ export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContex
   const hideLive = () => { live = undefined; liveTurn = undefined; ctx.ui.setWidget('optchat-connected', undefined); };
   const connection = await connectWindow(profilePath(profile), event => {
     if (event.name === 'started') {
-      started = true; showLive(); title('working');
-      ctx.ui.setStatus('optchat', `OptChat: ${profile} · ${agentId ? 'attached' : 'connected'} agent ${event.text} · /complete`);
+      label = event.title; started = true; showLive(); title('working');
+      ctx.ui.setStatus('optchat', `OptChat: ${profile} · ${agentId ? 'attached' : 'connected'} agent ${event.text}${label ? ` · ${label}` : ''} · /complete`);
     } else if (event.name === 'status') {
       live = event.live; refresh();
       // The tab says working exactly when the spinner spins.

@@ -12,6 +12,8 @@ export type RunState = typeof runStates[number];
 export type FinishReason = 'complete' | 'disconnected' | 'owner-stopped' | 'failed';
 export interface RunInfo {
   id: string; task: string; cwd: string; model: string; thinking: string;
+  /** The spawning agent's short label for the task, shown instead of it where there is room for one line. */
+  title?: string;
   parentSession: string; sessionFile?: string; started: number; ended?: number;
   parentId?: string; depth: number;
   state: RunState; report?: string;
@@ -24,6 +26,8 @@ export interface RunInfo {
   guidance: Guidance[];
 }
 export type Guidance = { text: string; date: number; state: 'queued' | 'delivered' | 'undelivered'; from?: 'user' | 'manager'; sent?: string };
+/** How a run's reports and messages start: `[id]`, or `[id · title]` (see `HEAD` in report-message.ts). */
+export const reportHead = (run: { id: string; title?: string }) => `[${run.id}${run.title ? ` · ${run.title}` : ''}]`;
 /** The text the agent receives, which is how Pi's queue and the session know the message. */
 export const sentText = (g: Guidance) => g.sent ?? g.text;
 const moves: Record<RunState, readonly RunState[]> = {
@@ -56,6 +60,7 @@ function isRun(value: unknown): value is RunInfo {
     && typeof value.id === 'string' && /^[a-zA-Z0-9-]+$/.test(value.id)
     && runStates.includes(value.state as RunState) && typeof value.started === 'number' && Number.isFinite(value.started)
     && (value.ended === undefined || typeof value.ended === 'number')
+    && (value.title === undefined || typeof value.title === 'string')
     && (value.sessionFile === undefined || typeof value.sessionFile === 'string')
     && (value.report === undefined || typeof value.report === 'string')
     && (value.connected === undefined || typeof value.connected === 'boolean')

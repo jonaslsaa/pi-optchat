@@ -14,6 +14,10 @@ Your MCP servers (`~/.pi/agent/mcp.json`, the project's `.pi/mcp.json`) work in 
 - If MCP is off in the main session (`--no-mcp`, `-builtin:mcp` in settings, or an extension that replaces `/mcp`), it is off in subagents too.
 - Each subagent opens its own server connections (stdio servers start once per subagent) and closes them when it ends.
 
+## Titles
+
+A spawn task may carry a `title`, a short label the agent writes for you. The Agents page, the agent view, the agent picker of a second terminal and an attached window's tab show it instead of the task's first line, and the child's reports start `[id · title]`. A task without one shows its first line, as before. The title is saved with the run, so it survives `/reload`.
+
 ## Model and thinking level
 
 Each task runs the profile's subagent model (`/optchat agents model`), unless the spawn sets that task's `model` (`provider/id`, as in `/model`) or `thinking`. The agent sets them only when you ask for them.
@@ -25,7 +29,7 @@ Each task runs the profile's subagent model (`/optchat agents model`), unless th
 
 ## Reports
 
-Each child reports to its parent as soon as it finishes, as one message starting `[id]`. The parent stays alive to receive reports; it never polls.
+Each child reports to its parent as soon as it finishes, as one message starting `[id]` (`[id · title]` with a title). The parent stays alive to receive reports; it never polls.
 
 - A failed child reports its error text.
 - A child whose request aborts with no stop (a provider abort) still reports `Task aborted: ...`.

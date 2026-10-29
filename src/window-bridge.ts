@@ -24,6 +24,8 @@ export interface LiveState { state: string; model: string; streaming?: AgentMess
 export interface WindowEvent {
   kind: 'event'; name: 'started' | 'message' | 'status' | 'finished'; text: string; from?: 'user' | 'agent';
   message?: AgentMessage; live?: LiveState;
+  /** On `started` in an attached window: the subagent's spawn title, if it has one. */
+  title?: string;
 }
 type Frame = Request | Reply | WindowEvent;
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -38,7 +40,8 @@ function parse(value: unknown): Frame {
   const name = value.name, action = value.action, from = value.from;
   if (value.kind === 'event' && (name === 'started' || name === 'message' || name === 'status' || name === 'finished') && typeof value.text === 'string')
     return { kind: 'event', name, text: value.text, from: from === 'user' || from === 'agent' ? from : undefined,
-      message: isMessage(value.message) ? value.message : undefined, live: isLive(value.live) ? value.live : undefined };
+      message: isMessage(value.message) ? value.message : undefined, live: isLive(value.live) ? value.live : undefined,
+      title: typeof value.title === 'string' ? value.title : undefined };
   if (typeof value.id !== 'number' || !Number.isSafeInteger(value.id)) throw new Error('Invalid request ID');
   if (value.kind === 'reply' && (value.error === undefined || typeof value.error === 'string') && (value.text === undefined || typeof value.text === 'string'))
     return { kind: 'reply', id: value.id, error: value.error, text: value.text };
@@ -113,7 +116,7 @@ export async function serveWindows(directory: string, children: Children, availa
             const agents: AttachableAgent[] = available() ? children.history.list()
               .filter(info => !info.connected && !!children.live(info.id)
                 && (info.state === 'running' || info.state === 'waiting' || info.state === 'paused'))
-              .map(info => ({ id: info.id, task: info.task.slice(0, 200), state: info.state })) : [];
+              .map(info => ({ id: info.id, task: info.task.slice(0, 200), title: info.title, state: info.state })) : [];
             send({ kind: 'reply', id: frame.id, text: JSON.stringify(agents) }); return;
           } else if (frame.action === 'attach') {
             if (child) throw new Error('This window already has a conversation');
@@ -130,7 +133,7 @@ export async function serveWindows(directory: string, children: Children, availa
             // This socket borrows the existing session, never its lifetime, slot or report destination.
             // Other views (the main window's Agents page, other terminals) stay open alongside it.
             attached = true; child = id; finalMessages = live ? undefined : messages;
-            send({ kind: 'event', name: 'started', text: child });
+            send({ kind: 'event', name: 'started', text: child, title: info.title });
             drainMessages(messages, info);
           } else if (frame.action === 'start') {
             if (child) throw new Error('This window already has a conversation');
@@ -295,7 +298,7 @@ export async function connectWindow(directory: string, event: (event: WindowEven
   };
 }
 
-export interface AttachableAgent { id: string; task: string; state: string }
+export interface AttachableAgent { id: string; task: string; title?: string; state: string }
 /** Query the owner, not run metadata on disk: it knows which main/terminal views are actually open. */
 export async function listAttachableAgents(directory: string, timeout = 2000): Promise<AttachableAgent[]> {
   const deadline = Date.now() + timeout;
@@ -303,7 +306,7 @@ export async function listAttachableAgents(directory: string, timeout = 2000): P
   try {
     const agents: unknown = JSON.parse(await connection.request('list-agents', undefined, undefined, { timeout: Math.max(1, deadline - Date.now()) }) ?? '[]');
     if (!Array.isArray(agents) || !agents.every(agent => record(agent) && typeof agent.id === 'string'
-      && typeof agent.task === 'string' && (agent.state === 'running' || agent.state === 'waiting' || agent.state === 'paused')))
+      && typeof agent.task === 'string' && (agent.title === undefined || typeof agent.title === 'string') && (agent.state === 'running' || agent.state === 'waiting' || agent.state === 'paused')))
       throw new Error('Invalid background agent list from the profile owner');
     return agents;
   } finally { connection.close(); }
