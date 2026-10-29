@@ -294,7 +294,7 @@ export class Children {
         const session = await this.open({ id, directory, depth, parentId, connected, model: task.model, thinking: task.thinking,
           sessionManager: SessionManager.create(directory, join(this.profileDirectory, 'runs')) });
         // One short line without brackets, so the `[id · title]` head of its reports stays parseable and small.
-        const title = oneLine(task.title ?? '').replace(/[[\]]/g, '').trim().slice(0, 60).trimEnd();
+        const title = oneLine(task.title ?? '').replace(/[[\]]/g, '').trim().slice(0, 128).trimEnd();
         const info: RunInfo = { id, task: task.task, ...(title ? { title } : {}), cwd: directory, model: `${task.model.provider}/${task.model.id}`, thinking: session.thinkingLevel,
           parentSession: this.options.parentSession ?? '', parentId, depth, sessionFile: session.sessionFile, started: Date.now(), state: 'running', guidance: [], ...(connected ? { connected: true } : {}) };
         const live: LiveRun = { session, info, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [], steering: Promise.resolve() };
