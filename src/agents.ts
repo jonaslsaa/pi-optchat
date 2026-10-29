@@ -73,7 +73,7 @@ const packageName = (path: string): string | undefined => {
 /** A task's cwd may start with `~` and may be relative to the spawning agent's directory. */
 export const taskDirectory = (cwd: string, path = '.', windows = process.platform === 'win32') =>
   resolve(cwd, path.replace(windows ? /^~(?=$|[\\/])/ : /^~(?=$|\/)/, homedir()));
-const TITLE_DOC = 'Short label shown to the user';
+const TITLE_DOC = 'Short label shown to the user, e.g. "Fix steering bug"';
 const CWD_DOC = 'Project directory the subagent works in (~ allowed); its AGENTS.md files load from there. Defaults to your current directory.';
 /** The spawn tools' tasks. What a task leaves out of model and thinking is the profile's subagent choice. */
 export const TASKS = Type.Array(Type.Object({ task: Type.String(), title: Type.Optional(Type.String({ description: TITLE_DOC })), cwd: Type.Optional(Type.String({ description: CWD_DOC })),
