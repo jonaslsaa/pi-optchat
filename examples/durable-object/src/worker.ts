@@ -9,12 +9,21 @@ import { createRegistry, defineExtension, GenerationTask, Harness, hook, ResetEn
 import { DurableObjectSqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite/cloudflare';
 import { PiHarness } from 'agents/harness/pi';
 import { Lifecycle } from 'agents/lifecycle';
-import { createCompressor, openMemory, type Kind, type Memory } from '../../../src/core/index.ts';
-import { optchat, SqliteStore, withCacheMarks } from '../../../src/durable/index.ts';
+import { createCompressor, isMime, openMemory, type Kind, type Memory } from '../../../src/core/index.ts';
+import { optchat, SqliteStore, withCacheMarks, type SqliteStoreOptions } from '../../../src/durable/index.ts';
 
 type PiContext = Parameters<Harness['inspect']>[0];
-interface Env { AGENT: DurableObjectNamespace<Agent>; ANTHROPIC_OAUTH_TOKEN: string; MODEL: string; COMPACTOR: string; BUDGET: string }
+interface Env { AGENT: DurableObjectNamespace<Agent>; IMAGES: R2Bucket; ANTHROPIC_OAUTH_TOKEN: string; MODEL: string; COMPACTOR: string; BUDGET: string }
 type Usage = AssistantMessage['usage'];
+
+/** Memory's images in R2 instead of the object's SQLite, which caps a row at 2 MB; each object keeps its own under `prefix`. */
+const r2Images = (bucket: R2Bucket, prefix: string): SqliteStoreOptions['images'] => ({
+  putImage: async (name, mimeType, data) => { await bucket.put(`${prefix}/${name}`, data, { httpMetadata: { contentType: mimeType } }); },
+  image: async name => {
+    const object = await bucket.get(`${prefix}/${name}`), mimeType = object?.httpMetadata?.contentType;
+    return object && mimeType && isMime(mimeType) ? { mimeType, data: new Uint8Array(await object.arrayBuffer()) } : undefined;
+  },
+});
 
 export class Agent extends DurableObject<Env> {
   private readonly registry = createRegistry();
@@ -38,7 +47,9 @@ export class Agent extends DurableObject<Env> {
           onUsage: reply => { this.stats.summaries.push(reply.usage); this.saveBoot(); },
         });
         // The adapter shares Pi's queue on this storage, so OptChat's writes never interleave with a Pi transaction.
-        const memory = await openMemory(new SqliteStore(new DurableObjectSqliteDatabase(this.ctx.storage), (sql, ...params) => this.ctx.storage.sql.exec(sql, ...params)), compress,
+        const store = new SqliteStore(new DurableObjectSqliteDatabase(this.ctx.storage), (sql, ...params) => this.ctx.storage.sql.exec(sql, ...params),
+          { images: r2Images(this.env.IMAGES, this.ctx.id.toString()) });
+        const memory = await openMemory(store, compress,
           { budget: Number(this.env.BUDGET), warn: s => {
             this.stats.warnings.push(s);
             // A failed save stops memory's log until the object restarts, which then logs the rest from Pi's transcript: restart now.

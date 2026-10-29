@@ -10,8 +10,9 @@ import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { NodeSqliteDatabase } from '@earendil-works/chord/sqlite/node';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from '@earendil-works/pi-ai/providers/faux';
-import { openMemory, type Compressor } from '../src/core/index.ts';
-import { optchat, SqliteStore, withCacheMarks } from '../src/durable/index.ts';
+import { openMemory, type Compressor, type Mime } from '../src/core/index.ts';
+import { MAX_IMAGE_BYTES, optchat, SqliteStore, withCacheMarks, type SqliteStoreOptions } from '../src/durable/index.ts';
+import { imageRef } from '../src/images.ts';
 import { removeDir } from './support.ts';
 
 type Sent = { role: string; content: unknown }[];
@@ -19,7 +20,8 @@ const text = (content: unknown) => typeof content === 'string' ? content
   : (content as { type: string; text?: string }[]).map(block => block.text ?? `[${block.type}]`).join('');
 
 /** One OptChat agent on Pi Durable, over one SQLite database as in a Durable Object: Pi's tables `pi_*`, memory's `optchat_*`. */
-async function open(file: string, replies: FauxResponseStep[], compress: Compressor = async ({ part }) => `line ${part.l}/${part.i}`, contextWindow?: number) {
+async function open(file: string, replies: FauxResponseStep[], compress: Compressor = async ({ part }) => `line ${part.l}/${part.i}`,
+  { contextWindow, images }: { contextWindow?: number } & SqliteStoreOptions = {}) {
   const sync = new DatabaseSync(file), db = new NodeSqliteDatabase(sync);
   const faux = fauxProvider(contextWindow ? { models: [{ id: 'small', contextWindow }] } : {}), models = createModels();
   models.setProvider(faux.provider);
@@ -28,7 +30,7 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
     sent.push(request.messages.map(m => ({ role: m.role, content: 'content' in m ? m.content : undefined })));
     return typeof reply === 'function' ? reply(request, ...rest) : reply;
   }));
-  const memory = await openMemory(new SqliteStore(db, (sql, ...params) => sync.prepare(sql).iterate(...params)), compress);
+  const memory = await openMemory(new SqliteStore(db, (sql, ...params) => sync.prepare(sql).iterate(...params), { images }), compress);
   const memoryExtension = optchat({ memory });
   const registry = createRegistry();
   registry.install(memoryExtension.extension);
@@ -52,7 +54,8 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
     await memory.settle();
   };
   const close = async () => { await harness.close(context); await memory.close(); await db.close(); };
-  return { memory, root, sent, ask, idle, close };
+  const keptInSqlite = () => sync.prepare('SELECT count(*) AS n FROM optchat_images').get()?.n;
+  return { memory, root, sent, ask, idle, close, keptInSqlite };
 }
 // A test may close a database and open it again, so the folders go once every test is done.
 const dirs: string[] = [];
@@ -191,7 +194,7 @@ test('a reset\'s note reaches the model once, and is in memory once, also after 
 
 test('after a save fails, requests still carry the view memory has, and a long run is sent whole', async () => {
   const agent = await open(file(), [...['one', 'two', 'three', 'four'].map(text => fauxAssistantMessage(`re ${text}`)),
-    read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('done')], undefined, 150);
+    read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('done')], undefined, { contextWindow: 150 });
   try {
     await agent.ask('one');
     const { store } = agent.memory;
@@ -207,6 +210,48 @@ test('after a save fails, requests still carry the view memory has, and a long r
     await agent.ask('read them all');
     assert.equal(agent.sent.at(-1)?.filter(m => m.role === 'toolResult').length, 6);
     assert.ok(agent.sent.every(request => !request.some(m => text(m.content).includes('this turn grew long'))));
+  } finally { await agent.close(); }
+});
+
+const photo = (size: number) => ({ type: 'image' as const, mimeType: 'image/jpeg', data: Buffer.alloc(size, 7).toString('base64') });
+/** Asks with a photo, then has the model zoom into that message; returns what the model got back from the zoom. */
+async function zoomIntoPhoto(agent: Awaited<ReturnType<typeof open>>, image: ReturnType<typeof photo>) {
+  await (await agent.root.submit({ type: 'input', content: [{ type: 'text', text: 'look' }, image] }, context)).wait(context);
+  await agent.idle();
+  await agent.ask('show it again');
+  const result = agent.sent.at(-1)?.find(m => m.role === 'toolResult');
+  return Array.isArray(result?.content) ? result.content.filter(block => block.type === 'image') : [];
+}
+const zoomThenAnswer = () => [fauxAssistantMessage('nice'), fauxAssistantMessage(fauxToolCall('zoom', { id: 0 }), { stopReason: 'toolUse' }), fauxAssistantMessage('here')];
+
+test('an image is named as in Pi, kept, named in the previous exchange, and zoom returns it', async () => {
+  const agent = await open(file(), zoomThenAnswer()), image = photo(1000);
+  try {
+    assert.deepEqual(await zoomIntoPhoto(agent, image), [image]);
+    assert.equal(agent.memory.text(0), `look\n${imageRef(image)}`);
+    assert.equal(agent.keptInSqlite(), 1);
+    // The next request's previous exchange names the image instead of sending it again.
+    assert.equal(text(agent.sent[1].find(m => m.role === 'user')?.content).split('</chat>\n\n')[1], `look\n${imageRef(image)}`);
+  } finally { await agent.close(); }
+});
+
+test('an image too big for a SQLite row is named but not kept', async () => {
+  const agent = await open(file(), zoomThenAnswer()), image = photo(MAX_IMAGE_BYTES + 1);
+  try {
+    assert.deepEqual(await zoomIntoPhoto(agent, image), []);
+    assert.equal(agent.memory.text(0), `look\n${imageRef(image)}`);
+    assert.equal(agent.keptInSqlite(), 0);
+  } finally { await agent.close(); }
+});
+
+test('with an images store, images go there whatever their size, and zoom reads them from it', async () => {
+  const kept = new Map<string, { mimeType: Mime; data: Uint8Array }>();
+  const images: SqliteStoreOptions['images'] = { putImage: async (name, mimeType, data) => void kept.set(name, { mimeType, data }), image: name => kept.get(name) };
+  const agent = await open(file(), zoomThenAnswer(), undefined, { images }), image = photo(MAX_IMAGE_BYTES + 1);
+  try {
+    assert.deepEqual(await zoomIntoPhoto(agent, image), [image]);
+    assert.deepEqual([...kept.keys()], [imageRef(image).slice(7, -1)]);
+    assert.equal(agent.keptInSqlite(), 0);
   } finally { await agent.close(); }
 });
 
@@ -230,7 +275,7 @@ test('cache marks go on an Anthropic request that carries the view; a request wi
 
 test('a run past the refresh share of the window moves its steps into memory and goes on with the task and its last step', async () => {
   // A window of 150 tokens: a refresh once the run passes 180 characters (30%), each step here about 55.
-  const agent = await open(file(), [read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('done')], undefined, 150);
+  const agent = await open(file(), [read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('done')], undefined, { contextWindow: 150 });
   try {
     await agent.ask('read them all');
     const runs = agent.sent.map(request => request.filter(m => m.role !== 'system').map(m => `${m.role}: ${text(m.content)}`));
@@ -245,7 +290,7 @@ test('a run past the refresh share of the window moves its steps into memory and
 });
 
 test('a refresh keeps the task of the run being answered, not an earlier run queued into the same context', async () => {
-  const agent = await open(file(), [fauxAssistantMessage('A done'), read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('B done')], undefined, 150);
+  const agent = await open(file(), [fauxAssistantMessage('A done'), read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('B done')], undefined, { contextWindow: 150 });
   try {
     const a = await agent.root.submit({ type: 'input', content: 'task A' }, context), b = await agent.root.submit({ type: 'input', content: 'task B' }, context);
     await a.wait(context); await b.wait(context); await agent.idle();
@@ -256,7 +301,7 @@ test('a refresh keeps the task of the run being answered, not an earlier run que
 });
 
 test('a run queued behind a refreshed one is sent without it: the earlier run is in memory whole', async () => {
-  const agent = await open(file(), [read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('A done'), fauxAssistantMessage('B done')], undefined, 150);
+  const agent = await open(file(), [read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('A done'), fauxAssistantMessage('B done')], undefined, { contextWindow: 150 });
   try {
     const a = await agent.root.submit({ type: 'input', content: 'task A' }, context), b = await agent.root.submit({ type: 'input', content: 'task B' }, context);
     await a.wait(context); await b.wait(context); await agent.idle();
@@ -272,12 +317,12 @@ test('reopened mid-run after a refresh, the run is sent from where the log says'
   // The sixth request, the one after the first refresh, answers only once aborted: the object is evicted while it waits. Reopened, it must
   // send the task and the two steps since the cut again, not cut once more.
   const evicted: FauxResponseStep = (_request, options) => new Promise((_resolve, reject) => options?.signal?.addEventListener('abort', () => reject(new Error('Evicted'))));
-  const before = await open(path, [read(0), read(1), read(2), read(3), read(4), evicted], undefined, 150);
+  const before = await open(path, [read(0), read(1), read(2), read(3), read(4), evicted], undefined, { contextWindow: 150 });
   await before.root.submit({ type: 'input', content: 'read them all' }, context);
   while (before.sent.length < 6) await new Promise(resolve => setTimeout(resolve, 5));
   const cutOff = before.sent[5].filter(m => m.role !== 'system').map(m => text(m.content));
   await before.close();
-  const after = await open(path, [fauxAssistantMessage('done')], undefined, 150);
+  const after = await open(path, [fauxAssistantMessage('done')], undefined, { contextWindow: 150 });
   try {
     await after.idle();
     assert.ok(cutOff[0].includes('this turn grew long') && cutOff.length === 5);
