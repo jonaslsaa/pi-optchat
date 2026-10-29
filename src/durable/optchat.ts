@@ -137,25 +137,30 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
       const i = sent ? own.findIndex(m => answer(m) === answer(sent)) : -1;
       return i > 0 ? [{ entry, i }] : [];
     });
-    /** Logs the run up to the answer at `entry`, rebuilding the view if that logged anything. False once a save failed: memory
-     * then lacks part of the run, so it is sent whole. */
-    const logThrough = async (entry: EntryRecord) => {
+    /** Logs Pi's entries before `end`, rebuilding the view if that logged anything. False once a save failed: memory then lacks
+     * part of the run, so it is sent whole. */
+    const logThrough = async (end: EntryId) => {
       const count = memory.root.length;
-      await logUpTo(conversation, entry.id, ctx);
+      await logUpTo(conversation, end, ctx);
       if (memory.saveError) return false;
       if (memory.root.length !== count) { await memory.settle(ctx.abortSignal); shared.view = memory.render(); }
       return true;
     };
-    // A refresh logs the run up to the answer it cuts at, so the log says where the run is sent from, after a restart too; a restart
-    // in the middle of that logging leaves the rest of it to do. Only a refresh logs past the context's head: the rest waits for its reset.
+    // Once a refresh has logged part of this context, an earlier run in it that has ended goes into memory whole, as the reset it
+    // missed would have done: a run queued behind a long one doesn't send it again.
+    const ended = task > 0 && logged > (head?.id ?? 0) && run[task - 1].role === 'assistant'
+      ? entries.find(entry => AssistantEntry.is(entry) && entry.model?.[0] && answer(entry.model[0]) === answer(run[task - 1])) : undefined;
+    const whole = ended && await logThrough(ended.id + 1 as EntryId) ? own : run;
+    // A refresh logs the run up to the answer it cuts at, so once any of its answers is in the log, the run is sent from the first
+    // answer after it, after a restart too; a restart in the middle of that logging leaves the rest of it to do.
     let keep = 0;
-    const kept = logged > (head?.id ?? 0) ? steps.find(s => s.entry.id > logged) : undefined;
-    if (kept && await logThrough(kept.entry)) keep = kept.i;
+    const kept = steps.some(s => s.entry.id <= logged) ? steps.find(s => s.entry.id > logged) : undefined;
+    if (kept && await logThrough(kept.entry.id)) keep = kept.i;
     const { model } = await conversation.agent(ctx);
     const refresh = !memory.saveError && refreshPoint(own, keep, refreshBudget(model && api.models.getModel(model.provider, model.modelId)?.contextWindow, refreshAt));
     const cut = refresh && steps.find(s => s.i === refresh.cut);
-    if (cut && await logThrough(cut.entry)) keep = cut.i;
-    const sent = keep ? refreshedRun(own, keep, TURN_REFRESHED) : run;
+    if (cut && await logThrough(cut.entry.id)) keep = cut.i;
+    const sent = keep ? refreshedRun(own, keep, TURN_REFRESHED) : whole;
     return { messages: withView([...messages.slice(0, at), ...turn.previous, ...sent], turn.view) };
   };
 

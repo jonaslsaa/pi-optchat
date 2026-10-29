@@ -255,6 +255,18 @@ test('a refresh keeps the task of the run being answered, not an earlier run que
   } finally { await agent.close(); }
 });
 
+test('a run queued behind a refreshed one is sent without it: the earlier run is in memory whole', async () => {
+  const agent = await open(file(), [read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('A done'), fauxAssistantMessage('B done')], undefined, 150);
+  try {
+    const a = await agent.root.submit({ type: 'input', content: 'task A' }, context), b = await agent.root.submit({ type: 'input', content: 'task B' }, context);
+    await a.wait(context); await b.wait(context); await agent.idle();
+    const first = agent.sent[7].filter(m => m.role !== 'system').map(m => text(m.content));
+    assert.equal(first.length, 1);
+    assert.match(first[0], /\|talk: A done\n<\/chat>\n\ntask B$/);
+    assert.deepEqual(agent.memory.root.map(e => e.kind), ['user', ...Array(6).fill(['tool', 'echo']).flat(), 'talk', 'user', 'talk']);
+  } finally { await agent.close(); }
+});
+
 test('reopened mid-run after a refresh, the run is sent from where the log says', async () => {
   const path = file();
   // The sixth request, the one after the first refresh, answers only once aborted: the object is evicted while it waits. Reopened, it must
