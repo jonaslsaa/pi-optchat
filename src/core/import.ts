@@ -67,7 +67,8 @@ export async function runImport({ plan, total, open, activate }: { plan: readonl
     // Close all writers before the switch. The previous memory stays intact.
     await memory.close();
     // A store that writes behind reports a failed write only here: switching would drop the messages it lost.
-    if (memory.saveError) throw new Error(`Import could not be saved: ${memory.saveError}; original memory remains intact.`);
+    if (memory.saveError !== undefined) throw new Error(`Import could not be saved: ${memory.saveError}; original memory remains intact.`);
+    signal.throwIfAborted();
     await activate();
   } finally { await memory.close(); }
 }
