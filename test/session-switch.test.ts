@@ -16,7 +16,7 @@ import { removeDir } from './support.ts';
 class OffscreenTerminal implements Terminal {
   start() {} stop() {} async drainInput() {} write(_data: string) {}
   get columns() { return 100; } get rows() { return 30; } get kittyProtocolActive() { return false; }
-  moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {}
+  moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {} setProgramStatus() {}
 }
 const until = async (predicate: () => boolean, what: string) => {
   for (let i = 0; i < 500 && !predicate(); i++) await new Promise(r => setTimeout(r, 10));
