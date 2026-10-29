@@ -242,13 +242,14 @@ test('a run past the refresh share of the window moves its steps into memory and
 
 test('reopened mid-run after a refresh, the run is sent from where the log says', async () => {
   const path = file();
-  // The sixth request, the one after the first refresh, never answers: the object is evicted while it waits. Reopened, it must
+  // The sixth request, the one after the first refresh, answers only once aborted: the object is evicted while it waits. Reopened, it must
   // send the task and the two steps since the cut again, not cut once more.
-  const before = await open(path, [read(0), read(1), read(2), read(3), read(4), () => new Promise(() => {})], undefined, 150);
+  const evicted: FauxResponseStep = (_request, options) => new Promise((_resolve, reject) => options?.signal?.addEventListener('abort', () => reject(new Error('Evicted'))));
+  const before = await open(path, [read(0), read(1), read(2), read(3), read(4), evicted], undefined, 150);
   await before.root.submit({ type: 'input', content: 'read them all' }, context);
   while (before.sent.length < 6) await new Promise(resolve => setTimeout(resolve, 5));
   const cutOff = before.sent[5].filter(m => m.role !== 'system').map(m => text(m.content));
-  await Promise.race([before.close(), new Promise(resolve => setTimeout(resolve, 500))]);
+  await before.close();
   const after = await open(path, [fauxAssistantMessage('done')], undefined, 150);
   try {
     await after.idle();
