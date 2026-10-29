@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { Memory } from '../src/memory.ts';
 import { bytes, openMemory, type Compressor, type Entry } from '../src/core/memory.ts';
 import type { Saved, Store } from '../src/core/store.ts';
+import type { Memory as CoreMemory } from '../src/core/memory.ts';
 import { localDay } from '../src/store.ts';
 import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
 import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate } from '../src/import/job.ts';
@@ -758,13 +759,14 @@ test('core builds an import in any store: a paused rebuild resumes from what the
   const native: Entry = { i: 0, kind: 'user', text: 'native later', size: 0, date: '2026-06-01T00:00:00.000Z' };
   const plan = planImport([native], [entry('a', date, 'large '.repeat(200)), entry('b', date, 'long '.repeat(200)), entry('a')], 'rebuild');
   assert.ok(plan); assert.equal(plan.kept, 0); assert.equal(plan.skipped, 1);
+  // The first summary pauses the import, and waits until the import closes the memory.
+  const pause = new AbortController();
   let stall = true;
-  const compress: Compressor = (input, signal) => stall ? new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })) : short(input, signal);
-  const switched: Awaited<ReturnType<typeof openMemory>>[] = [];
+  const compress: Compressor = (input, signal) => !stall ? short(input, signal)
+    : new Promise((_resolve, reject) => { signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }); pause.abort(); });
+  const switched: CoreMemory[] = [];
   const run = (signal: AbortSignal) => runCore({ plan: plan.entries, total: plan.entries.length, activate: async () => void switched.push(await openMemory(store, short)),
     open: () => openMemory(store, compress, { warn: () => {}, jobs: 1 }) }, signal);
-  // Not AbortSignal.timeout: its timer doesn't keep the event loop alive while the stalled import waits.
-  const pause = new AbortController(); setTimeout(() => pause.abort(), 50);
   await assert.rejects(run(pause.signal));
   assert.equal(switched.length, 0);
   assert.ok(saved.entries.length > 0 && saved.entries.length < plan.entries.length, 'paused part way');

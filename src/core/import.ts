@@ -24,8 +24,8 @@ export function deduplicate(existing: readonly ImportedEntry[], incoming: readon
 }
 
 /** Imported conversations remain contiguous; existing native history is grouped by user turn. */
-export function chronological<T extends ImportedEntry>(entries: readonly T[]) {
-  const groups = new Map<string, { date: string; entries: T[] }>();
+export function chronological(entries: readonly ImportedEntry[]) {
+  const groups = new Map<string, { date: string; entries: ImportedEntry[] }>();
   let native = 0;
   for (const entry of entries) {
     if (!entry.origin && entry.kind === 'user') native++;
@@ -48,11 +48,11 @@ export function planImport(existing: readonly Entry[], incoming: readonly Import
   return { mode, entries, kept: mode === 'append' ? existing.length : 0, added: added.length, skipped,
     inputBytes: (mode === 'rebuild' ? entries : added).reduce((n, e) => n + bytes(e.text), 0) };
 }
-export type ImportPlan = NonNullable<ReturnType<typeof planImport>>;
 
 /** Builds the staging memory `open` gives from `plan` (the saved plan's entries, as read back) and calls `activate` once its whole
  * tree is built and it is closed. It continues from what the memory already logged, so a paused or crashed import resumes, and it
- * refuses a plan that isn't `total` valid entries in order, or a memory that isn't a start of it, before writing anything. */
+ * refuses a plan that isn't `total` valid entries in order, or a memory that isn't a start of it, before writing anything.
+ * The live memory must take no messages from `planImport` until `activate`, or the switch drops them: queue them and log them after. */
 export async function runImport({ plan, total, open, activate }: { plan: readonly unknown[]; total: number;
   open: () => Promise<Memory>; activate: () => void | Promise<void> }, signal: AbortSignal) {
   // Every line must parse, and the plan must be whole and in order, so a damaged plan can't drop messages silently.
