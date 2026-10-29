@@ -57,6 +57,7 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
 // A test may close a database and open it again, so the folders go once every test is done.
 const dirs: string[] = [];
 after(() => dirs.forEach(removeDir));
+const read = (n: number) => fauxAssistantMessage(fauxToolCall('date', { id: n }), { stopReason: 'toolUse' });
 const file = () => { const dir = mkdtempSync(join(tmpdir(), 'optchat-durable-')); dirs.push(dir); return join(dir, 'agent.sqlite'); };
 
 test('each request is the view, the previous exchange and the current context; what a reset ended is in memory', async () => {
@@ -188,8 +189,9 @@ test('a reset\'s note reaches the model once, and is in memory once, also after 
   } finally { await after.close(); }
 });
 
-test('after a save fails, requests still carry the view memory has', async () => {
-  const agent = await open(file(), ['one', 'two', 'three', 'four'].map(text => fauxAssistantMessage(`re ${text}`)));
+test('after a save fails, requests still carry the view memory has, and a long run is sent whole', async () => {
+  const agent = await open(file(), [...['one', 'two', 'three', 'four'].map(text => fauxAssistantMessage(`re ${text}`)),
+    read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('done')], undefined, 150);
   try {
     await agent.ask('one');
     const { store } = agent.memory;
@@ -201,6 +203,10 @@ test('after a save fails, requests still carry the view memory has', async () =>
     await agent.ask('four');
     const [first] = agent.sent[3].filter(m => m.role === 'user').map(m => text(m.content));
     assert.match(first, /^<chat>\n[^]*\|user: two\n[^]*<\/chat>/);
+    // Past the refresh threshold, nothing is cut: memory couldn't keep the steps a refresh would drop.
+    await agent.ask('read them all');
+    assert.equal(agent.sent.at(-1)?.filter(m => m.role === 'toolResult').length, 6);
+    assert.ok(agent.sent.every(request => !request.some(m => text(m.content).includes('this turn grew long'))));
   } finally { await agent.close(); }
 });
 
@@ -221,8 +227,6 @@ test('cache marks go on an Anthropic request that carries the view; a request wi
   spy.streamSimple(model, request, own);
   assert.equal(given, own);
 });
-
-const read = (n: number) => fauxAssistantMessage(fauxToolCall('date', { id: n }), { stopReason: 'toolUse' });
 
 test('a run past the refresh share of the window moves its steps into memory and goes on with the task and its last step', async () => {
   // A window of 150 tokens: a refresh once the run passes 180 characters (30%), each step here about 55.

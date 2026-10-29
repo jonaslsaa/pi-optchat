@@ -123,18 +123,20 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
     if (at < 0) return undefined;
     // A tool result over 30K characters is sent as its head and tail, as in Pi.
     const run = messages.slice(at).map(boundedMessage), shared = turn;
-    // The run being answered starts at its task: the last of the user messages after the newest finished answer. An earlier run
-    // in this context, or a reset's note, comes before it; a refresh moves them into memory with the steps it cuts.
+    // `run` is the whole context, which can hold more than one run: inputs queued with no idle reset between them, or a reset's note
+    // first. The run being answered starts at its task, the last of the user messages after the newest finished answer; a refresh
+    // moves what comes before it into memory with the steps it cuts, and a steer before the cut too, as in Pi.
     let task = run.findLastIndex(endsRun) + 1;
     while (run[task + 1]?.role === 'user') task++;
     const own = run.slice(task);
-    /** Where an answer of the run is: Pi Durable's messages are copies of its entries', so an answer is found by its first tool
-     * call's id, or its timestamp without one. */
+    /** The run's answers and their entries. Pi Durable's messages are copies of its entries', so an answer is found by its first
+     * tool call's id, or its timestamp without one. */
     const answer = (m: Message) => m.role === 'assistant' ? m.content.find(c => c.type === 'toolCall')?.id ?? m.timestamp : undefined;
-    const step = (entry: EntryRecord) => {
+    const steps = entries.flatMap(entry => {
       const sent = AssistantEntry.is(entry) && entry.model?.[0];
-      return sent ? own.findIndex(m => answer(m) === answer(sent)) : -1;
-    };
+      const i = sent ? own.findIndex(m => answer(m) === answer(sent)) : -1;
+      return i > 0 ? [{ entry, i }] : [];
+    });
     /** Logs the run up to the answer at `entry`, rebuilding the view if that logged anything. False once a save failed: memory
      * then lacks part of the run, so it is sent whole. */
     const logThrough = async (entry: EntryRecord) => {
@@ -145,14 +147,14 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
       return true;
     };
     // A refresh logs the run up to the answer it cuts at, so the log says where the run is sent from, after a restart too; a restart
-    // in the middle of that logging leaves the rest of it to do.
+    // in the middle of that logging leaves the rest of it to do. Only a refresh logs past the context's head: the rest waits for its reset.
     let keep = 0;
-    const kept = logged > (head?.id ?? 0) ? entries.find(entry => entry.id > logged && step(entry) > 0) : undefined;
-    if (kept && await logThrough(kept)) keep = step(kept);
+    const kept = logged > (head?.id ?? 0) ? steps.find(s => s.entry.id > logged) : undefined;
+    if (kept && await logThrough(kept.entry)) keep = kept.i;
     const { model } = await conversation.agent(ctx);
     const refresh = !memory.saveError && refreshPoint(own, keep, refreshBudget(model && api.models.getModel(model.provider, model.modelId)?.contextWindow, refreshAt));
-    const cut = refresh && entries.find(entry => step(entry) === refresh.cut);
-    if (refresh && cut && await logThrough(cut)) keep = refresh.cut;
+    const cut = refresh && steps.find(s => s.i === refresh.cut);
+    if (cut && await logThrough(cut.entry)) keep = cut.i;
     const sent = keep ? refreshedRun(own, keep, TURN_REFRESHED) : run;
     return { messages: withView([...messages.slice(0, at), ...turn.previous, ...sent], turn.view) };
   };
