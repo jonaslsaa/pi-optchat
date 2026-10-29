@@ -125,12 +125,15 @@ test('once a write-behind append fails, nothing more is written, summary nodes i
   const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   await wait(30); landed.length = 0;
   // Long enough to need the compactor, so its node is written only after the failed append has settled and the queue is empty.
+  assert.equal(memory.saveError, undefined);
   failing(true); memory.append('user', 'lost '.repeat(200)); memory.append('user', 'queued behind it');
   await wait(60);
+  assert.equal(memory.saveError, 'offline');
   assert.match(warnings.join('\n'), /Memory could not be saved: offline/);
   failing(false); release();
   await wait(60);
   assert.deepEqual(landed, [], 'no message, node or view is written after the failed append');
   assert.throws(() => memory.append('user', 'more'), /Memory could not be saved: offline/);
   await memory.close();
+  assert.equal(memory.saveError, 'offline', 'close resolves, and the failure stays readable after it');
 });

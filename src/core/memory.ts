@@ -131,6 +131,9 @@ export class Memory {
   private writing?: Promise<void>;
   private failed?: string;
   readonly store: Store;
+  /** Why a message's append failed in the store, if one did: from then on nothing more is saved, yet `settle` and `close` still
+   * resolve, so a host whose store writes behind checks this to learn its log lost its tail. */
+  get saveError() { return this.failed; }
   lastError?: string;
 
   /** `saved` is what `store.load()` gave (see `openMemory`). `jobs`: summaries built at once, and how many unbuilt lines a new
