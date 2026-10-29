@@ -1,0 +1,15 @@
+{
+  "name": "optchat-durable-object-example",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  // pi-ai's Anthropic SDK imports node:fs and child_process; OptChat itself needs no Node.
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": { "bindings": [{ "name": "AGENT", "class_name": "Agent" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Agent"] }],
+  // OptChat's source lives two levels up, beside its own node_modules: one copy of each package for the whole Worker.
+  "alias": {
+    "@earendil-works/pi-durable": "./node_modules/@earendil-works/pi-durable",
+    "typebox": "./node_modules/typebox/build/index.mjs"
+  },
+  "vars": { "MODEL": "claude-sonnet-5-5", "COMPACTOR": "claude-sonnet-5-5", "BUDGET": "16000" }
+}

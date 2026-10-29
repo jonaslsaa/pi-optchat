@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "types": ["@cloudflare/workers-types"],
+    // ../../src resolves packages from the repo's node_modules; the Worker bundles this folder's, as wrangler.jsonc's aliases say.
+    "paths": {
+      "@earendil-works/pi-ai": ["./node_modules/@earendil-works/pi-ai"],
+      "@earendil-works/pi-durable": ["./node_modules/@earendil-works/pi-durable"],
+      "@earendil-works/pi-durable/*": ["./node_modules/@earendil-works/pi-durable/dist/*"],
+      "typebox": ["./node_modules/typebox"]
+    }
+  },
+  "include": ["src"]
+}

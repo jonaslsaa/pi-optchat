@@ -213,7 +213,7 @@ Profile data lives in `~/.optchat/profiles/<name>/` (override the root with `OPT
 
 Git checkpoints and the pluggable `Store` seam (for memory on another machine): [docs/storage.md](docs/storage.md).
 
-OptChat's memory also runs outside Pi, for example in a Cloudflare Durable Object: `import ... from 'pi-optchat/core'`. See [docs/core.md](docs/core.md).
+OptChat's memory also runs outside Pi, for example in a Cloudflare Durable Object: `import ... from 'pi-optchat/core'`. See [docs/core.md](docs/core.md); `pi-optchat/durable` wires it into Pi Durable, see [docs/durable.md](docs/durable.md).
 
 ## Windows
 
