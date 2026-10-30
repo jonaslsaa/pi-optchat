@@ -9,8 +9,8 @@ import { createRegistry, defineExtension, GenerationTask, Harness, hook, ResetEn
 import { DurableObjectSqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite/cloudflare';
 import { PiHarness } from 'agents/harness/pi';
 import { Lifecycle } from 'agents/lifecycle';
-import { createCompressor, isMime, openMemory, type ImageStore, type Kind, type Memory } from '../../../src/core/index.ts';
-import { optchat, SqliteStore, withCacheMarks } from '../../../src/durable/index.ts';
+import { createCompressor, isMime, openMemory, type ImageStore, type ImportedEntry, type ImportMode, type Kind, type Memory } from '../../../src/core/index.ts';
+import { optchat, optchatImport, SqliteStore, withCacheMarks, type Read, type SqliteStoreOptions } from '../../../src/durable/index.ts';
 
 type PiContext = Parameters<Harness['inspect']>[0];
 interface Env { AGENT: DurableObjectNamespace<Agent>; IMAGES: R2Bucket; ANTHROPIC_OAUTH_TOKEN: string; MODEL: string; COMPACTOR: string; BUDGET: string }
@@ -33,7 +33,7 @@ export class Agent extends DurableObject<Env> {
     fileExists: async () => false,
   } });
   /** Opened with Pi the first time, and kept when PiHarness reopens Pi. */
-  private optchat?: { memory: Memory; extension: ReturnType<typeof optchat>; stop?: () => void; context?: PiContext };
+  private optchat?: { memory: Memory; extension: ReturnType<typeof optchat>; importer: ReturnType<typeof optchatImport>; stop?: () => void; context?: PiContext };
   /** Since this object started: summary calls, and each main-model request's usage. */
   private readonly stats = { started: Date.now(), summaries: [] as Usage[], requests: [] as Usage[], warnings: [] as string[] };
 
@@ -48,16 +48,21 @@ export class Agent extends DurableObject<Env> {
           onUsage: reply => { this.stats.summaries.push(reply.usage); this.saveBoot(); },
         });
         // The adapter shares Pi's queue on this storage, so OptChat's writes never interleave with a Pi transaction.
-        const store = new SqliteStore(new DurableObjectSqliteDatabase(this.ctx.storage), (sql, ...params) => this.ctx.storage.sql.exec(sql, ...params),
-          { images: r2Images(this.env.IMAGES, this.ctx.id.toString()) });
-        const memory = await openMemory(store, compress,
+        const db = new DurableObjectSqliteDatabase(this.ctx.storage), read: Read = (sql, ...params) => this.ctx.storage.sql.exec(sql, ...params);
+        const options: SqliteStoreOptions = { images: r2Images(this.env.IMAGES, this.ctx.id.toString()) };
+        const memory = await openMemory(new SqliteStore(db, read, options), compress,
           { budget: Number(this.env.BUDGET), warn: s => {
             this.stats.warnings.push(s);
             // A failed save stops memory's log until the object restarts, which then logs the rest from Pi's transcript: restart now.
             if (this.optchat?.memory.saveError) this.ctx.abort(s);
           } });
-        this.optchat = { memory, extension: optchat({ memory }) };
+        // An import builds beside the live memory with fewer summaries at once, and restarts the object once it is live.
+        const importer = optchatImport({ memory, db, read,
+          open: generation => openMemory(new SqliteStore(db, read, { ...options, generation }), compress, { budget: Number(this.env.BUDGET), jobs: 4 }),
+          onActivated: () => this.ctx.abort('OptChat import is live') });
+        this.optchat = { memory, extension: optchat({ memory }), importer };
         this.registry.install(this.optchat.extension.extension);
+        this.registry.install(importer.extension);
         this.registry.install(defineExtension({
           name: 'board',
           sections: [section('persona', () => 'You are the assistant of a Norwegian housing board. Answer briefly.', { tag: false })],
@@ -70,7 +75,8 @@ export class Agent extends DurableObject<Env> {
         onReport: (error, info) => { this.stats.warnings.push(`${info.type}: ${error instanceof Error ? error.message : String(error)}`); },
       }, context);
       this.optchat.stop?.();
-      this.optchat.stop = this.optchat.extension.attach(pi, context);
+      const stops = [this.optchat.extension.attach(pi, context), this.optchat.importer.attach(pi, context)];
+      this.optchat.stop = () => stops.forEach(stop => stop());
       this.optchat.context = context;
       return pi;
     },
@@ -88,6 +94,12 @@ export class Agent extends DurableObject<Env> {
         const messages = await request.json<{ kind: Kind; text: string; date: string }[]>();
         for (const { kind, text, date } of messages) memory.append(kind, text, date);
         return Response.json({ entries: memory.root.length });
+      }
+      // Old history imported properly: `?mode=append` or `rebuild`. The chat goes on meanwhile; `/import` (GET) shows the pending one.
+      case '/import': {
+        if (request.method !== 'POST') return Response.json(await this.optchat!.importer.pending() ?? null);
+        const mode: ImportMode = url.searchParams.get('mode') === 'append' ? 'append' : 'rebuild';
+        return Response.json(await this.optchat!.importer.start(await request.json<ImportedEntry[]>(), mode) ?? null);
       }
       case '/prompt': {
         const { text } = await request.json<{ text: string }>();

@@ -10,4 +10,4 @@ export { boundedMessage, completedExchange, logMessage, refreshBudget, refreshed
 export { memoryTools, searchTool } from './tools.ts';
 export { decode, isImage, loadImages } from './images.ts';
 export type { ImageContent } from '@earendil-works/pi-ai';
-export { deduplicate, planImport, runImport, type ImportedEntry, type ImportMode } from './import.ts';
+export { chronological, deduplicate, planImport, runImport, type ImportedEntry, type ImportMode } from './import.ts';
