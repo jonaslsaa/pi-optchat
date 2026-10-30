@@ -73,6 +73,8 @@ export default function optchat(pi: ExtensionAPI) {
   let view: string | undefined;
   let prompt = '';
   let runStarted = false;
+  let customInput: AgentMessage | undefined;
+  let inputMessage = false;
   let fault: string | undefined;
   /** Reports not yet in memory. `count`: how many subagent reports the text joins. `batch`: held while the rest of that spawn runs, not sent yet.
    * `steered`: last sent into a running turn, where Esc or a dequeue can clear it from Pi's queue unseen. */
@@ -205,6 +207,7 @@ export default function optchat(pi: ExtensionAPI) {
     } finally {
       await old.memory.close(); await old.unlock(); active = undefined;
       run = []; previous = []; logged = 0; keep = 0; view = undefined; runStarted = false; receipts.clear(); prompt = ''; idle = () => true;
+      customInput = undefined; inputMessage = false;
       untitle?.(); untitle = undefined; title.clear(); working = false;
     }
   };
@@ -407,6 +410,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (!active) return; // Plain Pi run: leave Pi's own prompt untouched.
     const a = active;
     flush(); run = []; logged = 0; keep = 0; view = undefined; runStarted = true;
+    customInput = event.messageType === 'custom' ? event.message : undefined; inputMessage = false;
     previous = a.config.previousExchange ? previousExchange(ctx.sessionManager.getBranch(), a.config.previousExchangeKB * 1000) : [];
     pi.appendEntry(RUN_BOUNDARY, { state: 'start' });
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
@@ -416,11 +420,16 @@ export default function optchat(pi: ExtensionAPI) {
     refreshContextFiles(event.systemPromptOptions);
     prompt = event.systemPrompt;
   });
+  pi.on('message_start', ({ message }) => {
+    // Capture identity before another extension's message_end handler can replace the message.
+    inputMessage = message === customInput;
+    if (inputMessage) customInput = undefined;
+  });
   const DUPLICATE_REPORT = '(duplicate report, already delivered)';
   pi.on('message_end', async (event, ctx) => {
     if (!active || !runStarted) return;
     const bounded = boundedMessage(event.message);
-    const message = asUser(bounded);
+    const message = asUser(bounded, inputMessage); inputMessage = false;
     // Before the message is logged, so the image its text names is already there for zoom; zoom's own images are kept already.
     if (message.role === 'user' || message.role === 'toolResult' && message.toolName !== 'zoom') {
       try { await saveImages(active.memory.store, message.content); }
@@ -447,6 +456,9 @@ export default function optchat(pi: ExtensionAPI) {
         }
       } catch (error) { ctx.abort(); fault = errorText(error); ctx.ui.notify(fault, 'error'); }
     }
+    // Pi persists the custom message after message_end. Keep its input provenance for resume/replay,
+    // independently of the originating extension's UI visibility and opaque details.
+    if (bounded.role === 'custom' && !bounded.display && message.role === 'user') pi.appendEntry(RUN_BOUNDARY, { state: 'input' });
     run.push(message);
     if (view !== undefined) {
       try { flush(); } catch (error) { ctx.abort(); fault = errorText(error); ctx.ui.notify(fault, 'error'); }
@@ -513,7 +525,7 @@ export default function optchat(pi: ExtensionAPI) {
     // A report steered into this run that never reached it (Esc or a dequeue cleared Pi's queue) is sent again, now as its own turn.
     if (active && !fault && !stopping) for (const r of reports) if (r.steered && !r.batch) sendReport(r);
     if (runStarted) pi.appendEntry(RUN_BOUNDARY, { state: 'end' });
-    runStarted = false; status(ctx);
+    runStarted = false; customInput = undefined; inputMessage = false; status(ctx);
     working = false; showTitle(ctx);
     if (active) {
       const dir = active.dir;
