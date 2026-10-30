@@ -15,7 +15,7 @@ An import builds a new memory generation (`memories/<id>/`) and switches `active
 Memory reaches disk through one seam, `Store` in `src/core/store.ts` (Pi's `FileStore` is in `src/store.ts`): the log, summary nodes, saved view and images, which is what would travel between machines. The saved view (`view.json`) holds the chat's view and the compactions' view, each with its batch state; an older one without the compactions' view refolds it from the chat's, once.
 
 - Runs, recovery journals, imports and their pointer, usage, settings and `AGENTS.md` stay local files.
-- `FileStore` (the layout in the README) is the only store today. Another, such as Postgres, would implement the same few operations.
+- Pi uses `FileStore` (the layout in the README). `pi-optchat/durable` has `SqliteStore`, for a Durable Object's SQLite ([durable.md](durable.md)). Another, such as Postgres, would implement the same few operations.
 - Its lease (take, heartbeat, release) is optional: without one, OptChat keeps its machine-local profile lock.
 - Import records (`imports/*.json`, the staging generations and the `active-memory.json` pointer) are per machine, so a second machine with the same `~/.claude` or Codex history on disk may offer those sessions for import again.
 
