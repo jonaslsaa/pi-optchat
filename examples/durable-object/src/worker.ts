@@ -9,15 +9,16 @@ import { createRegistry, defineExtension, GenerationTask, Harness, hook, ResetEn
 import { DurableObjectSqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite/cloudflare';
 import { PiHarness } from 'agents/harness/pi';
 import { Lifecycle } from 'agents/lifecycle';
-import { createCompressor, isMime, openMemory, type Kind, type Memory } from '../../../src/core/index.ts';
-import { optchat, SqliteStore, withCacheMarks, type SqliteStoreOptions } from '../../../src/durable/index.ts';
+import { createCompressor, isMime, openMemory, type ImageStore, type Kind, type Memory } from '../../../src/core/index.ts';
+import { optchat, SqliteStore, withCacheMarks } from '../../../src/durable/index.ts';
 
 type PiContext = Parameters<Harness['inspect']>[0];
 interface Env { AGENT: DurableObjectNamespace<Agent>; IMAGES: R2Bucket; ANTHROPIC_OAUTH_TOKEN: string; MODEL: string; COMPACTOR: string; BUDGET: string }
 type Usage = AssistantMessage['usage'];
 
-/** Memory's images in R2 instead of the object's SQLite, which caps a row at 2 MB; each object keeps its own under `prefix`. */
-const r2Images = (bucket: R2Bucket, prefix: string): SqliteStoreOptions['images'] => ({
+/** Memory's images in R2, keeping large binary data out of the object's SQLite (its row size limit and storage cost); each object
+ * keeps its own under `prefix`. */
+const r2Images = (bucket: R2Bucket, prefix: string): ImageStore => ({
   putImage: async (name, mimeType, data) => { await bucket.put(`${prefix}/${name}`, data, { httpMetadata: { contentType: mimeType } }); },
   image: async name => {
     const object = await bucket.get(`${prefix}/${name}`), mimeType = object?.httpMetadata?.contentType;

@@ -1,6 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,8 +11,8 @@ import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { NodeSqliteDatabase } from '@earendil-works/chord/sqlite/node';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from '@earendil-works/pi-ai/providers/faux';
-import { openMemory, type Compressor, type Mime } from '../src/core/index.ts';
-import { MAX_IMAGE_BYTES, optchat, SqliteStore, withCacheMarks, type SqliteStoreOptions } from '../src/durable/index.ts';
+import { openMemory, type Compressor, type ImageStore, type Mime } from '../src/core/index.ts';
+import { optchat, SqliteStore, withCacheMarks, type SqliteStoreOptions } from '../src/durable/index.ts';
 import { imageRef } from '../src/images.ts';
 import { removeDir } from './support.ts';
 
@@ -213,10 +214,10 @@ test('after a save fails, requests still carry the view memory has, and a long r
   } finally { await agent.close(); }
 });
 
-const photo = (size: number) => ({ type: 'image' as const, mimeType: 'image/jpeg', data: Buffer.alloc(size, 7).toString('base64') });
+const photo = { type: 'image' as const, mimeType: 'image/jpeg', data: Buffer.alloc(1000, 7).toString('base64') };
 /** Asks with a photo, then has the model zoom into that message; returns what the model got back from the zoom. */
-async function zoomIntoPhoto(agent: Awaited<ReturnType<typeof open>>, image: ReturnType<typeof photo>) {
-  await (await agent.root.submit({ type: 'input', content: [{ type: 'text', text: 'look' }, image] }, context)).wait(context);
+async function zoomIntoPhoto(agent: Awaited<ReturnType<typeof open>>) {
+  await (await agent.root.submit({ type: 'input', content: [{ type: 'text', text: 'look' }, photo] }, context)).wait(context);
   await agent.idle();
   await agent.ask('show it again');
   const result = agent.sent.at(-1)?.find(m => m.role === 'toolResult');
@@ -225,32 +226,23 @@ async function zoomIntoPhoto(agent: Awaited<ReturnType<typeof open>>, image: Ret
 const zoomThenAnswer = () => [fauxAssistantMessage('nice'), fauxAssistantMessage(fauxToolCall('zoom', { id: 0 }), { stopReason: 'toolUse' }), fauxAssistantMessage('here')];
 
 test('an image is named as in Pi, kept, named in the previous exchange, and zoom returns it', async () => {
-  const agent = await open(file(), zoomThenAnswer()), image = photo(1000);
+  const agent = await open(file(), zoomThenAnswer());
   try {
-    assert.deepEqual(await zoomIntoPhoto(agent, image), [image]);
-    assert.equal(agent.memory.text(0), `look\n${imageRef(image)}`);
+    assert.deepEqual(await zoomIntoPhoto(agent), [photo]);
+    assert.equal(agent.memory.text(0), `look\n${imageRef(photo)}`);
     assert.equal(agent.keptInSqlite(), 1);
     // The next request's previous exchange names the image instead of sending it again.
-    assert.equal(text(agent.sent[1].find(m => m.role === 'user')?.content).split('</chat>\n\n')[1], `look\n${imageRef(image)}`);
+    assert.equal(text(agent.sent[1].find(m => m.role === 'user')?.content).split('</chat>\n\n')[1], `look\n${imageRef(photo)}`);
   } finally { await agent.close(); }
 });
 
-test('an image too big for a SQLite row is named but not kept', async () => {
-  const agent = await open(file(), zoomThenAnswer()), image = photo(MAX_IMAGE_BYTES + 1);
-  try {
-    assert.deepEqual(await zoomIntoPhoto(agent, image), []);
-    assert.equal(agent.memory.text(0), `look\n${imageRef(image)}`);
-    assert.equal(agent.keptInSqlite(), 0);
-  } finally { await agent.close(); }
-});
-
-test('with an images store, images go there whatever their size, and zoom reads them from it', async () => {
+test('with an images store, images go there, and zoom reads them from it', async () => {
   const kept = new Map<string, { mimeType: Mime; data: Uint8Array }>();
-  const images: SqliteStoreOptions['images'] = { putImage: async (name, mimeType, data) => void kept.set(name, { mimeType, data }), image: name => kept.get(name) };
-  const agent = await open(file(), zoomThenAnswer(), undefined, { images }), image = photo(MAX_IMAGE_BYTES + 1);
+  const images: ImageStore = { putImage: async (name, mimeType, data) => void kept.set(name, { mimeType, data }), image: name => kept.get(name) };
+  const agent = await open(file(), zoomThenAnswer(), undefined, { images });
   try {
-    assert.deepEqual(await zoomIntoPhoto(agent, image), [image]);
-    assert.deepEqual([...kept.keys()], [imageRef(image).slice(7, -1)]);
+    assert.deepEqual(await zoomIntoPhoto(agent), [photo]);
+    assert.deepEqual([...kept.keys()], [createHash('sha256').update(photo.data).digest('hex').slice(0, 16)]);
     assert.equal(agent.keptInSqlite(), 0);
   } finally { await agent.close(); }
 });

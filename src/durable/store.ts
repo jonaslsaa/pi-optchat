@@ -1,14 +1,13 @@
 import type { SqliteDatabase, SqliteValue } from '@earendil-works/pi-durable/storage/sqlite';
-import { isMime, type Entry, type Mime, type Part, type Saved, type Store, type Summary } from '../core/index.ts';
+import { isMime, type Entry, type ImageStore, type Mime, type Part, type Saved, type Store, type Summary } from '../core/index.ts';
 
 /** A Durable Object's SQLite refuses a row over 2 MB. A message's text is stored as JSON in parts of at most this many UTF-16 units,
  * so a part is at most ~1.5 MB of UTF-8 however the text is written, and a huge pasted email still fits. */
 const PART = 512 * 1024;
-/** An image kept in `optchat_images` is one row, so a bigger one is not kept: its message names it, and zoom returns no image. */
-export const MAX_IMAGE_BYTES = 1_900_000;
 export interface SqliteStoreOptions {
-  /** Where images are kept instead of `optchat_images`, such as an R2 bucket for photos over a row's 2 MB. */
-  images?: Pick<Store, 'putImage' | 'image'>;
+  /** Where images are kept instead of `optchat_images`, such as an R2 bucket that keeps large binary data out of the database
+   * (its row size limit and storage cost). */
+  images?: ImageStore;
 }
 
 const TABLES = `CREATE TABLE IF NOT EXISTS optchat_log (i INTEGER NOT NULL, part INTEGER NOT NULL, meta TEXT, text TEXT NOT NULL, PRIMARY KEY (i, part));
@@ -44,7 +43,7 @@ function texts(rows: Iterable<Record<string, unknown>>, what: string) {
  * `ctx.storage` (direct `ctx.storage.sql` writes could be rolled back with a Pi transaction). `read` reads texts from the same
  * database synchronously; it only reads rows whose writes have finished, so it needs no queue. Its tables are `optchat_*`, beside
  * Pi's `pi_*`. Memory loads only metadata and node sizes; texts stay here. Messages are split so no row passes a Durable Object's
- * 2 MB limit; images go to `images` when given, otherwise to `optchat_images` up to MAX_IMAGE_BYTES each. */
+ * 2 MB limit; images go to `images` when given, otherwise to `optchat_images`, one row each. */
 export class SqliteStore implements Store {
   constructor(private readonly db: SqliteDatabase, private readonly read: Read, private readonly options: SqliteStoreOptions = {}) {}
   async load(): Promise<Saved> {
@@ -78,7 +77,6 @@ export class SqliteStore implements Store {
   }
   async putImage(name: string, mimeType: Mime, data: Uint8Array) {
     if (this.options.images) return this.options.images.putImage(name, mimeType, data);
-    if (data.length > MAX_IMAGE_BYTES) return;
     await this.db.run('INSERT OR REPLACE INTO optchat_images (name, mime, data) VALUES (?, ?, ?)', name, mimeType, data);
   }
   async image(name: string) {
