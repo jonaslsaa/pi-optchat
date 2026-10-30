@@ -535,6 +535,16 @@ test('a discard that overlaps another stops only the import it saw', async () =>
   } finally { await agent.close(); }
 });
 
+test('a generation is never handed out twice, even after a discard before it wrote anything', async () => {
+  const agent = await open(file(), []);
+  try {
+    const tables = importTables(agent.db, agent.query), plan = [{ ...old(0), i: 0 }];
+    const first = await tables.stage(0, 'rebuild', plan, 0);
+    await tables.discard(first.generation);
+    assert.equal((await tables.stage(0, 'rebuild', plan, 0)).generation, first.generation + 1);
+  } finally { await agent.close(); }
+});
+
 test('a discarded import leaves memory as it was; a second import or one after a failed save is refused', async () => {
   const path = file(), summaries = recording();
   const before = await open(path, [fauxAssistantMessage('one')], undefined, { importing: summaries.compress });

@@ -14,12 +14,13 @@ export interface SqliteStoreOptions {
 }
 
 /** Log, tree and view rows carry their generation `g`: an import builds a new one beside the live one. `optchat_state` names the
- * live one and the pending import's (`target`, NULL when none), whose planned log is in `optchat_plan`. Images are shared. */
+ * live one, the pending import's (`target`, NULL when none) and the last one handed out; the planned log is in `optchat_plan`.
+ * Images are shared. */
 const TABLES = `CREATE TABLE IF NOT EXISTS optchat_log (g INTEGER NOT NULL, i INTEGER NOT NULL, part INTEGER NOT NULL, meta TEXT, text TEXT NOT NULL, PRIMARY KEY (g, i, part));
 CREATE TABLE IF NOT EXISTS optchat_tree (g INTEGER NOT NULL, l INTEGER NOT NULL, i INTEGER NOT NULL, size INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY (g, l, i));
 CREATE TABLE IF NOT EXISTS optchat_view (g INTEGER PRIMARY KEY, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS optchat_images (name TEXT PRIMARY KEY, mime TEXT NOT NULL, data BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS optchat_state (id INTEGER PRIMARY KEY CHECK (id = 0), live INTEGER NOT NULL, target INTEGER, mode TEXT, total INTEGER);
+CREATE TABLE IF NOT EXISTS optchat_state (id INTEGER PRIMARY KEY CHECK (id = 0), live INTEGER NOT NULL, last INTEGER NOT NULL DEFAULT 0, target INTEGER, mode TEXT, total INTEGER);
 CREATE TABLE IF NOT EXISTS optchat_plan (i INTEGER NOT NULL, part INTEGER NOT NULL, meta TEXT, text TEXT NOT NULL, PRIMARY KEY (i, part));
 INSERT OR IGNORE INTO optchat_state (id, live) VALUES (0, 0);`;
 
@@ -117,16 +118,14 @@ export function importTables(db: SqliteDatabase, read: Read) {
   };
   return {
     state: () => state(),
-    /** Saves the plan, `entries` in order, made from generation `from`, and makes it the pending import of a new generation, numbered
-     * past any rows left, so none are reused. Append's new generation starts with the live one's first `kept` messages, the nodes
+    /** Saves the plan, `entries` in order, made from generation `from`, and makes it the pending import of a new generation. A
+     * generation is never handed out twice, so a late call about a discarded one can't touch the next. Append's new generation starts with the live one's first `kept` messages, the nodes
      * over them, and its view. Refused unless `from` is still live: an import went live since. */
     stage: (from: number, mode: ImportMode, entries: Iterable<Entry>, kept: number) => db.transaction(async tx => {
       const { live, job } = await state(tx);
       if (job) throw new Error('An import is pending: let it finish, or discard it.');
       if (live !== from) throw new Error('An import went live: restart before the next one.');
-      const top = await tx.get<{ g: number }>(`SELECT MAX(g) AS g FROM (SELECT live AS g FROM optchat_state UNION ALL SELECT MAX(g) FROM optchat_log
-        UNION ALL SELECT MAX(g) FROM optchat_tree UNION ALL SELECT MAX(g) FROM optchat_view)`);
-      const generation = (top?.g ?? live) + 1;
+      const generation = ((await tx.get<{ last: number }>('SELECT last FROM optchat_state'))?.last ?? live) + 1;
       await tx.run('DELETE FROM optchat_plan');
       let total = 0;
       for (const entry of entries) { total++; for (const row of rows(entry)) await tx.run('INSERT INTO optchat_plan (i, part, meta, text) VALUES (?, ?, ?, ?)', entry.i, ...row); }
@@ -138,7 +137,7 @@ export function importTables(db: SqliteDatabase, read: Read) {
           WHERE g = ? AND ((i + 1) << l) <= (SELECT COUNT(*) FROM optchat_log WHERE g = ? AND part = 0)`, generation, live, generation);
         await tx.run('INSERT INTO optchat_view (g, json) SELECT ?, json FROM optchat_view WHERE g = ?', generation, live);
       }
-      await tx.run('UPDATE optchat_state SET target = ?, mode = ?, total = ?', generation, mode, total);
+      await tx.run('UPDATE optchat_state SET last = ?, target = ?, mode = ?, total = ?', generation, generation, mode, total);
       return { generation, mode, total };
     }),
     /** Planned message `i`, as saved; validated where it is used. */
