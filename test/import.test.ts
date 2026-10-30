@@ -664,6 +664,13 @@ test('chronological rebuild keeps imported conversations and native turns togeth
   assert.deepEqual(chronological([native, first, later]).map(e => e.text), [first.text, later.text, native.text]);
 });
 
+test('chronological rebuild keeps an imported message without an origin out of native turns', () => {
+  const turn = (text: string, at: string): ImportedEntry[] => [{ kind: 'user', text, date: at }, { kind: 'talk', text: `re ${text}`, date: at }];
+  const bare: ImportedEntry = { kind: 'talk', text: 'old reply', date, receipt: 'import:bare' };
+  const natives = [...turn('one', '2026-06-01T00:00:00.000Z'), ...turn('two', '2026-07-01T00:00:00.000Z')];
+  assert.deepEqual(chronological([...natives, bare]).map(e => e.text), ['old reply', 'one', 're one', 'two', 're two']);
+});
+
 test('a failed progress dialog cancels and joins its worker before returning', async () => {
   const dir = temp(), old = new Memory(dir, short); await old.close();
   try {
@@ -766,7 +773,7 @@ test('core builds an import in any store: a paused rebuild resumes from what the
   const compress: Compressor = (input, signal) => !stall ? short(input, signal)
     : new Promise((_resolve, reject) => { signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }); pause.abort(); });
   const switched: CoreMemory[] = [];
-  const run = (signal: AbortSignal) => runCore({ plan: plan.entries, total: plan.entries.length, activate: async () => void switched.push(await openMemory(store, short)),
+  const run = (signal: AbortSignal) => runCore({ entry: i => plan.entries[i], total: plan.entries.length, activate: async () => void switched.push(await openMemory(store, short)),
     open: () => openMemory(store, compress, { warn: () => {}, jobs: 1 }) }, signal);
   await assert.rejects(run(pause.signal));
   assert.equal(switched.length, 0);
@@ -778,6 +785,14 @@ test('core builds an import in any store: a paused rebuild resumes from what the
   assert.equal(switched[0].pending, 0);
 });
 
+test('core import refuses a plan length that is not a count', async () => {
+  let opened = false;
+  await assert.rejects(runCore({ entry: () => undefined, total: NaN, open: async () => { opened = true; return openMemory({ load: () => ({ entries: [], tree: [] }),
+    text: () => '', summary: () => '', append: () => undefined, appendNode: () => undefined, saveView: () => undefined, putImage: () => undefined, image: () => undefined }, short); },
+    activate: () => assert.fail('switched') }, AbortSignal.timeout(5000)), /invalid/);
+  assert.equal(opened, false);
+});
+
 test('core import does not switch to a staging log whose last write failed in a store that writes behind', async () => {
   const saved = { entries: [] as Entry[], tree: [] as Summary[], view: undefined as string | undefined };
   const store: Store = { load: () => structuredClone(saved), appendNode: n => void saved.tree.push(n), saveView: view => void (saved.view = view),
@@ -785,7 +800,7 @@ test('core import does not switch to a staging log whose last write failed in a 
     append: async e => { if (e.text === 'Imported b') throw new Error('offline'); saved.entries.push(e); }, putImage: () => undefined, image: () => undefined };
   const plan = planImport([], [entry('a'), entry('b')], 'rebuild'); assert.ok(plan);
   let switched = false;
-  await assert.rejects(runCore({ plan: plan.entries, total: plan.entries.length, open: () => openMemory(store, short, { warn: () => {} }),
+  await assert.rejects(runCore({ entry: i => plan.entries[i], total: plan.entries.length, open: () => openMemory(store, short, { warn: () => {} }),
     activate: () => { switched = true; } }, AbortSignal.timeout(5000)), /offline/);
   assert.equal(switched, false);
 });

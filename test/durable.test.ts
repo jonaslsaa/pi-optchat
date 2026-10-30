@@ -11,8 +11,9 @@ import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { NodeSqliteDatabase } from '@earendil-works/chord/sqlite/node';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from '@earendil-works/pi-ai/providers/faux';
-import { openMemory, type Compressor, type ImageStore, type Mime } from '../src/core/index.ts';
-import { optchat, SqliteStore, withCacheMarks, type SqliteStoreOptions } from '../src/durable/index.ts';
+import { openMemory, type Compressor, type ImageStore, type ImportedEntry, type Mime } from '../src/core/index.ts';
+import { optchat, optchatImport, SqliteStore, withCacheMarks, type Read, type SqliteStoreOptions } from '../src/durable/index.ts';
+import { importTables } from '../src/durable/store.ts';
 import { imageRef } from '../src/images.ts';
 import { removeDir } from './support.ts';
 
@@ -21,8 +22,9 @@ const text = (content: unknown) => typeof content === 'string' ? content
   : (content as { type: string; text?: string }[]).map(block => block.text ?? `[${block.type}]`).join('');
 
 /** One OptChat agent on Pi Durable, over one SQLite database as in a Durable Object: Pi's tables `pi_*`, memory's `optchat_*`. */
+/** `importing` builds an import's summaries (`compress` by default). */
 async function open(file: string, replies: FauxResponseStep[], compress: Compressor = async ({ part }) => `line ${part.l}/${part.i}`,
-  { contextWindow, images }: { contextWindow?: number } & SqliteStoreOptions = {}) {
+  { contextWindow, images, importing = compress }: { contextWindow?: number; importing?: Compressor } & SqliteStoreOptions = {}) {
   const sync = new DatabaseSync(file), db = new NodeSqliteDatabase(sync);
   const faux = fauxProvider(contextWindow ? { models: [{ id: 'small', contextWindow }] } : {}), models = createModels();
   models.setProvider(faux.provider);
@@ -31,14 +33,29 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
     sent.push(request.messages.map(m => ({ role: m.role, content: 'content' in m ? m.content : undefined })));
     return typeof reply === 'function' ? reply(request, ...rest) : reply;
   }));
-  const memory = await openMemory(new SqliteStore(db, (sql, ...params) => sync.prepare(sql).iterate(...params), { images }), compress);
+  const query: Read = (sql, ...params) => sync.prepare(sql).iterate(...params);
+  const memory = await openMemory(new SqliteStore(db, query, { images }), compress);
   const memoryExtension = optchat({ memory });
+  // Resolves when an import goes live, and rejects when a task fails, so a failed import doesn't leave a test waiting.
+  let activate = () => {}, fault = (_: unknown) => {};
+  const activated = new Promise<void>((resolve, reject) => { activate = resolve; fault = reject; });
+  activated.catch(() => {});
+  /** The view each import's memory loaded. */
+  const loaded: (string | undefined)[] = [];
+  const importer = optchatImport({ memory, db, read: query, onActivated: () => activate(), open: generation => {
+    const store = new SqliteStore(db, query, { images, generation }), load = store.load.bind(store);
+    store.load = async () => { const saved = await load(); loaded.push(saved.view); return saved; };
+    return openMemory(store, importing, { jobs: 4 });
+  } });
   const registry = createRegistry();
   registry.install(memoryExtension.extension);
+  registry.install(importer.extension);
   const harness = await Harness.open(await SqliteStorage.open(db, { prefix: 'pi_' }),
-    { models: withCacheMarks(models), registry, settings: { compaction: { enabled: false }, afterFailedRun: 'continue' } }, context);
+    { models: withCacheMarks(models), registry, settings: { compaction: { enabled: false }, afterFailedRun: 'continue' },
+      onReport: (error, info) => { if (info.type === 'task_faulted' || info.type === 'task_parked') fault(error); } }, context);
   const root = await harness.root(context, { agent: { model: { provider: faux.provider.id, modelId: faux.getModel().id } } });
   memoryExtension.attach(harness, context);
+  importer.attach(harness, context);
   // A reopened Harness runs owed tasks once resumed, as PiHarness does when it opens.
   harness.resume();
   /** Answers an input, then waits until OptChat has reset the context and logged the run. */
@@ -56,7 +73,7 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
   };
   const close = async () => { await harness.close(context); await memory.close(); await db.close(); };
   const keptInSqlite = () => sync.prepare('SELECT count(*) AS n FROM optchat_images').get()?.n;
-  return { memory, root, sent, ask, idle, close, keptInSqlite };
+  return { memory, root, sent, ask, idle, close, keptInSqlite, harness, importer, activated, loaded, db, query, sql: sync };
 }
 // A test may close a database and open it again, so the folders go once every test is done.
 const dirs: string[] = [];
@@ -321,5 +338,236 @@ test('reopened mid-run after a refresh, the run is sent from where the log says'
     assert.deepEqual(after.sent[0].filter(m => m.role !== 'system').map(m => text(m.content)), cutOff);
     // Five steps before the eviction, each logged once although the refresh logged some of them before it.
     assert.deepEqual(after.memory.root.map(e => e.kind), ['user', ...Array(5).fill(['tool', 'echo']).flat(), 'talk']);
+  } finally { await after.close(); }
+});
+
+// Imports: a new generation is built beside the live one by a Pi Durable task, and made live in one transaction.
+const long = (s: string) => `${s} ${'detail '.repeat(80)}`;
+const old = (n: number): ImportedEntry => ({ kind: n % 2 ? 'talk' : 'user', text: long(`old-${n}`), date: new Date(Date.UTC(2020, 0, 1, 0, 0, n)).toISOString(),
+  receipt: `import:test:${n}`, origin: { source: 'test', conversation: 'old', message: `${n}`, title: 'Old chat' } });
+const history = Array.from({ length: 6 }, (_, n) => old(n));
+const words = (agent: { memory: { entries(): { text: string }[] } }) => agent.memory.entries().map(e => e.text.split(' ')[0]);
+/** A compressor that records the source of each summary it makes. Once `hold(n)` is called, calls after the next n wait until
+ * `release`, or until their signal aborts. */
+function recording() {
+  const made: string[] = [];
+  let left = Infinity, released = () => {}, gate = Promise.resolve();
+  const compress: Compressor = async ({ part, source }, signal) => {
+    if (left-- <= 0) await Promise.race([gate, new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))]);
+    made.push(source);
+    return `line ${part.l}/${part.i}`;
+  };
+  return { made, compress,
+    hold: (n = 0) => { left = n; gate = new Promise(resolve => { released = resolve; }); },
+    release: () => { left = Infinity; released(); } };
+}
+const until = async (done: () => boolean | Promise<boolean>) => { while (!await done()) await new Promise(resolve => setImmediate(resolve)); };
+const generations = (agent: { sql: DatabaseSync }) => agent.sql.prepare('SELECT DISTINCT g FROM optchat_log ORDER BY g').all().map(row => row.g);
+
+test('a rebuild cut off by a restart resumes without summarizing anything twice, then switches to a log in date order', async () => {
+  const path = file(), summaries = recording();
+  const before = await open(path, [fauxAssistantMessage(long('answer'))], undefined, { importing: summaries.compress });
+  await before.ask(long('question'));
+  summaries.hold(3);
+  assert.deepEqual(await before.importer.start(history, 'rebuild'), { generation: 1, mode: 'rebuild', total: 8, added: 6, skipped: 0 });
+  await until(() => summaries.made.length === 3);
+  await before.close();
+  summaries.release();
+  const after = await open(path, [], undefined, { importing: summaries.compress });
+  await after.activated;
+  // `memory` is the old generation's until the object restarts.
+  await assert.rejects(after.importer.start([old(6)], 'append'), /restart/);
+  await after.close();
+  assert.equal(new Set(summaries.made).size, summaries.made.length);
+  const restarted = await open(path, []);
+  try {
+    assert.deepEqual(words(restarted), ['old-0', 'old-1', 'old-2', 'old-3', 'old-4', 'old-5', 'question', 'answer']);
+    assert.deepEqual(generations(restarted), [1]);
+    assert.equal(await restarted.importer.pending(), undefined);
+  } finally { await restarted.close(); }
+});
+
+test('an import saves its progress, so restarts over a long one don\'t park it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-durable-')), summaries = recording();
+  dirs.push(dir);
+  const snapshot = (n: number) => join(dir, `crash-${n}.sqlite`);
+  let agent = await open(snapshot(0), [], undefined, { importing: summaries.compress });
+  summaries.hold(15);
+  await agent.importer.start(Array.from({ length: 400 }, (_, n) => old(n)), 'rebuild');
+  try {
+    // Pi Durable parks a task cut off 5 times without progress: crash 8 times, each after fewer summaries than one checkpoint's
+    // worth, so only progress carried across runs saves it.
+    for (let crash = 1; crash <= 8; crash++) {
+      const current = agent, made = summaries.made.length;
+      const saved = async () => Number(JSON.stringify((await current.harness.inspect(context)).tasks).match(/"done":(\d+)/)?.[1] ?? 0);
+      const before = await saved();
+      // A parked task fails the test here, through `activated`.
+      await Promise.race([until(() => summaries.made.length === made + 15), current.activated]);
+      // Until the progress is saved, if this run saves any.
+      const deadline = Date.now() + 300;
+      await until(async () => await saved() > before || Date.now() > deadline);
+      // A copy taken as the process dies: the task is still running in it.
+      await until(() => { try { current.sql.exec(`VACUUM INTO '${snapshot(crash)}'`); return true; } catch { return false; } });
+      await current.close();
+      if (crash < 8) summaries.hold(15); else summaries.release();
+      agent = await open(snapshot(crash), [], undefined, { importing: summaries.compress });
+    }
+    await agent.activated;
+    assert.equal(agent.memory.root.length, 0);
+  } finally { await agent.close(); }
+});
+
+test('a turn during an import is answered from the old memory, and is in the new one once after the switch', async () => {
+  for (const [mode, expected] of [
+    ['append', ['first', 'one', 'old-0', 'old-1', 'old-2', 'old-3', 'old-4', 'old-5', 'second', 'two', 'third', 'three']],
+    ['rebuild', ['old-0', 'old-1', 'old-2', 'old-3', 'old-4', 'old-5', 'first', 'one', 'second', 'two', 'third', 'three']],
+  ] as const) {
+    const path = file(), summaries = recording();
+    const before = await open(path, [fauxAssistantMessage('one'), fauxAssistantMessage('two')], undefined, { importing: summaries.compress });
+    await before.ask('first');
+    summaries.hold();
+    await before.importer.start(history, mode);
+    await before.ask('second');
+    assert.deepEqual(words(before), ['first', 'one', 'second', 'two']);
+    summaries.release();
+    await before.activated;
+    await before.close();
+    const after = await open(path, [fauxAssistantMessage('three')]);
+    try {
+      // The new generation has the log as planned; the turn after the plan is logged again from Pi's transcript.
+      await after.ask('third');
+      assert.deepEqual(words(after), expected, mode);
+    } finally { await after.close(); }
+  }
+});
+
+test('a rebuild that puts an imported message without an origin after the chat logs no turn twice', async () => {
+  const path = file();
+  const before = await open(path, [fauxAssistantMessage('one'), fauxAssistantMessage('two')]);
+  await before.ask('first');
+  await before.ask('second');
+  await before.importer.start([{ kind: 'talk', text: 'bare', date: new Date(Date.UTC(2020, 0, 1)).toISOString(), receipt: 'import:bare' }], 'rebuild');
+  await before.activated;
+  await before.close();
+  const after = await open(path, [fauxAssistantMessage('three')]);
+  try {
+    await after.ask('third');
+    assert.deepEqual(words(after), ['bare', 'first', 'one', 'second', 'two', 'third', 'three']);
+  } finally { await after.close(); }
+});
+
+test('a rebuild that orders a turn before an earlier one, as a clock behind does, logs no turn twice', async () => {
+  const path = file();
+  const before = await open(path, [fauxAssistantMessage('one'), fauxAssistantMessage('two')]);
+  await before.ask('first');
+  await before.ask('second');
+  // The second turn's clock was an hour behind.
+  const behind = new Date(Date.parse(before.memory.root[0].date) - 3_600_000).toISOString();
+  before.sql.prepare("UPDATE optchat_log SET meta = json_set(meta, '$.date', ?) WHERE i >= 2 AND part = 0").run(behind);
+  await before.close();
+  const between = await open(path, []);
+  await between.importer.start(history, 'rebuild');
+  await between.activated;
+  await between.close();
+  const after = await open(path, [fauxAssistantMessage('three')]);
+  try {
+    await after.ask('third');
+    assert.deepEqual(words(after), ['old-0', 'old-1', 'old-2', 'old-3', 'old-4', 'old-5', 'second', 'two', 'first', 'one', 'third', 'three']);
+  } finally { await after.close(); }
+});
+
+test('append keeps the summaries and view it has', async () => {
+  const path = file(), summaries = recording();
+  const before = await open(path, [fauxAssistantMessage(long('a-one')), fauxAssistantMessage(long('a-two'))], summaries.compress);
+  await before.ask(long('q-one'));
+  await before.ask(long('q-two'));
+  const kept = summaries.made.slice(), view = before.sql.prepare('SELECT json FROM optchat_view WHERE g = 0').get()?.json;
+  // Each kept message was long enough to be summarized.
+  assert.ok(kept.length >= 4);
+  await before.importer.start(history, 'append');
+  await before.activated;
+  const made = summaries.made.slice(kept.length);
+  await before.close();
+  // None of the kept summaries is made again, and the new memory starts from the saved view, whose cached prefix holds.
+  assert.deepEqual(made.filter(source => kept.includes(source)), []);
+  assert.deepEqual(before.loaded, [view]);
+});
+
+test('a node over a message the new generation didn\'t copy stays out of it', async () => {
+  const agent = await open(file(), [fauxAssistantMessage(long('a-one')), fauxAssistantMessage(long('a-two'))]);
+  try {
+    await agent.ask(long('q-one'));
+    await agent.ask(long('q-two'));
+    // As if the plan was made before the last message and its summaries were saved.
+    const entries = agent.memory.entries().slice(0, 3);
+    const { generation } = await importTables(agent.db, agent.query).stage(0, 'append', [...entries, { ...old(0), i: 3 }], 3);
+    const staged = await openMemory(new SqliteStore(agent.db, agent.query, { generation }), async () => 'line');
+    assert.deepEqual([staged.root.length, [...staged.tree.values()].every(node => (node.i + 1) * 2 ** node.l <= 3)], [3, true]);
+    await staged.close();
+  } finally { await agent.close(); }
+});
+
+test('a discard while an import starts leaves that import alone', async () => {
+  const agent = await open(file(), []);
+  try {
+    await Promise.all([agent.importer.discard(), agent.importer.start(history, 'append')]);
+    await Promise.race([agent.activated, new Promise((_, reject) => setTimeout(() => reject(new Error('The import never went live.')), 5000))]);
+  } finally { await agent.close(); }
+});
+
+test('a discard that overlaps another stops only the import it saw', async () => {
+  const summaries = recording(), agent = await open(file(), [], undefined, { importing: summaries.compress });
+  try {
+    summaries.hold();
+    await agent.importer.start(history, 'rebuild');
+    // The second discard looks for tasks only once the next import has started.
+    const inspect = agent.harness.inspect.bind(agent.harness);
+    let calls = 0, resume = () => {};
+    const resumed = new Promise<void>(resolve => { resume = resolve; });
+    agent.harness.inspect = async ctx => { if (++calls === 2) await resumed; return inspect(ctx); };
+    const first = agent.importer.discard(), second = agent.importer.discard();
+    await first;
+    await agent.importer.start(history, 'rebuild');
+    resume();
+    await second;
+    summaries.release();
+    await Promise.race([agent.activated, new Promise((_, reject) => setTimeout(() => reject(new Error('The import never went live.')), 5000))]);
+  } finally { await agent.close(); }
+});
+
+test('a generation is never handed out twice, even after a discard before it wrote anything', async () => {
+  const agent = await open(file(), []);
+  try {
+    const tables = importTables(agent.db, agent.query), plan = [{ ...old(0), i: 0 }];
+    const first = await tables.stage(0, 'rebuild', plan, 0);
+    await tables.discard(first.generation);
+    assert.equal((await tables.stage(0, 'rebuild', plan, 0)).generation, first.generation + 1);
+  } finally { await agent.close(); }
+});
+
+test('a discarded import leaves memory as it was; a second import or one after a failed save is refused', async () => {
+  const path = file(), summaries = recording();
+  const before = await open(path, [fauxAssistantMessage('one')], undefined, { importing: summaries.compress });
+  await before.ask('first');
+  summaries.hold();
+  // A bad entry is refused before anything is saved, so it can't leave a pending import that blocks the next.
+  const bogus: ImportedEntry = JSON.parse(JSON.stringify({ ...old(6), kind: 'bogus' }));
+  await assert.rejects(before.importer.start([bogus], 'append'), /invalid/);
+  assert.equal(await before.importer.pending(), undefined);
+  await before.importer.start(history, 'rebuild');
+  assert.equal((await before.importer.pending())?.task?.kind, 'running');
+  await assert.rejects(before.importer.start([old(6)], 'append'), /pending/);
+  await before.importer.discard();
+  assert.equal(await before.importer.pending(), undefined);
+  summaries.release();
+  await before.close();
+  const after = await open(path, []);
+  try {
+    assert.deepEqual(words(after), ['first', 'one']);
+    assert.deepEqual(generations(after), [0]);
+    after.memory.store.append = async () => { throw new Error('SQLITE_FULL'); };
+    after.memory.append('user', 'lost');
+    await until(() => after.memory.saveError !== undefined);
+    await assert.rejects(after.importer.start(history, 'append'), /SQLITE_FULL/);
   } finally { await after.close(); }
 });

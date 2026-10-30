@@ -2,7 +2,7 @@ import { existsSync, readFileSync, rmSync, cpSync, mkdirSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Memory } from '../memory.ts';
-import type { Entry, Compressor } from '../core/memory.ts';
+import { isEntry, type Entry, type Compressor } from '../core/memory.ts';
 import { deduplicate as dedupe, planImport, runImport as build, type ImportMode } from '../core/import.ts';
 import { atomicWrite } from '../store.ts';
 import { record } from '../core/cache.ts';
@@ -78,11 +78,13 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
   if (memoryDirectory(dir) === path) { finish(); return job; }
   if (!existsSync(join(path, STAGED))) throw new Error('Import staging data is missing; original memory remains intact.');
   const plan: unknown[] = readFileSync(join(path, STAGED), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+  // Every line must parse, and the plan must be whole and in order, so a damaged plan is refused before anything is written.
+  if (!plan.every(isEntry) || plan.length !== job.total || plan.some((e, i) => e.i !== i)) throw new Error('Import staging data is invalid; original memory remains intact.');
   let memory: Memory | undefined;
   const report = () => memory && progress({ messages: memory.root.length - memory.pending, total: plan.length, summaries: memory.tree.size, error: memory.lastError });
   const timer = setInterval(report, 500);
   try {
-    await build({ plan, total: job.total, open: async () => { memory = await Memory.open(path, compress, { warn: () => {}, jobs }); report(); return memory; }, activate: () => {
+    await build({ entry: i => plan[i], total: job.total, open: async () => { memory = await Memory.open(path, compress, { warn: () => {}, jobs }); report(); return memory; }, activate: () => {
       atomicWrite(join(dir, 'imports', `${job.id}.json`), JSON.stringify({ ...job, completed: new Date().toISOString() }, null, 2));
       atomicWrite(join(dir, 'active-memory.json'), JSON.stringify(job.target));
     } }, signal);

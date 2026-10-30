@@ -9,7 +9,7 @@ import {
   refreshPoint, SEARCH_DOC, searchTool, textContent, TURN_REFRESHED, VIEW_DOC, withView, type AnyMessage, type ImageContent, type Memory,
 } from '../core/index.ts';
 
-type Context = Parameters<Harness['commit']>[1];
+export type Context = Parameters<Harness['commit']>[1];
 type Message = Parameters<GenerationHooks['beforeRequest']>[0]['messages'][number];
 type Models = Exclude<HarnessOptions['models'], () => unknown>;
 
@@ -69,14 +69,14 @@ export interface OptChatOptions {
  * reset ended into memory and builds its summaries; Pi Durable runs that task, and wakes the Durable Object for it after an eviction.
  * Turn Pi's own compaction off (`settings.compaction.enabled: false`); the extension also declines any that starts. */
 export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, prompt, search = false, previousExchangeBytes = 16_000, refreshAt = 0.3 }: OptChatOptions) {
-  let harness: Harness | undefined;
-  let context: Context | undefined;
+  const attached = attachment('OptChat'), opened = attached.get;
   /** The Pi entry logging resumes after: messages before the context's head are logged, the rest are sent as they are. On open it is
    * the one before the newest entry in memory, which is read again: a restart may have cut it off between its records (an answer
-   * with tool calls makes several), so the first `saved` records it makes, which memory has, are skipped. */
+   * with tool calls makes several), so the first `saved` records it makes, which memory has, are skipped. The newest is the highest
+   * id, not the last in the log: a rebuild orders turns by their dates, which a clock can put out of order. */
   let logged = 0, saved = 0;
-  const newest = memory.root.findLast(e => e.receipt?.startsWith(RECEIPT))?.receipt;
-  if (newest) { logged = Number(newest.slice(RECEIPT.length)) - 1; saved = memory.root.filter(e => e.receipt === newest).length; }
+  const newest = memory.root.reduce((max, e) => e.receipt?.startsWith(RECEIPT) ? Math.max(max, Number(e.receipt.slice(RECEIPT.length))) : max, 0);
+  if (newest) { logged = newest - 1; saved = memory.root.filter(e => e.receipt === `${RECEIPT}${newest}`).length; }
   const resumed = new Proxy(memory, {
     get: (target, key) => key !== 'append' ? Reflect.get(target, key) : (...args: Parameters<Memory['append']>) => saved > 0 ? void saved-- : target.append(...args),
   });
@@ -84,10 +84,6 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
   /** What a context's requests share, fixed when its first one is built so they read the same cached prefix. */
   let turn: { head: EntryId | undefined; view: string; previous: Message[] } | undefined;
 
-  const opened = () => {
-    if (!harness || !context) throw new Error('OptChat is not attached to a Harness yet.');
-    return { harness, context };
-  };
   const handle = async (ctx: Context): Promise<Conversation> => {
     const conversation = await opened().harness.conversation(id, ctx);
     if (!conversation) throw new Error(`No conversation ${id}.`);
@@ -243,12 +239,22 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
       tasks: [Remember],
     }),
     /** Starts following the conversation, and resets it now if a run ended before a restart. Returns a function that stops. */
-    attach(opened: Harness, ctx: Context) {
-      harness = opened; context = ctx;
-      const stop = opened.subscribeCommits(() => void schedule());
+    attach(harness: Harness, ctx: Context) {
+      attached.set(harness, ctx);
+      const stop = harness.subscribeCommits(() => void schedule());
       void schedule();
       return stop;
     },
+  };
+}
+
+/** The Harness and context an extension's `attach` was given; `get` throws before it is attached, or after `clear`. */
+export function attachment(name: string) {
+  let at: { harness: Harness; context: Context } | undefined;
+  return {
+    set: (harness: Harness, context: Context) => { at = { harness, context }; },
+    clear: () => { at = undefined; },
+    get: () => { if (!at) throw new Error(`${name} is not attached to a Harness yet.`); return at; },
   };
 }
 
