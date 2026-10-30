@@ -1,6 +1,6 @@
 import { defineExtension, defineTask, ROOT_CONVERSATION_ID, type Harness } from '@earendil-works/pi-durable';
 import type { SqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite';
-import { chronological, deduplicate, runImport, type ImportedEntry, type ImportMode, type Memory } from '../core/index.ts';
+import { chronological, deduplicate, isEntry, runImport, type ImportedEntry, type ImportMode, type Memory } from '../core/index.ts';
 import { attachment, type Context } from './optchat.ts';
 import { importTables, type Read } from './store.ts';
 
@@ -29,8 +29,9 @@ export interface ImportOptions {
  * `optchat()`'s and `attach` the opened Harness. Neither the plan nor the log's texts are held in RAM. */
 export function optchatImport({ memory, db, read, open, onActivated }: ImportOptions) {
   const attached = attachment('OptChat import'), tables = importTables(db, read);
-  /** Set once an import went live: `memory` is the old generation's until the object restarts. */
-  let switched = false;
+  /** The generation `memory` was opened at, read when first attached: once an import goes live, `memory` is the old one's until
+   * the object restarts. */
+  let opened: Promise<number> | undefined;
   const tasks = async () => (await attached.get().harness.inspect(attached.get().context)).tasks.filter(task => task.record.kind === Import.definition.name);
   const createTask = () => attached.get().harness.commit(tx => tx.createTask(Import, {},
     { ownership: { kind: 'conversation' }, conversationId: ROOT_CONVERSATION_ID, background: true }), attached.get().context);
@@ -43,7 +44,7 @@ export function optchatImport({ memory, db, read, open, onActivated }: ImportOpt
       import: async (_task, runtime, ctx) => {
         const { job } = await tables.state();
         let activated = false, saving = Promise.resolve();
-        if (job) await runImport({ entry: tables.planned, total: job.total, activate: async () => { await tables.activate(job.generation); activated = switched = true; },
+        if (job) await runImport({ entry: tables.planned, total: job.total, activate: async () => { await tables.activate(job.generation); activated = true; },
           open: async () => {
             const building = await open(job.generation);
             let done = building.tree.size;
@@ -68,22 +69,26 @@ export function optchatImport({ memory, db, read, open, onActivated }: ImportOpt
     /** Runs a pending import whose task is gone: it failed, or the object died before creating it. Returns a function that stops. */
     attach(harness: Harness, ctx: Context) {
       attached.set(harness, ctx);
+      opened ??= tables.state().then(state => state.live);
       void (async () => { if ((await tables.state()).job && !(await tasks()).length) await createTask(); })()
         .catch(error => console.error(`OptChat could not resume the import: ${error instanceof Error ? error.message : String(error)}`));
       return attached.clear;
     },
-    /** Plans an import of `incoming` and starts building it, with its counts; undefined when nothing in it is new. Refused while
-     * another is pending, once memory failed a save, or after a switch until the object restarts. */
+    /** Plans an import of `incoming` and starts building it, with its counts; undefined when nothing in it is new. Refused for an
+     * invalid entry, while another is pending, once memory failed a save, or after a switch until the object restarts. */
     async start(incoming: readonly ImportedEntry[], mode: ImportMode) {
       attached.get();
-      if (switched) throw new Error('An import went live: restart before the next one.');
+      if (!opened) throw new Error('OptChat import is not attached to a Harness yet.');
+      const live = await opened;
+      // Up front: a plan that fails later would stay pending, blocking every import after it.
+      if (!incoming.every(e => isEntry({ ...e, i: 0 }))) throw new Error('Imported entry is invalid.');
       if (memory.saveError) throw new Error(`Memory could not be saved: ${memory.saveError}; restart before importing.`);
       // Planned from metadata; each text is read from memory as its plan row is written.
       const { added, skipped } = deduplicate(memory.root, incoming);
       if (!added.length) return undefined;
       const all = mode === 'rebuild' ? chronological([...memory.root, ...added]) : [...memory.root, ...chronological(added)];
       const plan = function* () { for (const [i, e] of all.entries()) yield 'text' in e ? { ...e, i } : { ...e, i, text: memory.text(e.i) }; };
-      const job = await tables.stage(mode, plan(), mode === 'append' ? memory.root.length : 0);
+      const job = await tables.stage(live, mode, plan(), mode === 'append' ? memory.root.length : 0);
       await createTask();
       return { ...job, added: added.length, skipped };
     },

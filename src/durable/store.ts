@@ -117,11 +117,13 @@ export function importTables(db: SqliteDatabase, read: Read) {
   };
   return {
     state: () => state(),
-    /** Saves the plan, `entries` in order, and makes it the pending import of a new generation, numbered past any rows left, so
-     * none are reused. Append's new generation starts with the live one's first `kept` messages, the nodes over them, and its view. */
-    stage: (mode: ImportMode, entries: Iterable<Entry>, kept: number) => db.transaction(async tx => {
+    /** Saves the plan, `entries` in order, made from generation `from`, and makes it the pending import of a new generation, numbered
+     * past any rows left, so none are reused. Append's new generation starts with the live one's first `kept` messages, the nodes
+     * over them, and its view. Refused unless `from` is still live: an import went live since. */
+    stage: (from: number, mode: ImportMode, entries: Iterable<Entry>, kept: number) => db.transaction(async tx => {
       const { live, job } = await state(tx);
       if (job) throw new Error('An import is pending: let it finish, or discard it.');
+      if (live !== from) throw new Error('An import went live: restart before the next one.');
       const top = await tx.get<{ g: number }>(`SELECT MAX(g) AS g FROM (SELECT live AS g FROM optchat_state UNION ALL SELECT MAX(g) FROM optchat_log
         UNION ALL SELECT MAX(g) FROM optchat_tree UNION ALL SELECT MAX(g) FROM optchat_view)`);
       const generation = (top?.g ?? live) + 1;

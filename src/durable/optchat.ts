@@ -72,10 +72,11 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
   const attached = attachment('OptChat'), opened = attached.get;
   /** The Pi entry logging resumes after: messages before the context's head are logged, the rest are sent as they are. On open it is
    * the one before the newest entry in memory, which is read again: a restart may have cut it off between its records (an answer
-   * with tool calls makes several), so the first `saved` records it makes, which memory has, are skipped. */
+   * with tool calls makes several), so the first `saved` records it makes, which memory has, are skipped. The newest is the highest
+   * id, not the last in the log: a rebuild orders turns by their dates, which a clock can put out of order. */
   let logged = 0, saved = 0;
-  const newest = memory.root.findLast(e => e.receipt?.startsWith(RECEIPT))?.receipt;
-  if (newest) { logged = Number(newest.slice(RECEIPT.length)) - 1; saved = memory.root.filter(e => e.receipt === newest).length; }
+  const newest = memory.root.reduce((max, e) => e.receipt?.startsWith(RECEIPT) ? Math.max(max, Number(e.receipt.slice(RECEIPT.length))) : max, 0);
+  if (newest) { logged = newest - 1; saved = memory.root.filter(e => e.receipt === `${RECEIPT}${newest}`).length; }
   const resumed = new Proxy(memory, {
     get: (target, key) => key !== 'append' ? Reflect.get(target, key) : (...args: Parameters<Memory['append']>) => saved > 0 ? void saved-- : target.append(...args),
   });

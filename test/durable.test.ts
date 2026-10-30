@@ -455,6 +455,26 @@ test('a rebuild that puts an imported message without an origin after the chat l
   } finally { await after.close(); }
 });
 
+test('a rebuild that orders a turn before an earlier one, as a clock behind does, logs no turn twice', async () => {
+  const path = file();
+  const before = await open(path, [fauxAssistantMessage('one'), fauxAssistantMessage('two')]);
+  await before.ask('first');
+  await before.ask('second');
+  // The second turn's clock was an hour behind.
+  const behind = new Date(Date.parse(before.memory.root[0].date) - 3_600_000).toISOString();
+  before.sql.prepare("UPDATE optchat_log SET meta = json_set(meta, '$.date', ?) WHERE i >= 2 AND part = 0").run(behind);
+  await before.close();
+  const between = await open(path, []);
+  await between.importer.start(history, 'rebuild');
+  await between.activated;
+  await between.close();
+  const after = await open(path, [fauxAssistantMessage('three')]);
+  try {
+    await after.ask('third');
+    assert.deepEqual(words(after), ['old-0', 'old-1', 'old-2', 'old-3', 'old-4', 'old-5', 'second', 'two', 'first', 'one', 'third', 'three']);
+  } finally { await after.close(); }
+});
+
 test('append keeps the summaries and view it has', async () => {
   const path = file(), summaries = recording();
   const before = await open(path, [fauxAssistantMessage(long('a-one')), fauxAssistantMessage(long('a-two'))], summaries.compress);
@@ -479,7 +499,7 @@ test('a node over a message the new generation didn\'t copy stays out of it', as
     await agent.ask(long('q-two'));
     // As if the plan was made before the last message and its summaries were saved.
     const entries = agent.memory.entries().slice(0, 3);
-    const { generation } = await importTables(agent.db, agent.query).stage('append', [...entries, { ...old(0), i: 3 }], 3);
+    const { generation } = await importTables(agent.db, agent.query).stage(0, 'append', [...entries, { ...old(0), i: 3 }], 3);
     const staged = await openMemory(new SqliteStore(agent.db, agent.query, { generation }), async () => 'line');
     assert.deepEqual([staged.root.length, [...staged.tree.values()].every(node => (node.i + 1) * 2 ** node.l <= 3)], [3, true]);
     await staged.close();
@@ -491,6 +511,10 @@ test('a discarded import leaves memory as it was; a second import or one after a
   const before = await open(path, [fauxAssistantMessage('one')], undefined, { importing: summaries.compress });
   await before.ask('first');
   summaries.hold();
+  // A bad entry is refused before anything is saved, so it can't leave a pending import that blocks the next.
+  const bogus: ImportedEntry = JSON.parse(JSON.stringify({ ...old(6), kind: 'bogus' }));
+  await assert.rejects(before.importer.start([bogus], 'append'), /invalid/);
+  assert.equal(await before.importer.pending(), undefined);
   await before.importer.start(history, 'rebuild');
   assert.equal((await before.importer.pending())?.task?.kind, 'running');
   await assert.rejects(before.importer.start([old(6)], 'append'), /pending/);
