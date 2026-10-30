@@ -785,6 +785,14 @@ test('core builds an import in any store: a paused rebuild resumes from what the
   assert.equal(switched[0].pending, 0);
 });
 
+test('core import refuses a plan length that is not a count', async () => {
+  let opened = false;
+  await assert.rejects(runCore({ entry: () => undefined, total: NaN, open: async () => { opened = true; return openMemory({ load: () => ({ entries: [], tree: [] }),
+    text: () => '', summary: () => '', append: () => undefined, appendNode: () => undefined, saveView: () => undefined, putImage: () => undefined, image: () => undefined }, short); },
+    activate: () => assert.fail('switched') }, AbortSignal.timeout(5000)), /invalid/);
+  assert.equal(opened, false);
+});
+
 test('core import does not switch to a staging log whose last write failed in a store that writes behind', async () => {
   const saved = { entries: [] as Entry[], tree: [] as Summary[], view: undefined as string | undefined };
   const store: Store = { load: () => structuredClone(saved), appendNode: n => void saved.tree.push(n), saveView: view => void (saved.view = view),

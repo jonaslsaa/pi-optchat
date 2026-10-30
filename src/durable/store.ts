@@ -153,8 +153,9 @@ export function importTables(db: SqliteDatabase, read: Read) {
       await tx.run('UPDATE optchat_state SET live = target, target = NULL, mode = NULL, total = NULL');
       await tx.run('DELETE FROM optchat_plan');
     }),
-    /** Drops the pending import; its generation's rows go when the live store next loads. */
-    discard: () => db.transaction(async tx => {
+    /** Drops the pending import if it is still `generation`'s; its rows go when the live store next loads. */
+    discard: (generation: number) => db.transaction(async tx => {
+      if ((await state(tx)).job?.generation !== generation) return;
       await tx.run('UPDATE optchat_state SET target = NULL, mode = NULL, total = NULL');
       await tx.run('DELETE FROM optchat_plan');
     }),

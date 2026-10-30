@@ -392,23 +392,24 @@ test('an import saves its progress, so restarts over a long one don\'t park it',
   dirs.push(dir);
   const snapshot = (n: number) => join(dir, `crash-${n}.sqlite`);
   let agent = await open(snapshot(0), [], undefined, { importing: summaries.compress });
-  summaries.hold(60);
+  summaries.hold(15);
   await agent.importer.start(Array.from({ length: 400 }, (_, n) => old(n)), 'rebuild');
   try {
-    // Pi Durable parks a task cut off 5 times without progress: crash 6 times, each after about 60 summaries.
-    for (let crash = 1; crash <= 6; crash++) {
+    // Pi Durable parks a task cut off 5 times without progress: crash 8 times, each after fewer summaries than one checkpoint's
+    // worth, so only progress carried across runs saves it.
+    for (let crash = 1; crash <= 8; crash++) {
       const current = agent, made = summaries.made.length;
       const saved = async () => Number(JSON.stringify((await current.harness.inspect(context)).tasks).match(/"done":(\d+)/)?.[1] ?? 0);
       const before = await saved();
       // A parked task fails the test here, through `activated`.
-      await Promise.race([until(() => summaries.made.length === made + 60), current.activated]);
-      // Until the progress is saved, for a second at most.
-      const deadline = Date.now() + 1000;
+      await Promise.race([until(() => summaries.made.length === made + 15), current.activated]);
+      // Until the progress is saved, if this run saves any.
+      const deadline = Date.now() + 300;
       await until(async () => await saved() > before || Date.now() > deadline);
       // A copy taken as the process dies: the task is still running in it.
       await until(() => { try { current.sql.exec(`VACUUM INTO '${snapshot(crash)}'`); return true; } catch { return false; } });
       await current.close();
-      if (crash < 6) summaries.hold(60); else summaries.release();
+      if (crash < 8) summaries.hold(15); else summaries.release();
       agent = await open(snapshot(crash), [], undefined, { importing: summaries.compress });
     }
     await agent.activated;
@@ -503,6 +504,14 @@ test('a node over a message the new generation didn\'t copy stays out of it', as
     const staged = await openMemory(new SqliteStore(agent.db, agent.query, { generation }), async () => 'line');
     assert.deepEqual([staged.root.length, [...staged.tree.values()].every(node => (node.i + 1) * 2 ** node.l <= 3)], [3, true]);
     await staged.close();
+  } finally { await agent.close(); }
+});
+
+test('a discard while an import starts leaves that import alone', async () => {
+  const agent = await open(file(), []);
+  try {
+    await Promise.all([agent.importer.discard(), agent.importer.start(history, 'append')]);
+    await Promise.race([agent.activated, new Promise((_, reject) => setTimeout(() => reject(new Error('The import never went live.')), 5000))]);
   } finally { await agent.close(); }
 });
 

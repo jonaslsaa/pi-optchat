@@ -41,18 +41,20 @@ export function optchatImport({ memory, db, read, open, onActivated }: ImportOpt
     initial: () => ({ phase: 'import', done: 0 }),
     phases: {
       // Cut off by an eviction, the phase runs again from the top, and `runImport` carries on from the new generation's log.
-      import: async (_task, runtime, ctx) => {
+      import: async (task, runtime, ctx) => {
         const { job } = await tables.state();
         let activated = false, saving = Promise.resolve();
         if (job) await runImport({ entry: tables.planned, total: job.total, activate: async () => { await tables.activate(job.generation); activated = true; },
           open: async () => {
             const building = await open(job.generation);
-            let done = building.tree.size;
-            building.onChange(() => {
+            // From the progress last saved, so what earlier runs built before they were cut off counts too.
+            let done = task.state.checkpoint.done;
+            const checkpoint = () => {
               if (building.tree.size < done + CHECKPOINT) return;
               done = building.tree.size;
               saving = saving.then(() => runtime.commit(() => ({ status: 'running', checkpoint: { phase: 'import', done } }), ctx)).catch(() => {});
-            });
+            };
+            building.onChange(checkpoint); checkpoint();
             return building;
           } }, runtime.signal);
         await saving;
@@ -98,10 +100,12 @@ export function optchatImport({ memory, db, read, open, onActivated }: ImportOpt
       const { job } = await tables.state();
       return job && { ...job, task: (await tasks())[0]?.state };
     },
-    /** Stops a pending import; the live memory is left as it is. */
+    /** Stops the pending import; the live memory is left as it is. One started meanwhile is left alone. */
     async discard() {
+      const { job } = await tables.state();
+      if (!job) return;
       for (const task of await tasks()) await attached.get().harness.abortTask(task.record.id, attached.get().context);
-      await tables.discard();
+      await tables.discard(job.generation);
     },
   };
 }

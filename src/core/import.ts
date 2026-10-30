@@ -66,6 +66,7 @@ export async function runImport({ entry, total, open, activate }: { entry: (i: n
     if (!isEntry(e) || e.i !== i) throw new Error('Import staging data is invalid; original memory remains intact.');
     return e;
   };
+  if (!Number.isSafeInteger(total) || total < 0) throw new Error('Import staging data is invalid; original memory remains intact.');
   const memory = await open();
   try {
     if (memory.root.length > total || memory.root.some((_, i) => memory.text(i) !== planned(i).text)) throw new Error('Import staging data does not match its log; original memory remains intact.');
