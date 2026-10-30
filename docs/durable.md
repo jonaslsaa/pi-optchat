@@ -1,6 +1,6 @@
 # OptChat on Pi Durable
 
-`pi-optchat/durable` runs OptChat's memory in a [Pi Durable](https://www.npmjs.com/package/@earendil-works/pi-durable) agent, such as one in a Cloudflare Durable Object behind the Agents SDK's `PiHarness`. It is two things: `SqliteStore`, a `Store` over SQLite (in a Durable Object, the object's), and a Pi Durable extension that builds each request from OptChat's view. The Worker, its prompts and tools stay in the app. It needs `@earendil-works/pi-durable` 1.4.x (an optional peer dependency; tested on 1.4.0) and imports nothing from Pi's terminal app or Node; `test/core-boundary.test.ts` keeps it that way.
+`pi-optchat/durable` runs OptChat's memory in a [Pi Durable](https://www.npmjs.com/package/@earendil-works/pi-durable) agent, such as one in a Cloudflare Durable Object behind the Agents SDK's `PiHarness`. It is `SqliteStore`, a `Store` over SQLite (in a Durable Object, the object's), a Pi Durable extension that builds each request from OptChat's view, and `optchatImport` for importing old history. The Worker, its prompts and tools stay in the app. It needs `@earendil-works/pi-durable` 1.4.x (an optional peer dependency; tested on 1.4.0) and imports nothing from Pi's terminal app or Node; `test/core-boundary.test.ts` keeps it that way.
 
 ## Wiring it up
 
@@ -16,7 +16,7 @@ memoryExtension.attach(harness, context);
 
 With the Agents SDK's `PiHarness` this goes in its `harness` factory, which supplies `storage`, `context` and `onWake` and resumes the Harness when an alarm wakes the object. A host without it passes an `onWake` that arms an alarm, and calls `harness.resume()` on open and on each alarm, or a task owed from before an eviction never runs.
 
-`examples/durable-object` is a Worker built this way, with the counters and endpoints its `proof.mjs` uses: it runs the Worker under `wrangler dev` with real model calls and checks a multi-turn chat, restarts and the cache.
+`examples/durable-object` is a Worker built this way, importing `pi-optchat/core` and `pi-optchat/durable` as an app would (linked with `file:../..`), with the counters and endpoints its `proof.mjs` uses: it runs the Worker under `wrangler dev` with real model calls and checks a multi-turn chat, restarts and the cache.
 
 ## How it works
 

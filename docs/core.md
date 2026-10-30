@@ -2,13 +2,13 @@
 
 `pi-optchat/core` is OptChat's memory without Pi: the log, the summary tree and its views, zoom/date/search, the compactor, cache marks and memory's prompts. It is meant for hosts such as Pi Durable in a Cloudflare Durable Object. The Pi extension (`pi-optchat`) is built on it and behaves exactly as before.
 
-Core imports nothing from Pi or Node at runtime: only `typebox` (the tools' schemas) and pi-ai's types. `test/core-boundary.test.ts` keeps it that way. The four Pi packages are optional peer dependencies, so installing `pi-optchat` outside Pi pulls in none of them.
+Core imports nothing from Pi or Node at runtime: only `typebox` (the tools' schemas) and pi-ai's types. `test/core-boundary.test.ts` keeps it that way. Pi's packages are optional peer dependencies, so installing `pi-optchat` outside Pi pulls in none of them.
 
 It ships as TypeScript, like the extension, so the host needs a bundler (Wrangler, esbuild, tsx). A host that type-checks with `tsc` needs `allowImportingTsExtensions`.
 
 ## What a host supplies
 
-- **A `Store`:** six operations (`load`, `append`, `appendNode`, `saveView`, `putImage`, `image`), sync or async. Memory loads once, then works in RAM and issues its writes in order. Pi's is `FileStore` (`src/store.ts`).
+- **A `Store`:** `load`, `append`, `appendNode`, `saveView`, `putImage` and `image`, sync or async, plus `text` and `summary`, which must be synchronous. Memory loads only metadata when it opens, reads texts through `text`/`summary` as it needs them, and issues its writes in order. Pi's is `FileStore` (`src/store.ts`); Pi Durable's is `SqliteStore` (`pi-optchat/durable`, see [durable.md](durable.md)).
 - **The compactor's model:** `createCompressor({ model, retryable })`, where `model()` returns `{ model, reasoning, stream }` for each call (pi-ai's `Models.streamSimple` or one with its shape) and `retryable` is pi-ai's `isRetryableAssistantError`.
 - **Image names**, if it keeps images: `logMessage` and `textContent` take an `imageRef` that names an image `[image <16 hex digits>]`; `loadImages` reads those back from the store.
 
@@ -26,13 +26,13 @@ const request = withView(run, memory.render());    // the view goes before the u
 const [zoom, date] = memoryTools(() => memory);    // VIEW_DOC tells the model how to use them
 ```
 
-- `openMemory(store, compress, { warn, budget, jobs, retryMs })`, and `Memory`: `append`, `render`, `settle(signal?, 'turn' | 'tree' | 'ahead')`, `zoom`, `search`, `date`, `onChange`, `close`, plus `root`, `tree`, `view`, `pending`, `lastError`.
-- `Store`, `Saved`, `Lease`, `Mime`, `isMime`, and the record types `Entry`, `Summary`, `Origin`, `Kind`. An entry with an `origin` is imported history, which the summarizer treats as historical; `origin.source` is any label the host picks ("email").
+- `openMemory(store, compress, { warn, budget, jobs, retryMs })`, and `Memory`: `append`, `text`, `render`, `settle(signal?, 'turn' | 'tree' | 'ahead')`, `zoom`, `search`, `date`, `onChange`, `close`, plus `root`, `tree`, `view`, `pending`, `lastError`, `saveError`.
+- `Store`, `Saved`, `Lease`, `ImageStore` (a store's `putImage` and `image`, for keeping images elsewhere), `Mime`, `isMime`, and the record types `Entry`, `Summary`, `Origin`, `Kind`. An entry with an `origin` is imported history, which the summarizer treats as historical; `origin.source` is any label the host picks ("email").
 - `createCompressor({ model, retryable, onUsage?, accepted?, retryDelays?, system? })` (`system`: the compactor's prompt, `COMPACT` by default), `ACCEPTED_BYTES`.
 - `logMessage(memory, message, { kind?, receipt?, imageRef? })` (every entry it appends gets `receipt`, so a host can use it as a cursor), `textContent`, `withView`, `boundedMessage`, `completedExchange`, and the mid-turn refresh helpers (`refreshBudget`, `refreshPoint`, `refreshedRun`).
-- `memoryTools(memory, runs?)` (zoom and date; `runs` adds zooming into a subagent's chat), `searchTool`, `loadImages`, `isImage`.
+- `memoryTools(memory, runs?)` (zoom and date; `runs` adds zooming into a subagent's chat), `searchTool`, `loadImages`, `isImage`, `decode`.
 - `cachePayload` (Anthropic: the view's cache marks, as a request's `onPayload`).
-- Imports: `planImport(existing, incoming, 'append' | 'rebuild', copyOf?)` dedupes by `receipt` (each starts with `import:`) and orders the new history by date: append keeps the existing log as the plan's first `kept` entries, rebuild orders everything and summarizes it again. `runImport({ plan, total, open, activate }, signal)` builds the memory `open` gives from the saved plan, resuming where it stopped, and calls `activate` once the whole tree is built and the memory is closed. The host keeps the plan, seeds the staging store (append: the kept entries, the summaries and the saved view), and switches to it in `activate`. Until then the live memory must take no messages, or the switch drops them: queue them and log them after. `deduplicate` alone tells what would be new.
+- Imports: `planImport(existing, incoming, 'append' | 'rebuild', copyOf?)` dedupes by `receipt` (each starts with `import:`) and orders the new history by date: append keeps the existing log as the plan's first `kept` entries, rebuild orders everything and summarizes it again. `runImport({ entry, total, open, activate }, signal)` builds the memory `open` gives from the plan's `total` entries, read one at a time through `entry(i)` so the plan need not stay in RAM, resuming where it stopped, and calls `activate` once the whole tree is built and the memory is closed. The host keeps the plan, seeds the staging store (append: the kept entries, the summaries and the saved view), and switches to it in `activate`. Until then the live memory must take no messages, or the switch drops them: queue them and log them after. `deduplicate` alone tells what would be new, and `chronological` is the order rebuild uses. `pi-optchat/durable`'s `optchatImport` does all this on SQLite.
 - Prompts: `COMPACT`, `VIEW_DOC`, `CONTINUITY`, `SEARCH_DOC`, `allowSearch`, `TURN_REFRESHED`.
 
-Not in core yet: the turn itself (when to snapshot the view, refresh mid-turn, replay the previous exchange), which Pi does in `src/index.ts`; and loading log text lazily, which a host with a large log in a 128 MB isolate will need.
+Not in core: the turn itself (when to snapshot the view, refresh mid-turn, replay the previous exchange). Each host does it with the helpers above: Pi in `src/index.ts`, Pi Durable in `src/durable/optchat.ts`.
