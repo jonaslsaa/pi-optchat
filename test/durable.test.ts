@@ -515,6 +515,26 @@ test('a discard while an import starts leaves that import alone', async () => {
   } finally { await agent.close(); }
 });
 
+test('a discard that overlaps another stops only the import it saw', async () => {
+  const summaries = recording(), agent = await open(file(), [], undefined, { importing: summaries.compress });
+  try {
+    summaries.hold();
+    await agent.importer.start(history, 'rebuild');
+    // The second discard looks for tasks only once the next import has started.
+    const inspect = agent.harness.inspect.bind(agent.harness);
+    let calls = 0, resume = () => {};
+    const resumed = new Promise<void>(resolve => { resume = resolve; });
+    agent.harness.inspect = async ctx => { if (++calls === 2) await resumed; return inspect(ctx); };
+    const first = agent.importer.discard(), second = agent.importer.discard();
+    await first;
+    await agent.importer.start(history, 'rebuild');
+    resume();
+    await second;
+    summaries.release();
+    await Promise.race([agent.activated, new Promise((_, reject) => setTimeout(() => reject(new Error('The import never went live.')), 5000))]);
+  } finally { await agent.close(); }
+});
+
 test('a discarded import leaves memory as it was; a second import or one after a failed save is refused', async () => {
   const path = file(), summaries = recording();
   const before = await open(path, [fauxAssistantMessage('one')], undefined, { importing: summaries.compress });

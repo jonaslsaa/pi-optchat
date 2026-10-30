@@ -32,11 +32,13 @@ export function optchatImport({ memory, db, read, open, onActivated }: ImportOpt
   /** The generation `memory` was opened at, read when first attached: once an import goes live, `memory` is the old one's until
    * the object restarts. */
   let opened: Promise<number> | undefined;
-  const tasks = async () => (await attached.get().harness.inspect(attached.get().context)).tasks.filter(task => task.record.kind === Import.definition.name);
-  const createTask = () => attached.get().harness.commit(tx => tx.createTask(Import, {},
+  /** The live tasks building `generation`'s import. */
+  const tasks = async (generation: number) => (await attached.get().harness.inspect(attached.get().context)).tasks
+    .filter(({ record: { kind, input } }) => kind === Import.definition.name && typeof input === 'object' && input !== null && !Array.isArray(input) && input.generation === generation);
+  const createTask = (generation: number) => attached.get().harness.commit(tx => tx.createTask(Import, { generation },
     { ownership: { kind: 'conversation' }, conversationId: ROOT_CONVERSATION_ID, background: true }), attached.get().context);
 
-  const Import = defineTask<Record<string, never>, { phase: 'import'; done: number }, null>({
+  const Import = defineTask<{ generation: number }, { phase: 'import'; done: number }, null>({
     name: 'optchat.import', version: 1,
     initial: () => ({ phase: 'import', done: 0 }),
     phases: {
@@ -44,7 +46,8 @@ export function optchatImport({ memory, db, read, open, onActivated }: ImportOpt
       import: async (task, runtime, ctx) => {
         const { job } = await tables.state();
         let activated = false, saving = Promise.resolve();
-        if (job) await runImport({ entry: tables.planned, total: job.total, activate: async () => { await tables.activate(job.generation); activated = true; },
+        // A task whose import was discarded, or went live, has nothing left to do.
+        if (job?.generation === task.input.generation) await runImport({ entry: tables.planned, total: job.total, activate: async () => { await tables.activate(job.generation); activated = true; },
           open: async () => {
             const building = await open(job.generation);
             // From the progress last saved, so what earlier runs built before they were cut off counts too.
@@ -72,7 +75,7 @@ export function optchatImport({ memory, db, read, open, onActivated }: ImportOpt
     attach(harness: Harness, ctx: Context) {
       attached.set(harness, ctx);
       opened ??= tables.state().then(state => state.live);
-      void (async () => { if ((await tables.state()).job && !(await tasks()).length) await createTask(); })()
+      void (async () => { const { job } = await tables.state(); if (job && !(await tasks(job.generation)).length) await createTask(job.generation); })()
         .catch(error => console.error(`OptChat could not resume the import: ${error instanceof Error ? error.message : String(error)}`));
       return attached.clear;
     },
@@ -91,20 +94,20 @@ export function optchatImport({ memory, db, read, open, onActivated }: ImportOpt
       const all = mode === 'rebuild' ? chronological([...memory.root, ...added]) : [...memory.root, ...chronological(added)];
       const plan = function* () { for (const [i, e] of all.entries()) yield 'text' in e ? { ...e, i } : { ...e, i, text: memory.text(e.i) }; };
       const job = await tables.stage(live, mode, plan(), mode === 'append' ? memory.root.length : 0);
-      await createTask();
+      await createTask(job.generation);
       return { ...job, added: added.length, skipped };
     },
     /** The pending import, if any, with its task's state: running, ready, or blocked (parked after restarts: `harness.retryTask`).
      * No task means it failed; `attach` starts it again at the next restart. */
     async pending() {
       const { job } = await tables.state();
-      return job && { ...job, task: (await tasks())[0]?.state };
+      return job && { ...job, task: (await tasks(job.generation))[0]?.state };
     },
     /** Stops the pending import; the live memory is left as it is. One started meanwhile is left alone. */
     async discard() {
       const { job } = await tables.state();
       if (!job) return;
-      for (const task of await tasks()) await attached.get().harness.abortTask(task.record.id, attached.get().context);
+      for (const task of await tasks(job.generation)) await attached.get().harness.abortTask(task.record.id, attached.get().context);
       await tables.discard(job.generation);
     },
   };
