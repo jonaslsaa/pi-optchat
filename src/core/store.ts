@@ -44,3 +44,5 @@ export interface Store {
   image(name: string): Maybe<{ mimeType: Mime; data: Uint8Array } | undefined>;
   lock?: Lease;
 }
+/** Where a store keeps images, for a host that keeps them apart from the rest, such as large binary data outside a database. */
+export type ImageStore = Pick<Store, 'putImage' | 'image'>;

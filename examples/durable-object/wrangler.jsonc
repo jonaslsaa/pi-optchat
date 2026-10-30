@@ -6,6 +6,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": { "bindings": [{ "name": "AGENT", "class_name": "Agent" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Agent"] }],
+  // Memory's images (see r2Images in src/worker.ts); `wrangler dev` keeps them locally.
+  "r2_buckets": [{ "binding": "IMAGES", "bucket_name": "optchat-images" }],
   // OptChat's source lives two levels up, beside its own node_modules: one copy of each package for the whole Worker.
   "alias": {
     "@earendil-works/pi-durable": "./node_modules/@earendil-works/pi-durable",

@@ -7,7 +7,7 @@
 ```ts
 const db = new DurableObjectSqliteDatabase(ctx.storage);         // the one Pi Durable's storage uses too
 const read = (sql, ...params) => ctx.storage.sql.exec(sql, ...params); // synchronous reads of memory's texts
-const memory = await openMemory(new SqliteStore(db, read), createCompressor({ model, retryable }));
+const memory = await openMemory(new SqliteStore(db, read), createCompressor({ model, retryable })); // or new SqliteStore(db, read, { images })
 const memoryExtension = optchat({ memory });
 registry.install(memoryExtension.extension);
 const harness = await Harness.open(storage, { models: withCacheMarks(models), registry, onWake, settings: { compaction: { enabled: false } } }, context);
@@ -27,11 +27,11 @@ With the Agents SDK's `PiHarness` this goes in its `harness` factory, which supp
 - **A failed save** stops memory's log: requests keep the view it has, and after a restart logging resumes from the receipts and Pi's transcript. Cloudflare resets the object itself only when a commit fails after the code ran (the output gate, which drops Pi's writes too); a write that throws at once, like `SQLITE_FULL` at the storage limit, doesn't, so the restart waits for idle eviction, a deploy, or the host's `ctx.abort()`, which the example calls from `warn`. `SQLITE_FULL` stops Pi's writes as well; the errors only memory's writes could hit (a row over 2 MB, a message index saved twice) are ruled out by the store's parts and by one Memory per database.
 - **Compaction:** turn Pi's off; the extension also declines any that starts. OptChat's summaries replace it.
 - **Large tool results** are sent as their head and tail (`boundedMessage`), capped as Pi does.
+- **Images:** each image in a user message or tool result is named in memory's text as Pi's OptChat names it, `[image <16 hex digits>]` (SHA-256 of its base64, by Web Crypto), and kept in the store before the message is logged, so `zoom(id, 1)` returns it and the previous exchange names it instead of sending it again. OptChat doesn't resize images: Pi Durable's Photon processor (`createCloudflarePhotonImages()`) runs in Workers, but the memory it decodes in never shrinks again. Shrink photos when they arrive instead (Cloudflare Images, say), so Pi Durable's transcript and the model get the small copy too; Pi Durable keeps each transcript entry, base64 images included, in one row, so on Cloudflare a message's images must stay well under 2 MB anyway. `SqliteStore` keeps images in `optchat_images`; to keep large binary data out of the database (its row size limit and storage cost), give it `{ images }`, an `ImageStore` with `putImage` and `image`. The example keeps them in R2.
 - **Tools:** `zoom` and `date` (plus `search` with `search: true`), replay-safe.
 - **Cache marks:** `withCacheMarks(models)` adds OptChat's marks to Anthropic requests that carry a view, so a view that grows at its end is read from the cache. A request with its own `onPayload` is left alone.
 - **Summaries of a group chat:** a chat that isn't one user talking to OptChat, such as a housing board with several people, gives `createCompressor` its own `system` prompt and names each speaker in the text, like "[Kari] …".
-- **Storage:** tables `optchat_log`, `optchat_tree`, `optchat_view` and `optchat_images` beside Pi's `pi_*`, in the same database and queue. A message is stored in parts of 512K UTF-16 units, under the 2 MB row limit; an image must be under 2 MB. Memory keeps only metadata and node sizes in RAM (about 5 MB of heap for a 16,000-message log, measured in workerd) and reads texts through `read` as it needs them, synchronously, so zoom, search and views stay synchronous.
+- **Storage:** tables `optchat_log`, `optchat_tree`, `optchat_view` and `optchat_images` beside Pi's `pi_*`, in the same database and queue. A message is stored in parts of 512K UTF-16 units, under the 2 MB row limit; an image is one row. Memory keeps only metadata and node sizes in RAM (about 5 MB of heap for a 16,000-message log, measured in workerd) and reads texts through `read` as it needs them, synchronously, so zoom, search and views stay synchronous.
 
 Not done yet:
-- Images in messages: they are left out of memory.
 - Imports: core's `planImport` and `runImport` (append or rebuild, #248) are on main, but the durable side doesn't wire them yet.

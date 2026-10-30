@@ -13,6 +13,8 @@ const base64 = (data: Uint8Array) => {
   for (let i = 0; i < data.length; i += 0x8000) binary += String.fromCharCode(...data.subarray(i, i + 0x8000));
   return btoa(binary);
 };
+/** An image's base64 as bytes. */
+export const decode = (data: string) => Uint8Array.from(atob(data), char => char.charCodeAt(0));
 
 /** The kept images a text refers to, in order, each once; ones never kept are skipped. */
 export async function loadImages(store: Store, text: string): Promise<ImageContent[]> {

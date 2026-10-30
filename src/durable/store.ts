@@ -1,9 +1,14 @@
 import type { SqliteDatabase, SqliteValue } from '@earendil-works/pi-durable/storage/sqlite';
-import { isMime, type Entry, type Mime, type Part, type Saved, type Store, type Summary } from '../core/index.ts';
+import { isMime, type Entry, type ImageStore, type Mime, type Part, type Saved, type Store, type Summary } from '../core/index.ts';
 
 /** A Durable Object's SQLite refuses a row over 2 MB. A message's text is stored as JSON in parts of at most this many UTF-16 units,
  * so a part is at most ~1.5 MB of UTF-8 however the text is written, and a huge pasted email still fits. */
 const PART = 512 * 1024;
+export interface SqliteStoreOptions {
+  /** Where images are kept instead of `optchat_images`, such as an R2 bucket that keeps large binary data out of the database
+   * (its row size limit and storage cost). */
+  images?: ImageStore;
+}
 
 const TABLES = `CREATE TABLE IF NOT EXISTS optchat_log (i INTEGER NOT NULL, part INTEGER NOT NULL, meta TEXT, text TEXT NOT NULL, PRIMARY KEY (i, part));
 CREATE TABLE IF NOT EXISTS optchat_tree (l INTEGER NOT NULL, i INTEGER NOT NULL, size INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY (l, i));
@@ -38,9 +43,9 @@ function texts(rows: Iterable<Record<string, unknown>>, what: string) {
  * `ctx.storage` (direct `ctx.storage.sql` writes could be rolled back with a Pi transaction). `read` reads texts from the same
  * database synchronously; it only reads rows whose writes have finished, so it needs no queue. Its tables are `optchat_*`, beside
  * Pi's `pi_*`. Memory loads only metadata and node sizes; texts stay here. Messages are split so no row passes a Durable Object's
- * 2 MB limit; images must be under 2 MB each. */
+ * 2 MB limit; images go to `images` when given, otherwise to `optchat_images`, one row each. */
 export class SqliteStore implements Store {
-  constructor(private readonly db: SqliteDatabase, private readonly read: Read) {}
+  constructor(private readonly db: SqliteDatabase, private readonly read: Read, private readonly options: SqliteStoreOptions = {}) {}
   async load(): Promise<Saved> {
     await this.db.exec(TABLES);
     const log = await this.db.all<{ meta: string }>('SELECT meta FROM optchat_log WHERE part = 0 ORDER BY i');
@@ -71,9 +76,11 @@ export class SqliteStore implements Store {
     await this.db.run('INSERT OR REPLACE INTO optchat_view (id, json) VALUES (0, ?)', view);
   }
   async putImage(name: string, mimeType: Mime, data: Uint8Array) {
+    if (this.options.images) return this.options.images.putImage(name, mimeType, data);
     await this.db.run('INSERT OR REPLACE INTO optchat_images (name, mime, data) VALUES (?, ?, ?)', name, mimeType, data);
   }
   async image(name: string) {
+    if (this.options.images) return this.options.images.image(name);
     const row = await this.db.get<{ mime: string; data: Uint8Array }>('SELECT mime, data FROM optchat_images WHERE name = ?', name);
     return row && isMime(row.mime) ? { mimeType: row.mime, data: row.data } : undefined;
   }

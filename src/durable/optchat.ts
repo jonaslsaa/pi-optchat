@@ -4,7 +4,10 @@ import {
   type HarnessOptions, type ToolExecutionResult,
 } from '@earendil-works/pi-durable';
 import type { Static, TSchema } from 'typebox';
-import { allowSearch, boundedMessage, cachePayload, completedExchange, CONTINUITY, logMessage, memoryTools, refreshBudget, refreshedRun, refreshPoint, SEARCH_DOC, searchTool, textContent, TURN_REFRESHED, VIEW_DOC, withView, type Memory } from '../core/index.ts';
+import {
+  allowSearch, boundedMessage, cachePayload, completedExchange, CONTINUITY, decode, isImage, isMime, logMessage, memoryTools, refreshBudget, refreshedRun,
+  refreshPoint, SEARCH_DOC, searchTool, textContent, TURN_REFRESHED, VIEW_DOC, withView, type AnyMessage, type ImageContent, type Memory,
+} from '../core/index.ts';
 
 type Context = Parameters<Harness['commit']>[1];
 type Message = Parameters<GenerationHooks['beforeRequest']>[0]['messages'][number];
@@ -22,6 +25,19 @@ const RECEIPT = 'pi:';
 /** The answer that ends a run, whether it succeeded, failed or was aborted. */
 const endsRun = (m: Message) => m.role === 'assistant' && m.stopReason !== 'toolUse';
 const encoder = new TextEncoder();
+
+/** The images memory names, as Pi keeps them: a user's and a tool's, but not zoom's, which are kept already. */
+const keptImages = (message: AnyMessage) => message.role === 'user' || message.role === 'toolResult' && !('toolName' in message && message.toolName === 'zoom')
+  ? Array.isArray(message.content) ? message.content.filter(isImage) : [] : [];
+/** Each distinct image by its base64, named as Pi's OptChat names it: the first 16 hex digits of the SHA-256 of its base64. Web
+ * Crypto is asynchronous and core's ImageRef is not, so images are named before core reads the names. */
+async function imageNames(images: readonly ImageContent[]) {
+  const distinct = new Map(images.map(image => [image.data, image]));
+  return new Map(await Promise.all([...distinct.values()].map(async image => {
+    const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(image.data)), 0, 8);
+    return [image.data, { image, name: Array.from(hash, byte => byte.toString(16).padStart(2, '0')).join('') }] as const;
+  })));
+}
 
 /** One of core's memory tools as a Pi Durable tool, its arguments typed by its own schema. */
 const durableTool = <P extends TSchema>(tool: {
@@ -86,9 +102,17 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
         if (logged + 1 > head - 1) return;
         const page = await conversation.entries({ order: 'ascending', minEntryId: logged + 1 as EntryId, maxEntryId: head - 1 as EntryId }, 256, cursor, ctx);
         for (const entry of page.items) {
-          // Once a save failed, memory refuses appends: requests keep the view it has, and a restart logs the rest from Pi's transcript.
+          const messages = remembered(entry), names = await imageNames(messages.flatMap(keptImages));
+          // Kept before the message is logged, so the image its text names is there for zoom; one that can't be kept is only named.
+          // An image sent again, or read again after a restart, is written again under its name.
+          for (const { image, name } of names.values()) if (isMime(image.mimeType)) {
+            try { await memory.store.putImage(name, image.mimeType, decode(image.data)); }
+            catch (error) { console.error(`OptChat could not keep an image: ${error instanceof Error ? error.message : String(error)}`); }
+          }
+          // Once a save failed (also one queued before, failing during the awaits above), memory refuses appends: requests keep the
+          // view it has, and a restart logs the rest from Pi's transcript.
           if (memory.saveError) return;
-          for (const message of remembered(entry)) logMessage(resumed, message, { receipt: `${RECEIPT}${entry.id}` });
+          for (const message of messages) logMessage(resumed, message, { receipt: `${RECEIPT}${entry.id}`, imageRef: image => `[image ${names.get(image.data)?.name}]` });
           logged = entry.id;
         }
         cursor = page.next;
@@ -106,7 +130,8 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
     if (!last) return [];
     const messages = (await conversation.context(ctx, { at: last.id })).entries.flatMap(chat);
     const start = messages.slice(0, messages.findLastIndex(m => m.role === 'user')).findLastIndex(endsRun) + 1;
-    const exchange = completedExchange(messages.slice(start));
+    const run = messages.slice(start), names = await imageNames(run.filter(m => m.role === 'user').flatMap(keptImages));
+    const exchange = completedExchange(run, image => `[image ${names.get(image.data)?.name}]`);
     const bytes = exchange.reduce((sum, m) => sum + encoder.encode(textContent(m.content)).length, 0);
     return bytes <= previousExchangeBytes ? exchange : [];
   };
