@@ -223,6 +223,10 @@ export default function optchat(pi: ExtensionAPI) {
   const openProfile = async (name: string, ctx: ExtensionContext) => {
     const dir = profilePath(name);
     if (!existsSync(dir)) throw new Error(`Profile ${name} does not exist. Use /optchat profile to create it.`);
+    // A host may start the session again while this process still holds the profile: T3 Code resumes and
+    // replaces sessions under a running extension host. Taking the lock again would meet our own socket and
+    // fail as if a second window owned the profile, so keep the open activation, as a connected window does.
+    if (active?.name === name) { await restoreMain(ctx, active); status(ctx); return; }
     const unlock = await holdProfile(storeFor(dir), dir, name, `${name} · PID ${process.pid} · ${hostname()} · ${ctx.cwd}`, warning => ctx.ui.notify(warning, 'warning'));
     let openingMemory: Memory | undefined;
     try {
