@@ -13,7 +13,7 @@ export const isWindows = process.platform === 'win32';
 const PIPE_PREFIX = '\\\\.\\pipe\\';
 
 export const dataHome = () => resolve(process.env.OPTCHAT_HOME ?? join(homedir(), '.optchat'));
-/** `main` is the last model and thinking level picked in Pi while this profile was open; absent until one is picked. */
+/** `main` is the last model and thinking level picked in Pi while this profile was open, recorded on the first open too. */
 export interface ProfileConfig extends Settings { compactor: ModelChoice; subagent: ModelChoice; main?: ModelChoice }
 export const defaults: ProfileConfig = {
   compactor: { provider: 'anthropic', model: 'claude-sonnet-5-5', thinking: 'medium' },

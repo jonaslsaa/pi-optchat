@@ -79,7 +79,7 @@ Details, errors and join rules: [docs/connected-windows.md](docs/connected-windo
 | Subagents | Anthropic Opus 5.5, high | `/optchat agents model` |
 | Compactor (summaries, imports, fallback handoffs) | Anthropic Sonnet 5.5, medium | `/optchat model` |
 
-All three are saved per profile. The main agent's model and thinking level are saved whenever you change them in Pi and picked again when the profile opens, unless the saved model is no longer available. This includes resumed sessions: the profile's pick replaces the one the session last used. On Pi's command line, `--model` (or `--provider`) keeps that model, `--thinking` that level, and `--models` keeps a saved model only if it is in that list. Subagent and compactor settings do not follow the main model. If you use other providers, change them before chatting. Authentication uses Pi's existing provider login.
+All three are saved per profile. The main agent's model and thinking level are saved when you first open the profile and whenever you change them in Pi, then picked again when the profile opens, unless the saved model is no longer available. This includes resumed sessions: the profile's pick replaces the one the session last used. On Pi's command line, `--model` (or `--provider`) keeps that model, `--thinking` that level, and `--models` keeps a saved model only if it is in that list. Subagent and compactor settings do not follow the main model. If you use other providers, change them before chatting. Authentication uses Pi's existing provider login.
 
 Compression and subagents make extra model requests with your provider credentials.
 
