@@ -16,7 +16,14 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm test
-      - run: npm pack --dry-run
+      # A Cloudflare Workers app with stricter settings than ours typechecks the packed package, as installed from npm.
+      - name: Strict Workers app typechecks the package
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          mkdir -p test/consumer-workers/node_modules/pi-optchat
+          tar -xzf "$RUNNER_TEMP"/pi-optchat-*.tgz --strip-components=1 -C test/consumer-workers/node_modules/pi-optchat
+          npx tsc -p test/consumer-workers
+          cd test/consumer-workers && node --input-type=module -e "await import('pi-optchat/core'); await import('pi-optchat/durable')"
   windows:
     runs-on: windows-latest
     steps:

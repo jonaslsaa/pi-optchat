@@ -1,0 +1,15 @@
+// A Cloudflare Workers app with stricter settings than OptChat's own, typechecking the packed package (see .github/workflows/check.yml).
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["@cloudflare/workers-types"]
+  },
+  "include": ["worker.ts"]
+}
