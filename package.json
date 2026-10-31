@@ -4,8 +4,14 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./core": "./src/core/index.ts",
-    "./durable": "./src/durable/index.ts",
+    "./core": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./durable": {
+      "types": "./dist/durable/index.d.ts",
+      "import": "./dist/durable/index.js"
+    },
     "./package.json": "./package.json"
   },
   "pi": {
@@ -16,6 +22,8 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "test": "tsx --import ./test/support.ts --test test/*.test.ts",
     "test:live": "tsx test/live.ts"
   },
@@ -81,6 +89,7 @@
   },
   "files": [
     "src",
+    "dist",
     "docs/*.md",
     "README.md",
     "LICENSE",
