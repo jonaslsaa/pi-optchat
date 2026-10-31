@@ -6,7 +6,6 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "allowImportingTsExtensions": true,
     "types": ["@cloudflare/workers-types"],
     // pi-optchat links to ../.., whose source would resolve packages from the repo's node_modules; the Worker bundles this folder's, as wrangler.jsonc's aliases say.
     "paths": {
