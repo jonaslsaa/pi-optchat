@@ -19,7 +19,7 @@ export interface ImportOptions {
    * { jobs: 4 })`. Fewer summaries at once than the live memory's 8, which keeps summarizing beside it, keep both under the model's rate limit. */
   open: (generation: number) => Promise<Memory>;
   /** Called once the import is live. Memory in RAM, and `optchat()`'s cursor, are still the old generation's: restart the object
-   * (in a Durable Object, `ctx.abort()`). */
+   * (in a Durable Object, `ctx.abort()` once `ctx.storage.sync()` resolves, so the writes, and the responses waiting on them, go out first). */
   onActivated: () => void;
 }
 

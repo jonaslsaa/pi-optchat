@@ -56,10 +56,12 @@ export class Agent extends DurableObject<Env> {
             // A failed save stops memory's log until the object restarts, which then logs the rest from Pi's transcript: restart now.
             if (this.optchat?.memory.saveError) this.ctx.abort(s);
           } });
-        // An import builds beside the live memory with fewer summaries at once, and restarts the object once it is live.
+        // An import builds beside the live memory with fewer summaries at once, and restarts the object once it is live. The restart
+        // waits for storage to confirm the writes: aborting before drops the response of a request still open, such as the `/import`
+        // that started an import with nothing to summarize, and makes Cloudflare report an internal storage error.
         const importer = optchatImport({ memory, db, read,
           open: generation => openMemory(new SqliteStore(db, read, { ...options, generation }), compress, { budget: Number(this.env.BUDGET), jobs: 4 }),
-          onActivated: () => this.ctx.abort('OptChat import is live') });
+          onActivated: () => void this.ctx.storage.sync().then(() => this.ctx.abort('OptChat import is live')) });
         this.optchat = { memory, extension: optchat({ memory }), importer };
         this.registry.install(this.optchat.extension.extension);
         this.registry.install(importer.extension);
