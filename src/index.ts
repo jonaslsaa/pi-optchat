@@ -47,7 +47,7 @@ async function printReply(text: string) {
     catch (error) { if (!record(error) || error.code !== 'EAGAIN') throw error; await new Promise(resolve => setTimeout(resolve, 10)); }
   }
 }
-interface Active { name: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
+interface Active { name: string; session: string; dir: string; config: ProfileConfig; memory: Memory; inbox: Inbox; children: Children; usage: UsageLedger; unlock: () => Promise<void> }
 
 /** OptChat's own version, read from the package.json beside src/ (in the checkout and the npm package alike); none if unreadable. */
 export const version = ((): string | undefined => {
@@ -223,10 +223,10 @@ export default function optchat(pi: ExtensionAPI) {
   const openProfile = async (name: string, ctx: ExtensionContext) => {
     const dir = profilePath(name);
     if (!existsSync(dir)) throw new Error(`Profile ${name} does not exist. Use /optchat profile to create it.`);
-    // A host may start the session again while this process still holds the profile: T3 Code resumes and
-    // replaces sessions under a running extension host. Taking the lock again would meet our own socket and
-    // fail as if a second window owned the profile, so keep the open activation, as a connected window does.
-    if (active?.name === name) { await restoreMain(ctx, active); status(ctx); return; }
+    // Pi's RPC mode binds extensions twice after new_session/switch_session/fork/clone (setRebindSession, then rebindSession()),
+    // so session_start can arrive again for the session this profile already serves. Taking the lock again would meet our own socket.
+    // Only the same session is kept: another session without a session_shutdown still fails loudly below.
+    if (active?.name === name && active.session === ctx.sessionManager.getSessionId()) { await restoreMain(ctx, active); status(ctx); return; }
     const unlock = await holdProfile(storeFor(dir), dir, name, `${name} · PID ${process.pid} · ${hostname()} · ${ctx.cwd}`, warning => ctx.ui.notify(warning, 'warning'));
     let openingMemory: Memory | undefined;
     try {
@@ -254,7 +254,7 @@ export default function optchat(pi: ExtensionAPI) {
         .filter(r => !loggedReports.has(reportReceipt(r.text)));
       atomicWrite(pending, JSON.stringify(reports));
       rememberProfile(name);
-      active = { name, dir, config, memory, inbox, children, usage, unlock }; fault = undefined; idle = () => ctx.isIdle();
+      active = { name, session: sessionId, dir, config, memory, inbox, children, usage, unlock }; fault = undefined; idle = () => ctx.isIdle();
       await restoreMain(ctx, active);
       if (ctx.mode === 'tui') unmountNavigation = mountNavigation(ctx, children, memory, shortcut, page => { void inspect(ctx, page); });
       // A one-shot run (`pi -p`, JSON) exits after its own prompt, which would end every conversation connected to it.
