@@ -24,10 +24,11 @@ export function typedText(content: unknown) {
   const text = textContent(content, false);
   return { text, bare: text.replace(/\n\n\[Image[ :][^\n]*\](?:\n\[Image[ :][^\n]*\])*$/, '') };
 }
-/** A custom message belongs to the conversation when shown or when Pi identifies it as the run's input. UI visibility
- * alone cannot distinguish a hidden wake from supplementary context. Other hidden messages stay custom: the model sees
- * them, but memory and replay leave them out. The type tag keeps automated input distinct from the user's words;
- * OptChat reports already identify their source and are logged as `work`. */
+/** Pi's convertToLlm sends every custom message to the model as a user message. One that is shown, or that starts the run
+ * (`input`, shown or hidden), is part of the chat, so it becomes a user message here too; another extension's starts with
+ * "[customType] ", as the recipe marks background work, so the compactor never takes it for the user's words. Any other hidden
+ * one (display false), such as context an extension injects each turn, stays custom: the model still sees it, and memory and
+ * the replay leave it out. Reports reach the model and the previous-exchange replay as user messages; memory logs them as `work`. */
 export function asUser(message: AgentMessage, input = false): AgentMessage {
   if (message.role !== 'custom' || !message.display && !input) return message;
   const { content, customType, timestamp } = message;
@@ -56,20 +57,14 @@ export function previousExchange(branch: readonly SessionEntry[], limit = PREVIO
 function latestExchange(branch: readonly SessionEntry[]) {
   let end = -1;
   let legacyEnd = branch.length;
-  const messages = (entries: readonly SessionEntry[]) => {
-    let input = false;
-    return entries.flatMap(entry => {
-      // Written immediately before a hidden wake is persisted, without changing its display flag or details.
-      if (entry.type === 'custom' && entry.customType === RUN_BOUNDARY && record(entry.data) && entry.data.state === 'input') {
-        input = true; return [];
-      }
-      const message: AgentMessage | undefined = entry.type === 'message' ? entry.message : entry.type === 'custom_message'
-        ? { role: 'custom', customType: entry.customType, content: entry.content, display: entry.display, timestamp: Date.parse(entry.timestamp) } : undefined;
-      if (!message) return [];
-      const normalized = asUser(message, input); input = false;
-      return [normalized];
-    });
-  };
+  // A run's first message is its input, a hidden custom one too: Pi puts it before any context it or other extensions inject.
+  const messages = (entries: readonly SessionEntry[], run = false) => entries.flatMap(entry => {
+    const message: AgentMessage | undefined = entry.type === 'message' ? entry.message : entry.type === 'custom_message'
+      ? { role: 'custom', customType: entry.customType, content: entry.content, display: entry.display, timestamp: Date.parse(entry.timestamp) } : undefined;
+    if (!message) return [];
+    const input = run; if (message.role !== 'system') run = false;
+    return [asUser(message, input)];
+  });
   for (let i = branch.length - 1; i >= 0; i--) {
     const entry = branch[i];
     if (entry.type !== 'custom' || entry.customType !== RUN_BOUNDARY || !record(entry.data)) continue;
@@ -77,7 +72,7 @@ function latestExchange(branch: readonly SessionEntry[]) {
     if (entry.data.state === 'end') end = i;
     else if (entry.data.state === 'start') {
       if (end >= 0) {
-        const exchange = completedExchange(messages(branch.slice(i + 1, end)), imageRef);
+        const exchange = completedExchange(messages(branch.slice(i + 1, end), true), imageRef);
         if (exchange.length) return exchange;
       }
       end = -1;
