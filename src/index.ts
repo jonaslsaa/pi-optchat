@@ -73,6 +73,8 @@ export default function optchat(pi: ExtensionAPI) {
   let view: string | undefined;
   let prompt = '';
   let runStarted = false;
+  /** The run was started by a custom message (`sendMessage` with `triggerTurn` while idle): its first message is that input, shown or hidden. */
+  let wake = false;
   let fault: string | undefined;
   /** Reports not yet in memory. `count`: how many subagent reports the text joins. `batch`: held while the rest of that spawn runs, not sent yet.
    * `steered`: last sent into a running turn, where Esc or a dequeue can clear it from Pi's queue unseen. */
@@ -410,7 +412,7 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('before_agent_start', (event, ctx) => {
     if (!active) return; // Plain Pi run: leave Pi's own prompt untouched.
     const a = active;
-    flush(); run = []; logged = 0; keep = 0; view = undefined; runStarted = true;
+    flush(); run = []; logged = 0; keep = 0; view = undefined; runStarted = true; wake = event.messageType === 'custom';
     previous = a.config.previousExchange ? previousExchange(ctx.sessionManager.getBranch(), a.config.previousExchangeKB * 1000) : [];
     pi.appendEntry(RUN_BOUNDARY, { state: 'start' });
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
@@ -424,7 +426,8 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('message_end', async (event, ctx) => {
     if (!active || !runStarted) return;
     const bounded = boundedMessage(event.message);
-    const message = asUser(bounded);
+    // Pi puts the message that starts a run first, before any context it or other extensions inject.
+    const message = asUser(bounded, wake); if (bounded.role !== 'system') wake = false;
     // Before the message is logged, so the image its text names is already there for zoom; zoom's own images are kept already.
     if (message.role === 'user' || message.role === 'toolResult' && message.toolName !== 'zoom') {
       try { await saveImages(active.memory.store, message.content); }

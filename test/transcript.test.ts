@@ -52,6 +52,7 @@ test('retain the exact last answer and its requests, excluding prior working con
   assert.match(textContent(context[1].content), /^<chat>\nsummary\n<\/chat>/);
   assert.doesNotMatch(JSON.stringify(context), /OLD PRIVATE REASONING|OLD TOOL OUTPUT|Older question|Older answer|image-bytes/);
   assert.throws(() => buildContext(history, [], 'view', 'prompt', previous), /no current user message/);
+  assert.throws(() => buildContext(history, [{ role: 'custom', customType: 'context', content: 'Supplementary instructions', display: false, timestamp: 1 }], 'view', 'prompt', previous), /no current user message/);
   assert.equal(final.content[0].type, 'thinking', 'the saved transcript must not be mutated');
 });
 
@@ -234,7 +235,7 @@ test('another extension\'s shown custom message becomes a user message tagged wi
   assert.deepEqual(custom('plan-mode-context', '[PLAN MODE ACTIVE]', false), { role: 'custom', customType: 'plan-mode-context', content: '[PLAN MODE ACTIVE]', display: false, timestamp: 1 });
 });
 
-test('another extension\'s shown custom message starts a turn and stays in memory; context it hides and injects each turn reaches the model but not memory', async () => {
+test('custom wake messages stay in memory and replay regardless of display; hidden supplementary context stays transient', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-custom-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = dir;
@@ -242,7 +243,13 @@ test('another extension\'s shown custom message starts a turn and stays in memor
   // As Pi's plan-mode example extension injects its instructions with every prompt while plan mode is on.
   const plan = '[PLAN MODE ACTIVE]\nYou are in plan mode.';
   let planning = false;
-  const planMode = (pi: ExtensionAPI) => pi.on('before_agent_start', () => planning ? { message: { customType: 'plan-mode-context', content: plan, display: false } } : undefined);
+  const planMode = (pi: ExtensionAPI) => {
+    // The same type can carry a wake or supplementary context: classification must follow its source.
+    pi.on('before_agent_start', () => planning ? { message: { customType: 'fixture-hidden-result', content: plan, display: false } } : undefined);
+    // Another extension may replace a message before OptChat's message_end handler sees it.
+    pi.on('message_end', event => event.message.role === 'custom' ? { message: { ...event.message } } : undefined);
+  };
+  const errors: string[] = [];
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
     createProfile('fixture');
@@ -265,34 +272,54 @@ test('another extension\'s shown custom message starts a turn and stays in memor
     });
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
     const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
-      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat, planMode] });
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [planMode, optchat] });
     await loader.reload();
-    const manager = SessionManager.inMemory(dir);
+    const manager = SessionManager.create(dir, join(dir, 'sessions'));
     manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
     session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
       resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom'] })).session;
-    await session.bindExtensions({});
-    await session.prompt('Start the scout.');
-    // As pi-interactive-subagents reports a finished subagent while Pi is idle.
-    const result = 'Sub-agent "Scout" finished: found three files.';
-    await session.sendCustomMessage({ customType: 'subagent_result', content: result, display: true }, { triggerTurn: true, deliverAs: 'steer' });
-    await session.agent.waitForIdle();
-    const tagged = `[subagent_result] ${result}`;
-    assert.equal(session.getLastAssistantText(), `Answer to: ${tagged}`);
-    assert.equal(textContent(captured.at(-1)!.at(-1)?.content), tagged);
-    await session.prompt('What did it find?');
-    assert.deepEqual(captured.at(-1)!.map(m => m.role), ['user', 'assistant', 'user']);
-    assert.ok(textContent(captured.at(-1)![0].content).endsWith(tagged));
-    assert.equal(textContent(captured.at(-1)![1].content), `Answer to: ${tagged}`);
+    await session.bindExtensions({ onError: error => errors.push(error.error),
+      uiContext: { ...session.extensionRunner.getUIContext(), notify: (message, type) => { if (type === 'error') errors.push(message); } } });
     const main = join(dir, 'profiles', 'fixture', 'main');
-    const log = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n').map(line => JSON.parse(line)));
-    assert.ok(log.some(entry => entry.kind === 'user' && entry.text === tagged));
+    const log = () => readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n').map(line => JSON.parse(line)));
+    // A hidden wake can be the first input; no historical human task is needed. Types are arbitrary.
+    for (const display of [false, true]) {
+      const customType = display ? 'fixture-result' : 'fixture-hidden-result';
+      const content = 'Background work finished: found three files.', details = { job: 'fixture' };
+      const tagged = `[${customType}] ${content}`, before = captured.length;
+      await session.sendCustomMessage({ customType, content, display, details }, { triggerTurn: true });
+      await session.waitForIdle();
+      assert.deepEqual(errors, []);
+      assert.equal(captured.length, before + 1);
+      assert.equal(session.getLastAssistantText(), `Answer to: ${tagged}`);
+      assert.ok(textContent(captured.at(-1)!.at(-1)?.content).endsWith(tagged));
+      assert.equal(log().filter(entry => entry.text === tagged).length, 1);
+      const saved = SessionManager.open(manager.getSessionFile()!);
+      const original = saved.getBranch().findLast(entry => entry.type === 'custom_message');
+      assert.ok(original?.type === 'custom_message');
+      assert.deepEqual([original.customType, original.content, original.display, original.details], [customType, content, display, details]);
+      assert.deepEqual(previousExchange(saved.getBranch()).map(m => textContent(m.content)), [tagged, `Answer to: ${tagged}`]);
+      await session.prompt('What did it find?');
+      assert.deepEqual(captured.at(-1)!.map(m => m.role), ['user', 'assistant', 'user']);
+      assert.ok(textContent(captured.at(-1)![0].content).endsWith(tagged));
+      assert.equal(textContent(captured.at(-1)![1].content), `Answer to: ${tagged}`);
+      assert.equal(log().filter(entry => entry.text === tagged).length, 1, 'replay must not log the input again');
+    }
     planning = true;
     await session.prompt('Plan the change.');
     assert.ok(captured.at(-1)!.some(m => m.role === 'user' && textContent(m.content) === plan));
-    const after = readdirSync(main).flatMap(file => readFileSync(join(main, file), 'utf8').trim().split('\n').map(line => JSON.parse(line)));
+    const after = log();
     assert.ok(after.some(entry => entry.kind === 'user' && entry.text === 'Plan the change.'));
     assert.ok(!after.some(entry => entry.kind === 'user' && entry.text.includes('PLAN MODE')));
+    // Even identical content and type are distinct inputs when Pi identifies only one as the trigger.
+    const before = captured.length;
+    await session.sendCustomMessage({ customType: 'fixture-hidden-result', content: plan, display: false }, { triggerTurn: true });
+    assert.equal(captured.length, before + 1);
+    const taggedPlan = `[fixture-hidden-result] ${plan}`;
+    assert.equal(log().filter(entry => entry.text === taggedPlan).length, 1);
+    assert.ok(!log().some(entry => entry.text === plan));
+    assert.deepEqual(previousExchange(SessionManager.open(manager.getSessionFile()!).getBranch()).map(m => textContent(m.content)), [taggedPlan, `Answer to: ${plan}`]);
+    assert.deepEqual(errors, []);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
