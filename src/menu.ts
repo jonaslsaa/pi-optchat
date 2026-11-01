@@ -8,7 +8,7 @@ import { frame, showModel } from './settings-page.ts';
 export const ACTIONS = ['profile', 'settings', 'model', 'agents', 'usage', 'activity', 'instructions', 'browse', 'import'] as const;
 export type MenuAction = typeof ACTIONS[number];
 const DESCRIPTIONS: Record<MenuAction, string> = {
-  profile: 'Switch or create a profile',
+  profile: 'Switch, create, or delete a profile',
   settings: 'Models, subagent limits, memory options',
   model: 'Compactor model and effort',
   agents: 'Live agent tree and saved runs',
@@ -48,6 +48,34 @@ export function optchatMenu(theme: Theme, title: string, status: MenuStatus | un
     // j and k move too, as in Pi's own select dialog that this menu replaces.
     const step = data === 'j' ? 1 : data === 'k' ? -1 : 0, at = ACTIONS.findIndex(a => a === list.getSelectedItem()?.value);
     if (step) list.setSelectedIndex(Math.max(0, Math.min(ACTIONS.length - 1, at + step)));
+    else list.handleInput(data);
+    redraw();
+  } });
+}
+
+/** The profile list's own entry for creating one; never a valid profile name (the pattern allows lowercase only). */
+export const CREATE_PROFILE = '+ Create profile';
+/** What the picker returns: a profile to open, a profile to delete, or nothing for a cancel. */
+export type ProfilePick = string | { delete: string } | undefined;
+
+/** The profile list: Pi's session list for profiles, so Ctrl+D deletes the highlighted one the way it deletes a session there. */
+export function profilePicker(theme: Theme, names: string[], close: (pick?: ProfilePick) => void, redraw = () => {}) {
+  const items = [...names.map(name => ({ value: name, label: name })), { value: CREATE_PROFILE, label: CREATE_PROFILE }];
+  const list = new SelectList(items, items.length, {
+    selectedPrefix: t => theme.fg('accent', t), selectedText: t => theme.fg('accent', t),
+    description: t => theme.fg('muted', t), scrollInfo: t => theme.fg('muted', t), noMatch: t => theme.fg('muted', t) },
+    { minPrimaryColumnWidth: 1, maxPrimaryColumnWidth: Math.max(...items.map(i => i.label.length)) + 4 });
+  list.onSelect = item => close(item.value);
+  list.onCancel = () => close();
+  const actions = new Box(1, 0); actions.addChild(list);
+  const page = frame(theme, 'OptChat profile', undefined, [new Spacer(1), actions, new Spacer(1),
+    new Text(theme.fg('dim', names.length ? '↑↓ select · Enter open · Ctrl+D delete · Esc cancel' : 'Enter create · Esc cancel'), 1, 0)]);
+  return Object.assign(page, { handleInput: (data: string) => {
+    const selected = list.getSelectedItem()?.value;
+    // Ctrl+D is Pi's own delete key in the session list; reading it here keeps the two lists behaving the same.
+    if (data === '\x04') { if (selected && selected !== CREATE_PROFILE) close({ delete: selected }); return; }
+    const step = data === 'j' ? 1 : data === 'k' ? -1 : 0, at = items.findIndex(item => item.value === selected);
+    if (step) list.setSelectedIndex(Math.max(0, Math.min(items.length - 1, at + step)));
     else list.handleInput(data);
     redraw();
   } });

@@ -58,7 +58,7 @@ Details, errors and join rules: [docs/connected-windows.md](docs/connected-windo
 | Command | Action |
 | --- | --- |
 | `/optchat` | Status and actions menu. |
-| `/optchat profile` | Select or create a profile. Switching starts a fresh Pi session. |
+| `/optchat profile` | Select, create, or delete a profile. Switching starts a fresh Pi session; Ctrl+D deletes the highlighted one. |
 | `/optchat settings` | This profile's [settings](#settings). |
 | `/optchat model` | Compactor model and effort for this profile. Type to filter the models you are logged in to; the current one is marked. |
 | `/optchat agents` | Live agent tree and saved run history. |
@@ -209,7 +209,7 @@ Profile data lives in `~/.optchat/profiles/<name>/` (override the root with `OPT
 | `memory.html` | Snapshot from `/optchat browse` |
 
 - Each profile folder is a local Git repository, committed after each turn. It has no remote, so it is not a backup: copy the folder while Pi is closed.
-- To delete a profile, delete its folder. Your original Pi sessions are kept in Pi's normal session directory.
+- To delete a profile, press Ctrl+D on it in `/optchat profile` and confirm: its folder goes away and, when the profile was the last one opened, the saved pointer with it. Pi refuses a profile another Pi is using, so that Pi never writes into a folder that is gone. Your original Pi sessions are kept in Pi's normal session directory, so deleting the folder by hand does the same thing.
 
 Git checkpoints and the pluggable `Store` seam (for memory on another machine): [docs/storage.md](docs/storage.md).
 
