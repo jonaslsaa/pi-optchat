@@ -42,15 +42,17 @@ export function boundedMessage<M extends AnyMessage>(message: M): M {
   if (text.length <= CAP) return message;
   return { ...message, content: [{ type: 'text', text: cap(text) }, ...message.content.filter(c => c.type === 'image')] };
 }
-/** The view goes before the first user message's words, in that message, so everything up to them is one cached prefix. */
-export function withView<M extends AnyMessage>(messages: readonly M[], view: string): (M | UserMessage)[] {
+/** The view goes before the first user message's words, in that message, so everything up to them is one cached prefix. `after`, a
+ * host's text that changes more often than the view (the current date, say), goes in its own block right after it, outside that prefix. */
+export function withView<M extends AnyMessage>(messages: readonly M[], view: string, after?: string): (M | UserMessage)[] {
   let injected = false;
   return messages.map(message => {
     if (!is(message, 'user') || injected) return message;
     injected = true;
-    // OpenAI joins text blocks with nothing between them, so the user's words start their own paragraph after the view.
+    // OpenAI joins text blocks with nothing between them, so `after` and the user's words start their own paragraphs after the view.
     const [first, ...rest] = typeof message.content === 'string' ? [{ type: 'text' as const, text: message.content }] : message.content;
-    return { ...message, content: [{ type: 'text' as const, text: view }, ...first?.type === 'text' ? [{ ...first, text: `\n\n${first.text}` }] : first ? [first] : [], ...rest] };
+    const extra = after ? [{ type: 'text' as const, text: `\n\n${after}` }] : [];
+    return { ...message, content: [{ type: 'text' as const, text: view }, ...extra, ...first?.type === 'text' ? [{ ...first, text: `\n\n${first.text}` }] : first ? [first] : [], ...rest] };
   });
 }
 /** A settled run's requests and its final text answer, for the previous exchange; none unless it ended in one. The caller supplies

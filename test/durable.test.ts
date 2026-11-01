@@ -12,7 +12,7 @@ import { NodeSqliteDatabase } from '@earendil-works/chord/sqlite/node';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from '@earendil-works/pi-ai/providers/faux';
 import { openMemory, type Compressor, type ImageStore, type ImportedEntry, type Mime } from '../src/core/index.ts';
-import { optchat, optchatImport, SqliteStore, withCacheMarks, type Read, type SqliteStoreOptions } from '../src/durable/index.ts';
+import { optchat, optchatImport, SqliteStore, withCacheMarks, type OptChatOptions, type Read, type SqliteStoreOptions } from '../src/durable/index.ts';
 import { importTables } from '../src/durable/store.ts';
 import { imageRef } from '../src/images.ts';
 import { removeDir } from './support.ts';
@@ -24,7 +24,7 @@ const text = (content: unknown) => typeof content === 'string' ? content
 /** One OptChat agent on Pi Durable, over one SQLite database as in a Durable Object: Pi's tables `pi_*`, memory's `optchat_*`. */
 /** `importing` builds an import's summaries (`compress` by default). */
 async function open(file: string, replies: FauxResponseStep[], compress: Compressor = async ({ part }) => `line ${part.l}/${part.i}`,
-  { contextWindow, images, importing = compress }: { contextWindow?: number; importing?: Compressor } & SqliteStoreOptions = {}) {
+  { contextWindow, images, importing = compress, afterView }: { contextWindow?: number; importing?: Compressor } & SqliteStoreOptions & Pick<OptChatOptions, 'afterView'> = {}) {
   const sync = new DatabaseSync(file), db = new NodeSqliteDatabase(sync);
   const faux = fauxProvider(contextWindow ? { models: [{ id: 'small', contextWindow }] } : {}), models = createModels();
   models.setProvider(faux.provider);
@@ -35,7 +35,7 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
   }));
   const query: Read = (sql, ...params) => sync.prepare(sql).iterate(...params);
   const memory = await openMemory(new SqliteStore(db, query, { images }), compress);
-  const memoryExtension = optchat({ memory });
+  const memoryExtension = optchat({ memory, afterView });
   // Resolves when an import goes live, and rejects when a task fails, so a failed import doesn't leave a test waiting.
   let activate = () => {}, fault = (_: unknown) => {};
   const activated = new Promise<void>((resolve, reject) => { activate = resolve; fault = reject; });
@@ -339,6 +339,35 @@ test('reopened mid-run after a refresh, the run is sent from where the log says'
     // Five steps before the eviction, each logged once although the refresh logged some of them before it.
     assert.deepEqual(after.memory.root.map(e => e.kind), ['user', ...Array(5).fill(['tool', 'echo']).flat(), 'talk']);
   } finally { await after.close(); }
+});
+
+test('afterView\'s text is its own block after the view, before the previous exchange, fixed until a refresh, and never logged', async () => {
+  let calls = 0;
+  const agent = await open(file(), [fauxAssistantMessage('Hi'), read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('done')], undefined,
+    { contextWindow: 150, afterView: () => `Now: ${++calls}` });
+  try {
+    await agent.ask('hello');
+    await agent.ask('read them all');
+    const firsts = agent.sent.map(request => request.find(m => m.role === 'user')?.content as { text?: string }[]);
+    // The view is a block of its own, so its cache marks and prefix are the same with or without the app's text.
+    assert.deepEqual(firsts[1].slice(1).map(block => block.text), ['\n\nNow: 2', '\n\nhello']);
+    const nows = firsts.map(blocks => blocks[1].text);
+    const refreshed = agent.sent.findIndex(request => request.some(m => text(m.content).includes('this turn grew long')));
+    assert.deepEqual([nows[0], ...new Set(nows.slice(1, refreshed))], ['\n\nNow: 1', '\n\nNow: 2']);
+    assert.notEqual(nows[refreshed], nows[refreshed - 1]);
+    const piEntries = (await agent.root.entries({ order: 'ascending' }, 256, undefined, context)).items;
+    assert.ok(![...agent.memory.entries(), ...piEntries.map(e => ({ text: JSON.stringify(e) }))].some(e => e.text.includes('Now:')));
+  } finally { await agent.close(); }
+});
+
+test('when afterView throws, the request still carries the view', async (t) => {
+  const errors = t.mock.method(console, 'error', () => {});
+  const agent = await open(file(), [fauxAssistantMessage('Hi')], undefined, { afterView: () => { throw new Error('no state'); } });
+  try {
+    await agent.ask('hello');
+    assert.deepEqual(agent.sent[0].filter(m => m.role !== 'system').map(m => text(m.content)), ['<chat>\n\n</chat>\n\nhello']);
+    assert.match(String(errors.mock.calls[0]?.arguments[0]), /no state/);
+  } finally { await agent.close(); }
 });
 
 // Imports: a new generation is built beside the live one by a Pi Durable task, and made live in one transaction.
