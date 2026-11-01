@@ -50,7 +50,8 @@ test('agent view shows the child conversation like the main chat, fills the scre
     assert.match(text, /TOOL_OUTPUT_42/);
     assert.match(text, /There are 42 files\./);
     assert.match(text, /Esc back to main/);
-    assert.doesNotMatch(text, /MEMORY VIEW MUST NOT APPEAR|hidden reasoning|Ctrl\+X/);
+    assert.doesNotMatch(text, /MEMORY VIEW MUST NOT APPEAR|Ctrl\+X/);
+    assert.match(text, /hidden reasoning/, 'a thinking block shows its reasoning, as in the main chat');
     assert.ok(text.indexOf('Count the files', text.indexOf('\n')) < text.indexOf('Listing them now.'), 'the task opens the conversation');
     rows = 12;
     assert.equal(view.render(40).length, 12);
