@@ -41,14 +41,16 @@ export function logMessage(memory: Memory, message: AnyMessage, { kind, receipt,
   const date = new Date(message.timestamp).toISOString();
   for (const [k, text] of said(message, { kind, imageRef })) memory.append(k, text, date, receipt);
 }
+/** Ends a child conversation's first input, before its task. */
+export const TASK_HEADER = '\n\nYour task:\n';
 /** A child conversation's first input: the view, then optionally the exchange before the run and the run so far as `kind: text`
- * lines (images left out), then its task. With the view and task alone, it is what Pi's subagents get. */
+ * lines (each image as `[image]`), then its task. With the view and task alone, it is what Pi's subagents get. */
 export function childInput({ view, previous = [], run = [], task }: { view: string; previous?: readonly AnyMessage[]; run?: readonly AnyMessage[]; task: string }) {
   const part = (title: string, messages: readonly AnyMessage[]) => {
-    const lines = messages.flatMap(m => said(m)).map(([kind, text]) => `${kind}: ${text}`);
+    const lines = messages.flatMap(m => said(m, { imageRef: () => '[image]' })).map(([kind, text]) => `${kind}: ${text}`);
     return lines.length ? [`${title}:\n${lines.join('\n')}`] : [];
   };
-  return [view, ...part('The exchange before this run', previous), ...part('This run so far', run), `Your task:\n${task}`].join('\n\n');
+  return `${[view, ...part('The exchange before this run', previous), ...part('This run so far', run)].join('\n\n')}${TASK_HEADER}${task}`;
 }
 /** A tool result over CAP keeps its head and tail, and its images. */
 export function boundedMessage<M extends AnyMessage>(message: M): M {

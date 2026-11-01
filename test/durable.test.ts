@@ -76,7 +76,7 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
   };
   const close = async () => { await harness.close(context); await memory.close(); await db.close(); };
   const keptInSqlite = () => sync.prepare('SELECT count(*) AS n FROM optchat_images').get()?.n;
-  return { memory, root, sent, ask, idle, close, keptInSqlite, harness, importer, activated, loaded, db, query, sql: sync };
+  return { memory, root, sent, ask, idle, close, keptInSqlite, harness, importer, activated, loaded, db, query, sql: sync, chat: memoryExtension };
 }
 // A test may close a database and open it again, so the folders go once every test is done.
 const dirs: string[] = [];
@@ -425,12 +425,12 @@ test('a snapshot starts a child with the view, afterView, the previous exchange 
   try {
     await agent.ask('hello');
     await agent.ask('write to Kari');
-    const logged = agent.memory.entries().map(e => `${e.kind}: ${e.text}`);
+    const logged = agent.memory.entries().map(e => `${e.kind}: ${e.text}`), echo = `echo: date: ${new Date(agent.memory.root[0].date).toString()}`;
     // The run so far holds this tool's own call, and the steps before it as text lines.
     const input = [
       '<chat>\n0+1|user: hello\n1+1|talk: Hi Jonas\n</chat>\n\nNow: Monday',
       'The exchange before this run:\nuser: hello\ntalk: Hi Jonas',
-      `This run so far:\nuser: write to Kari\ntool: date {"id":0}\n${logged[4]}\ntool: review {"draft":"Hei Kari"}`,
+      `This run so far:\nuser: write to Kari\ntool: date {"id":0}\n${echo}\ntool: review {"draft":"Hei Kari"}`,
       'Your task:\nReview this draft: Hei Kari',
     ].join('\n\n');
     // The child's requests are its own: no view put before its input, nothing refreshed, one input for both runs of the tool.
@@ -439,11 +439,24 @@ test('a snapshot starts a child with the view, afterView, the previous exchange 
     assert.deepEqual(requests[0].tools, ['zoom', 'date', 'search']);
     // Memory logs the parent's run, with the child's answer only as the tool's result: not the child's zoom, nor its reply.
     assert.deepEqual(logged.slice(2), [
-      'user: write to Kari', 'tool: date {"id":0}', logged[4], 'tool: review {"draft":"Hei Kari"}', 'echo: review: Looks fine.', 'talk: Sent.',
+      'user: write to Kari', 'tool: date {"id":0}', echo, 'tool: review {"draft":"Hei Kari"}', 'echo: review: Looks fine.', 'talk: Sent.',
     ]);
     // Only the parent is reset once idle; the child keeps its context.
     const kinds = (await (await agent.harness.conversation(child!, context))!.context(context)).entries.map(e => e.kind);
     assert.deepEqual(kinds.filter(kind => kind !== 'pi.system'), ['pi.user', 'pi.assistant', 'pi.tool-result', 'pi.assistant']);
+  } finally { await agent.close(); }
+});
+
+test('a snapshot while idle leaves the next request its own view: afterView is asked again; a reset\'s note shows as memory logs it', async () => {
+  let calls = 0;
+  const agent = await open(file(), [fauxAssistantMessage('Hi'), fauxAssistantMessage('Again')], undefined, { afterView: () => `Now: ${++calls}` });
+  try {
+    await agent.ask('hello');
+    await agent.root.reset('Carry on with the draft', context);
+    assert.equal(text(await agent.chat.snapshot('Check the draft', context)).split('</chat>\n\n')[1],
+      'Now: 2\n\nThis run so far:\nuser: [Handoff note] Carry on with the draft\n\nYour task:\nCheck the draft');
+    await agent.ask('again');
+    assert.match(text(agent.sent[1].find(m => m.role === 'user')?.content ?? ''), /<\/chat>\n\nNow: 3\n/);
   } finally { await agent.close(); }
 });
 

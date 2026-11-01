@@ -20,9 +20,9 @@ With the Agents SDK's `PiHarness` this goes in its `harness` factory, which supp
 
 ## Child conversations
 
-`memoryExtension.snapshot(task, ctx)` gives a child conversation its first input, so it sees what the conversation's next request would: the view (with `afterView`'s text), the previous exchange, the run so far, then `task`. Take it in a tool's `execute`, where the run so far ends with the assistant message that made this call, or while the conversation is idle. It is one text block, `[{ type: 'text', text }]`, so cache marks reach it: the previous exchange and the run are `kind: text` lines as memory logs them (`user:`, `talk:`, `tool:`, `echo:`), since Pi's tool calls and results can't go into a child's input as they are, and images in them are left out. Submit it as the child's first input; it is not `init` entries. The snapshot logs only what that next request would, never the child's own work.
+`memoryExtension.snapshot(task, ctx)` builds a child conversation's first input to submit (not `init` entries): the view with `afterView`'s text, the previous exchange, the run so far (in a tool's `execute`, up to the call that made it), then `task`. It is one text block, `[{ type: 'text', text }]`, so cache marks reach it. Tool calls and results can't go into another conversation as they are, so the exchange and run are `kind: text` lines as memory logs them, images as `[image]`.
 
-It is not stable across restarts, by design: the view grows and `afterView` may change. So take it once. Pi Durable's subagent recipe already does what this needs: the tool finds its child with `scanConversations({ ownerTaskId })` before creating one, submits with a `requestId`, and is `replay: 'safe'`, so a rerun after a crash finds the child and its input and doesn't snapshot again:
+It isn't stable across restarts, by design: take it once. With Pi Durable's subagent recipe (find the child by `ownerTaskId`, submit with a `requestId`, `replay: 'safe'`), a rerun finds the child and its input and doesn't snapshot again:
 
 ```ts
 const Review: Extension = defineExtension({ name: 'review', tools: [defineTool({
@@ -46,11 +46,11 @@ const Review: Extension = defineExtension({ name: 'review', tools: [defineTool({
 })] });
 ```
 
-A task-owned child starts as a copy of its owner's agent, so it keeps the `optchat` extension: keep it selected (an `extensions: [...]` array that replaces the list drops it). The child is then offered `zoom` and `date` (and `search` with `search: true`), which only read memory, and its prompt section explains its input (`CHILD`, then the view doc). The extension's hooks leave it alone: its requests go as Pi builds them (no view put before them, no refresh), it is never logged or reset, so it adds no summaries, and Pi's own compaction applies to it as the settings say. `test/durable.test.ts` checks all of this.
+Keep `optchat` selected in the child, as its copy of the owner's agent does. It then gets the read-only `zoom` and `date` (and `search` when on) and the `CHILD` prompt. The hooks leave it alone: no view in its requests, no refresh, logging, reset or summaries. Compaction is declined only for the parent, so a child compacts only if the app leaves Pi's compaction on.
 
-- **Plain children** (no snapshot) should drop `optchat` (`extensions: { remove: [memoryExtension.extension] }`), or they get the child prompt and memory tools with no view.
-- **A clean import** that goes live while a child runs makes the ids in its frozen view point at the new memory's messages.
-- **Size:** the input is the view (up to 128K bytes), the previous exchange (up to `previousExchangeBytes`) and the run (up to `refreshAt` of the parent's window), so a child on a smaller-window model may overflow.
+- **Plain children** (no snapshot) should drop `optchat`, or they get the child prompt with no view.
+- **A clean import** going live during a child's run makes the ids in its view point at the new memory.
+- **Size:** the view (up to 128K bytes), `afterView`'s text, the previous exchange (up to `previousExchangeBytes`), the run (usually under `refreshAt` of the parent's window, but not capped: a large last step passes it) and the task. Pick a child model whose window holds all of it; on Cloudflare the input is one transcript row, under the 2 MB row limit.
 
 ## How it works
 
