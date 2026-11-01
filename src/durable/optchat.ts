@@ -1,11 +1,11 @@
 import {
   AssistantEntry, CompactionTask, defineExtension, defineTask, defineTool, GenerationTask, hook, InboxDoc, LiveDoc, ResetEntry, ROOT_CONVERSATION_ID,
   section, ToolResultEntry, UserEntry, type Conversation, type ConversationId, type EntryId, type EntryRecord, type GenerationHooks, type Harness,
-  type HarnessOptions, type ToolExecutionResult,
+  type HarnessOptions, type ToolExecutionResult, type UserInput,
 } from '@earendil-works/pi-durable';
 import type { Static, TSchema } from 'typebox';
 import {
-  allowSearch, boundedMessage, cachePayload, completedExchange, CONTINUITY, decode, isImage, isMime, logMessage, memoryTools, refreshBudget, refreshedRun,
+  allowSearch, boundedMessage, cachePayload, CHILD, childInput, completedExchange, CONTINUITY, decode, isImage, isMime, logMessage, memoryTools, refreshBudget, refreshedRun,
   refreshPoint, SEARCH_DOC, searchTool, textContent, TURN_REFRESHED, VIEW_DOC, withView, type AnyMessage, type ImageContent, type Memory,
 } from '../core/index.ts';
 
@@ -148,8 +148,9 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
     const bytes = exchange.reduce((sum, m) => sum + encoder.encode(textContent(m.content)).length, 0);
     return bytes <= previousExchangeBytes ? exchange : [];
   };
-  const beforeRequest: GenerationHooks['beforeRequest'] = async ({ messages }, api, ctx) => {
-    if (api.conversationId !== id) return undefined;
+  /** A request as OptChat builds it from the context's messages: the system prompt, the previous exchange, the run as it is sent,
+   * and the view to put before them. Given the `models`, a run that grew past `refreshAt` of the model's window is refreshed. */
+  const compose = async (messages: readonly Message[], ctx: Context, models?: Models) => {
     const conversation = await handle(ctx);
     const { head, entries } = await conversation.context(ctx);
     if (!turn || turn.head !== head?.id) {
@@ -157,10 +158,10 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
       await memory.settle(ctx.abortSignal);
       turn = { head: head?.id, view: await view(ctx), previous: head ? await previousBefore(conversation, head.id, ctx) : [] };
     }
-    const at = messages.findIndex(m => m.role !== 'system');
-    if (at < 0) return undefined;
+    const at = messages.findIndex(m => m.role !== 'system'), shared = turn;
+    if (at < 0) return { system: messages, previous: shared.previous, run: [], view: shared.view };
     // A tool result over 30K characters is sent as its head and tail, as in Pi.
-    const run = messages.slice(at).map(boundedMessage), shared = turn;
+    const run = messages.slice(at).map(boundedMessage);
     // `run` is the whole context, which can hold more than one run: inputs queued with no idle reset between them, or a reset's note
     // first. The run being answered starts at its task, the last of the user messages after the newest finished answer; a refresh
     // moves what comes before it into memory with the steps it cuts, and a steer before the cut too, as in Pi.
@@ -194,12 +195,16 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
     let keep = 0;
     const kept = steps.some(s => s.entry.id <= logged) ? steps.find(s => s.entry.id > logged) : undefined;
     if (kept && await logThrough(kept.entry.id)) keep = kept.i;
-    const { model } = await conversation.agent(ctx);
-    const refresh = !memory.saveError && refreshPoint(own, keep, refreshBudget(model && api.models.getModel(model.provider, model.modelId)?.contextWindow, refreshAt));
+    const { model } = models ? await conversation.agent(ctx) : {};
+    const refresh = models && !memory.saveError && refreshPoint(own, keep, refreshBudget(model && models.getModel(model.provider, model.modelId)?.contextWindow, refreshAt));
     const cut = refresh && steps.find(s => s.i === refresh.cut);
     if (cut && await logThrough(cut.entry.id)) keep = cut.i;
-    const sent = keep ? refreshedRun(own, keep, TURN_REFRESHED) : whole;
-    return { messages: withView([...messages.slice(0, at), ...turn.previous, ...sent], turn.view) };
+    return { system: messages.slice(0, at), previous: shared.previous, run: keep ? refreshedRun(own, keep, TURN_REFRESHED) : whole, view: shared.view };
+  };
+  const beforeRequest: GenerationHooks['beforeRequest'] = async ({ messages }, api, ctx) => {
+    if (api.conversationId !== id) return undefined;
+    const { system, previous, run, view } = await compose(messages, ctx, api.models);
+    return run.length ? { messages: withView([...system, ...previous, ...run], view) } : undefined;
   };
 
   const Remember = defineTask<Record<string, never>, { phase: 'remember' }, null>({
@@ -246,15 +251,28 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
   const [zoom, date] = memoryTools(() => memory);
   const tools = [durableTool(zoom), durableTool(date), ...search ? [durableTool(searchTool(() => memory))] : []];
   const text = prompt ?? allowSearch(`${VIEW_DOC}${previousExchangeBytes ? CONTINUITY : ''}${search ? SEARCH_DOC : ''}`, search);
+  // Other conversations that keep the extension are children started from a snapshot: their view is in their first input.
+  const child = `${CHILD}\n\n${prompt ?? allowSearch(`${VIEW_DOC}${search ? SEARCH_DOC : ''}`, search)}`;
 
   return {
     extension: defineExtension({
       name: 'optchat',
       tools,
-      sections: [section('optchat', () => text, { tag: false })],
+      sections: [section('optchat', ({ conversationId }) => conversationId === id ? text : child, { tag: false })],
       hooks: [hook(GenerationTask, { beforeRequest }), hook(CompactionTask, { beforeCompact: (_compaction, api) => api.conversationId === id ? { decline: true } : undefined })],
       tasks: [Remember],
     }),
+    /** The first input of a child conversation that sees OptChat's memory as the conversation's next request would: the view (with
+     * afterView's text), the previous exchange and the run so far, then `task`. Take it in a tool call or while the conversation is
+     * idle. It isn't stable across restarts, so take it once and submit it with a `requestId`; a rerun finds the child instead
+     * (docs/durable.md). Logs only what that request would log. */
+    async snapshot(task: string, ctx: Context): Promise<UserInput> {
+      // The context's own messages, not `messages`, which answers every call still running, this one too, with an error.
+      const { contributions } = await (await handle(ctx)).context(ctx);
+      const { previous, run, view } = await compose(contributions.flat(), ctx);
+      // Text blocks, which cachePayload marks; a plain string is sent as one.
+      return [{ type: 'text', text: childInput({ view, previous, run, task }) }];
+    },
     /** Starts following the conversation, and resets it now if a run ended before a restart. Returns a function that stops. */
     attach(harness: Harness, ctx: Context) {
       attached.set(harness, ctx);

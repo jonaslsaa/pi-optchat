@@ -14,6 +14,7 @@ import { VIEW } from './core/memory.ts';
 import type { Memory } from './memory.ts';
 import type { ModelChoice } from './compactor.ts';
 import { cachePayload } from './core/cache.ts';
+import { childInput } from './core/messages.ts';
 import { CUT_OFF, reportHead, RunHistory, isRunning, transition, sessionMessages, savedSession, undelivered, sentText, type Guidance, type RunInfo, type RunState, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { fullChat, refreshFraction, textContent } from './transcript.ts';
@@ -268,7 +269,7 @@ export class Children {
     const [first] = launched, answered = launched.length > 1 && first.session.model?.api === 'anthropic-messages' ? answering(first.session) : undefined;
     for (const live of launched) {
       live.batch = batch;
-      const work = this.execute(live, `${view}\n\nYour task:\n${live.info.task}`).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
+      const work = this.execute(live, childInput({ view, task: live.info.task })).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
         .finally(() => { this.completions.delete(work); this.changed(); });
       if (live === first && answered) for (const sibling of launched.slice(1)) if ((['model', 'thinking', 'cwd'] as const).every(k => sibling.info[k] === first.info[k])) sibling.primed = Promise.race([answered, work]);
       this.completions.add(work);

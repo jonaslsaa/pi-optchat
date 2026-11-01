@@ -18,6 +18,40 @@ With the Agents SDK's `PiHarness` this goes in its `harness` factory, which supp
 
 `examples/durable-object` is a Worker built this way, importing `pi-optchat/core` and `pi-optchat/durable` as an app would (linked with `file:../..`, so run `npm run build` in the repo first: the package's `./core` and `./durable` are the built `dist/`), with the counters and endpoints its `proof.mjs` uses: it runs the Worker under `wrangler dev` with real model calls and checks a multi-turn chat, restarts and the cache.
 
+## Child conversations
+
+`memoryExtension.snapshot(task, ctx)` gives a child conversation its first input, so it sees what the conversation's next request would: the view (with `afterView`'s text), the previous exchange, the run so far, then `task`. Take it in a tool's `execute`, where the run so far ends with the assistant message that made this call, or while the conversation is idle. It is one text block, `[{ type: 'text', text }]`, so cache marks reach it: the previous exchange and the run are `kind: text` lines as memory logs them (`user:`, `talk:`, `tool:`, `echo:`), since Pi's tool calls and results can't go into a child's input as they are, and images in them are left out. Submit it as the child's first input; it is not `init` entries. The snapshot logs only what that next request would, never the child's own work.
+
+It is not stable across restarts, by design: the view grows and `afterView` may change. So take it once. Pi Durable's subagent recipe already does what this needs: the tool finds its child with `scanConversations({ ownerTaskId })` before creating one, submits with a `requestId`, and is `replay: 'safe'`, so a rerun after a crash finds the child and its input and doesn't snapshot again:
+
+```ts
+const Review: Extension = defineExtension({ name: 'review', tools: [defineTool({
+  name: 'review', description: 'A second opinion before a risky step.', parameters: Type.Object({ task: Type.String() }), replay: 'safe',
+  execute: async ({ task }, api, context) => {
+    const requestId = `review:${api.taskId}`;
+    const child = await api.commit(async tx => {
+      const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
+      if (existing) return { id: existing.id, submitted: !!await tx.submissionByRequest(existing.id, requestId) };
+      // A copy of this conversation's agent, `optchat` included; only this tool goes.
+      const created = await tx.createConversation({ ownership: { kind: 'task', taskId: api.taskId } });
+      await configure(tx, created.id, { extensions: { remove: [Review] } });
+      return { id: created.id, submitted: false };
+    }, context);
+    // A known requestId returns its submission whatever the content, so a rerun sends none.
+    const content = child.submitted ? [] : await memoryExtension.snapshot(task, context);
+    const settled = await (await (await api.conversation(child.id, context))!.submit({ type: 'input', content, requestId }, context)).wait(context);
+    const answer = settled.answer && await api.commit(tx => tx.entry(settled.answer), context);
+    return { output: [{ type: 'text', text: textContent(answer?.model?.[0]?.content) }] };
+  },
+})] });
+```
+
+A task-owned child starts as a copy of its owner's agent, so it keeps the `optchat` extension: keep it selected (an `extensions: [...]` array that replaces the list drops it). The child is then offered `zoom` and `date` (and `search` with `search: true`), which only read memory, and its prompt section explains its input (`CHILD`, then the view doc). The extension's hooks leave it alone: its requests go as Pi builds them (no view put before them, no refresh), it is never logged or reset, so it adds no summaries, and Pi's own compaction applies to it as the settings say. `test/durable.test.ts` checks all of this.
+
+- **Plain children** (no snapshot) should drop `optchat` (`extensions: { remove: [memoryExtension.extension] }`), or they get the child prompt and memory tools with no view.
+- **A clean import** that goes live while a child runs makes the ids in its frozen view point at the new memory's messages.
+- **Size:** the input is the view (up to 128K bytes), the previous exchange (up to `previousExchangeBytes`) and the run (up to `refreshAt` of the parent's window), so a child on a smaller-window model may overflow.
+
 ## How it works
 
 - **Each request** (`beforeRequest`, in the configured conversation only) is the system prompt, OptChat's view, the previous exchange and Pi's current context. The view and previous exchange are fixed for one context, so the requests of a tool loop share a cached prefix. Pi's older transcript is never sent. `afterView(ctx)`, if set, adds the app's own context for the turn right after the view, before the previous exchange and outside the view's cached prefix: fixed for the context like the view, asked again when a refresh rebuilds the view and after a restart (it may be called more than once per context, so keep it cheap), never logged. If it throws, the request goes without it rather than without the view.
