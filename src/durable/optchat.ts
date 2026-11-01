@@ -61,6 +61,11 @@ export interface OptChatOptions {
   /** When a run's messages since the last refresh pass this share of the model's window, they move into memory and the run goes
    * on with a fresh view, as Pi's Turn refresh threshold (#146). 0.3 by default; 0 is off. */
   refreshAt?: number;
+  /** The app's context for a turn, such as the current date or the app's state: sent right after the view and before the previous
+   * exchange, outside the view's cached prefix. Asked when a context's first request is built, again when a refresh rebuilds the
+   * view, and after a restart, so it may be called more than once per context: keep it cheap. Never logged, so the model sees only
+   * the latest; label it as current ("Now: …"). If it throws, the request goes without it. */
+  afterView?: (ctx: Context) => string | undefined | Promise<string | undefined>;
 }
 
 /** OptChat's memory for one Pi Durable conversation. Install `extension` in the registry Harness.open gets, then `attach` the opened
@@ -68,7 +73,7 @@ export interface OptChatOptions {
  * never sees Pi's older transcript. When the conversation goes idle, OptChat resets Pi's context and a background task logs what the
  * reset ended into memory and builds its summaries; Pi Durable runs that task, and wakes the Durable Object for it after an eviction.
  * Turn Pi's own compaction off (`settings.compaction.enabled: false`); the extension also declines any that starts. */
-export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, prompt, search = false, previousExchangeBytes = 16_000, refreshAt = 0.3 }: OptChatOptions) {
+export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, prompt, search = false, previousExchangeBytes = 16_000, refreshAt = 0.3, afterView }: OptChatOptions) {
   const attached = attachment('OptChat'), opened = attached.get;
   /** The Pi entry logging resumes after: messages before the context's head are logged, the rest are sent as they are. On open it is
    * the one before the newest entry in memory, which is read again: a restart may have cut it off between its records (an answer
@@ -83,6 +88,18 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
   let logging = Promise.resolve();
   /** What a context's requests share, fixed when its first one is built so they read the same cached prefix. */
   let turn: { head: EntryId | undefined; view: string; previous: Message[] } | undefined;
+  /** Memory's view, then afterView's text, which cachePayload sends as a block of its own after the view's marks. Pi Durable drops a
+   * request's changes when beforeRequest throws, view included, so afterView's error costs only its text. */
+  const view = async (ctx: Context) => {
+    const text = memory.render();
+    try {
+      const after = await afterView?.(ctx);
+      return after?.trim() ? `${text}\n\n${after}` : text;
+    } catch (error) {
+      console.error(`OptChat could not add afterView's text: ${error instanceof Error ? error.message : String(error)}`);
+      return text;
+    }
+  };
 
   const handle = async (ctx: Context): Promise<Conversation> => {
     const conversation = await opened().harness.conversation(id, ctx);
@@ -138,7 +155,7 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
     if (!turn || turn.head !== head?.id) {
       if (head) await logUpTo(conversation, head.id, ctx);
       await memory.settle(ctx.abortSignal);
-      turn = { head: head?.id, view: memory.render(), previous: head ? await previousBefore(conversation, head.id, ctx) : [] };
+      turn = { head: head?.id, view: await view(ctx), previous: head ? await previousBefore(conversation, head.id, ctx) : [] };
     }
     const at = messages.findIndex(m => m.role !== 'system');
     if (at < 0) return undefined;
@@ -164,7 +181,7 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
       const count = memory.root.length;
       await logUpTo(conversation, end, ctx);
       if (memory.saveError) return false;
-      if (memory.root.length !== count) { await memory.settle(ctx.abortSignal); shared.view = memory.render(); }
+      if (memory.root.length !== count) { await memory.settle(ctx.abortSignal); shared.view = await view(ctx); }
       return true;
     };
     // Once a refresh has logged part of this context, an earlier run in it that has ended goes into memory whole, as the reset it

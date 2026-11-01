@@ -43,8 +43,9 @@ export function cachePayload(payload: unknown, { end: markEnd = true } = {}): un
     if (!record(message) || message.role !== 'user' || !Array.isArray(message.content)) continue;
     const at = message.content.findIndex((block: unknown) => record(block) && block.type === 'text' && typeof block.text === 'string' && isView(block.text));
     if (at < 0) continue;
-    // A subagent's task follows the view in the same text. Lines never hold a newline, so the first one before </chat> ends the view;
-    // the task goes in its own block, so the view's marks fall on lines its siblings share and they can read one another's entry.
+    // Text after the view (a subagent's task, an app's afterView) may follow it in the same text. Lines never hold a newline, so the
+    // first one before </chat> ends the view; that text goes in its own block, so the view's marks fall on lines its siblings share and
+    // they can read one another's entry.
     const text: string = message.content[at].text, close = text.indexOf('\n</chat>'), end = close < 0 ? text.length : close + '\n</chat>'.length;
     const pieces = splitView(text.slice(0, end)), marked = new Set(MARKS.map(back => pieces.length - 2 - back));
     const blocks = pieces.map((text, j) => ({ type: 'text', text, ...(marked.has(j) ? { cache_control: { type: 'ephemeral' } } : {}) }));
