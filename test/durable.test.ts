@@ -11,7 +11,7 @@ import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { NodeSqliteDatabase } from '@earendil-works/chord/sqlite/node';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from '@earendil-works/pi-ai/providers/faux';
-import { openMemory, type Compressor, type ImageStore, type ImportedEntry, type Mime } from '../src/core/index.ts';
+import { cachePayload, openMemory, type Compressor, type ImageStore, type ImportedEntry, type Mime } from '../src/core/index.ts';
 import { optchat, optchatImport, SqliteStore, withCacheMarks, type OptChatOptions, type Read, type SqliteStoreOptions } from '../src/durable/index.ts';
 import { importTables } from '../src/durable/store.ts';
 import { imageRef } from '../src/images.ts';
@@ -341,20 +341,28 @@ test('reopened mid-run after a refresh, the run is sent from where the log says'
   } finally { await after.close(); }
 });
 
-test('afterView\'s text is its own block after the view, before the previous exchange, fixed until a refresh, and never logged', async () => {
+test('afterView\'s text follows the view, before the previous exchange, outside its cache marks; fixed until a refresh, and never logged', async () => {
   let calls = 0;
   const agent = await open(file(), [fauxAssistantMessage('Hi'), read(0), read(1), read(2), read(3), read(4), read(5), fauxAssistantMessage('done')], undefined,
-    { contextWindow: 150, afterView: () => `Now: ${++calls}` });
+    { contextWindow: 150, afterView: async () => `Now: ${++calls}` });
   try {
     await agent.ask('hello');
     await agent.ask('read them all');
-    const firsts = agent.sent.map(request => request.find(m => m.role === 'user')?.content as { text?: string }[]);
-    // The view is a block of its own, so its cache marks and prefix are the same with or without the app's text.
-    assert.deepEqual(firsts[1].slice(1).map(block => block.text), ['\n\nNow: 2', '\n\nhello']);
-    const nows = firsts.map(blocks => blocks[1].text);
+    const firsts = agent.sent.map(request => text(request.find(m => m.role === 'user')?.content ?? ''));
+    assert.equal(firsts[1].split('</chat>').at(-1), '\n\nNow: 2\n\nhello');
+    const nows = firsts.map(request => request.match(/Now: \d+/)?.[0]);
     const refreshed = agent.sent.findIndex(request => request.some(m => text(m.content).includes('this turn grew long')));
-    assert.deepEqual([nows[0], ...new Set(nows.slice(1, refreshed))], ['\n\nNow: 1', '\n\nNow: 2']);
+    assert.deepEqual([nows[0], ...new Set(nows.slice(1, refreshed))], ['Now: 1', 'Now: 2']);
     assert.notEqual(nows[refreshed], nows[refreshed - 1]);
+    // On Anthropic the view keeps its blocks and marks, and the app's text goes after them unmarked.
+    const marked = (request: string) => {
+      const content: object[] = [{ type: 'text', text: request }];
+      cachePayload({ messages: [{ role: 'user', content }] }, { end: false });
+      return content;
+    };
+    const [view, after] = firsts[refreshed].split(/(?<=<\/chat>)/);
+    assert.ok(JSON.stringify(marked(view)).includes('cache_control'));
+    assert.deepEqual(marked(firsts[refreshed]), [...marked(view), { type: 'text', text: after }]);
     const piEntries = (await agent.root.entries({ order: 'ascending' }, 256, undefined, context)).items;
     assert.ok(![...agent.memory.entries(), ...piEntries.map(e => ({ text: JSON.stringify(e) }))].some(e => e.text.includes('Now:')));
   } finally { await agent.close(); }
