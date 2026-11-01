@@ -29,6 +29,24 @@ export function listProfiles() {
   const root = join(dataHome(), 'profiles');
   return existsSync(root) ? readdirSync(root, { withFileTypes: true }).filter(f => f.isDirectory() && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(f.name)).map(f => f.name).sort() : [];
 }
+/** Removes a profile's folder, and the saved last-profile pointer when it names it. A profile another Pi is using is refused: deleting it would leave that Pi writing into a directory that no longer exists. */
+export async function deleteProfile(name: string) {
+  const dir = profilePath(name);
+  if (!existsSync(dir)) throw new Error(`Profile ${name} does not exist.`);
+  // Only a socket that answers is a live owner. On POSIX a dead one is a leftover file and goes with the folder; a Windows pipe disappears with its owner.
+  const socketPath = profileSocket(dir);
+  const listening = isWindows || (() => { try { return lstatSync(socketPath).isSocket(); } catch { return false; } })();
+  if (listening) {
+    const owner = await readOwner(socketPath);
+    if (owner !== undefined) throw new ProfileBusyError(owner);
+  }
+  rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+  // listProfiles() already hides a name with no folder, but without this a profile created again under the same name would inherit the stale pointer.
+  const last = join(dataHome(), 'last-profile');
+  try { if (readFileSync(last, 'utf8').trim() === name) unlinkSync(last); } catch {}
+  return dir;
+}
+
 export function createProfile(name: string) {
   const dir = profilePath(name);
   if (existsSync(dir)) throw new Error(`Profile already exists: ${name}`);

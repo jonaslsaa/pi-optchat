@@ -9,7 +9,7 @@ import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
 import { createCompressor, type ModelChoice } from './compactor.ts';
-import { createProfile, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
+import { createProfile, deleteProfile, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC } from './core/prompts.ts';
 import { MASTER, modelsHint } from './prompts.ts';
 import { cachePayload, record } from './core/cache.ts';
@@ -35,7 +35,7 @@ import { openConnectedWindow, registerConnectedRenderer } from './connected-wind
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
 import { showModelPicker, showSettings } from './settings-page.ts';
-import { showMenu } from './menu.ts';
+import { CREATE_PROFILE, profilePicker, showMenu, type ProfilePick } from './menu.ts';
 
 const binding = 'optchat.profile';
 const CONNECT_MODES = ['auto', 'join', 'off'] as const;
@@ -219,13 +219,25 @@ export default function optchat(pi: ExtensionAPI) {
   const chooseProfile = async (ctx: ExtensionContext): Promise<string | undefined> => {
     // Outside the TUI (print, json, RPC hosts) never pick or create a profile: a dialog would hang the host, and a guess could write into the wrong memory.
     if (ctx.mode !== 'tui') return undefined;
-    const names = listProfiles(), last = lastProfile();
-    if (last) names.sort((a, b) => Number(b === last) - Number(a === last));
-    const selected = await ctx.ui.select('OptChat profile', [...names, '+ Create profile']);
-    if (selected !== '+ Create profile') return selected;
-    const name = (await ctx.ui.input('New profile name', 'work or personal'))?.trim();
-    if (!name) return undefined;
-    createProfile(name); return name;
+    for (;;) {
+      const names = listProfiles(), last = lastProfile();
+      if (last) names.sort((a, b) => Number(b === last) - Number(a === last));
+      const picked = await ctx.ui.custom<ProfilePick>((tui, theme, _keys, done) => profilePicker(theme, names, done, () => tui.requestRender()));
+      if (!picked) return undefined;
+      if (typeof picked === 'string') {
+        if (picked !== CREATE_PROFILE) return picked;
+        const name = (await ctx.ui.input('New profile name', 'work or personal'))?.trim();
+        if (!name) return undefined;
+        createProfile(name); return name;
+      }
+      const name = picked.delete;
+      // The profile this session serves is open in this process: deleting the folder under a live store writes into nothing.
+      if (name === active?.name) { ctx.ui.notify(`Cannot delete ${name}: this session is using it. Switch profiles first.`, 'error'); continue; }
+      const confirmed = await ctx.ui.confirm(`Delete profile ${name}?`, 'Its memory, runs, usage ledger and settings are removed from disk. Pi sessions are kept.');
+      if (!confirmed) continue;
+      try { await deleteProfile(name); ctx.ui.notify(`Deleted ${name}.`, 'info'); }
+      catch (error) { ctx.ui.notify(errorText(error), 'error'); }
+    }
   };
   const openProfile = async (name: string, ctx: ExtensionContext) => {
     const dir = profilePath(name);
