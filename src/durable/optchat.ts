@@ -181,13 +181,17 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
       const i = sent ? own.findIndex(m => answer(m) === answer(sent)) : -1;
       return i > 0 ? [{ entry, i }] : [];
     });
-    /** Logs Pi's entries before `end`, rebuilding the view if that logged anything. False once a save failed: memory then lacks
-     * part of the run, so it is sent whole. */
+    /** Logs Pi's entries before `end`, rebuilding the view if that logged anything; a snapshot's logging drops the context's turn,
+     * so the next request rebuilds its view too. False once a save failed: memory then lacks part of the run, so it is sent whole. */
     const logThrough = async (end: EntryId) => {
       const count = memory.root.length;
       await logUpTo(conversation, end, ctx);
       if (memory.saveError) return false;
-      if (memory.root.length !== count) { await memory.settle(ctx.abortSignal); shared.view = await view(ctx); }
+      if (memory.root.length !== count) {
+        await memory.settle(ctx.abortSignal);
+        shared.view = await view(ctx);
+        if (!request) turn = undefined;
+      }
       return true;
     };
     // Once a refresh has logged part of this context, an earlier run in it that has ended goes into memory whole, as the reset it
