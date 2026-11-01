@@ -19,21 +19,38 @@ export function textContent(content: unknown, imageRef?: ImageRef): string {
     return '';
   }).filter(Boolean).join('\n');
 }
-/** Logs a message as the recipe's kinds: a user message as `kind` (`user`, or `work` for a subagent's report), a reply's text as
- * `talk`, its tool calls as `tool`, tool results and a failed reply as `echo`, each with `receipt`. Other roles are not logged. */
-export function logMessage(memory: Memory, message: AnyMessage, { kind = 'user', receipt, imageRef }: { kind?: Kind; receipt?: string; imageRef?: ImageRef } = {}) {
-  const date = new Date(message.timestamp).toISOString();
-  if (is(message, 'user')) memory.append(kind, textContent(message.content, imageRef), date, receipt);
+/** A message as the recipe's kinds: a user message as `kind` (`user`, or `work` for a subagent's report), a reply's text as `talk`,
+ * its tool calls as `tool`, tool results and a failed reply as `echo`. Other roles say nothing. */
+export function said(message: AnyMessage, { kind = 'user', imageRef }: { kind?: Kind; imageRef?: ImageRef } = {}) {
+  const lines: [Kind, string][] = [];
+  if (is(message, 'user')) lines.push([kind, textContent(message.content, imageRef)]);
   else if (is(message, 'assistant')) {
     for (const block of message.content) {
-      if (block.type === 'text' && block.text.trim()) memory.append('talk', block.text, date, receipt);
-      if (block.type === 'toolCall') memory.append('tool', `${block.name} ${JSON.stringify(block.arguments)}`, date, receipt);
+      if (block.type === 'text' && block.text.trim()) lines.push(['talk', block.text]);
+      if (block.type === 'toolCall') lines.push(['tool', `${block.name} ${JSON.stringify(block.arguments)}`]);
     }
     if (message.stopReason === 'error' || message.stopReason === 'aborted')
-      memory.append('echo', `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`, date, receipt);
+      lines.push(['echo', `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`]);
   } else if (is(message, 'toolResult'))
     // A zoom's page already names the images it returns.
-    memory.append('echo', cap(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom' ? imageRef : undefined)}`), date, receipt);
+    lines.push(['echo', cap(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom' ? imageRef : undefined)}`)]);
+  return lines;
+}
+/** Logs what a message `said`, each with `receipt`. */
+export function logMessage(memory: Memory, message: AnyMessage, { kind, receipt, imageRef }: { kind?: Kind; receipt?: string; imageRef?: ImageRef } = {}) {
+  const date = new Date(message.timestamp).toISOString();
+  for (const [k, text] of said(message, { kind, imageRef })) memory.append(k, text, date, receipt);
+}
+/** Ends a child conversation's first input, before its task. */
+export const TASK_HEADER = '\n\nYour task:\n';
+/** A child conversation's first input: the view, then optionally the exchange before the run and the run so far as `kind: text`
+ * lines (each image as `[image]`), then its task. With the view and task alone, it is what Pi's subagents get. */
+export function childInput({ view, previous = [], run = [], task }: { view: string; previous?: readonly AnyMessage[]; run?: readonly AnyMessage[]; task: string }) {
+  const part = (title: string, messages: readonly AnyMessage[]) => {
+    const lines = messages.flatMap(m => said(m, { imageRef: () => '[image]' })).map(([kind, text]) => `${kind}: ${text}`);
+    return lines.length ? [`${title}:\n${lines.join('\n')}`] : [];
+  };
+  return `${[view, ...part('The exchange before this run', previous), ...part('This run so far', run)].join('\n\n')}${TASK_HEADER}${task}`;
 }
 /** A tool result over CAP keeps its head and tail, and its images. */
 export function boundedMessage<M extends AnyMessage>(message: M): M {

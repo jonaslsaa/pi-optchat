@@ -98,6 +98,14 @@ until you have it whole, before any other source, and before you act, guess or
 ask. Never grep or search memories manually; zoom is your only
 allowed mechanism to navigate the tree. Summaries keep little of tool output, so
 say in your reply what you learned that will matter later.`;
+// Put before the view doc for a child conversation an app starts from a snapshot of OptChat's memory (durable `snapshot`).
+export const CHILD = `You are a child conversation of OptChat, an AI agent that works for one user in a
+single chat that never ends. OptChat started you for one task, in the middle of
+its own work. Your first message holds the view below, then the exchange before
+OptChat's current run and that run so far, when there are any, then your task.
+Use them as context only: do what your task says, not what the user's last
+message says. Your final reply is your answer to OptChat.`;
+
 // Added after the view doc when Previous exchange is on.
 export const CONTINUITY = `
 

@@ -3,7 +3,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { getCurrentSystemMessage, type SystemMessage } from '@earendil-works/pi-ai';
 import { cap, flat, isView, type Memory } from './core/memory.ts';
-import { completedExchange, logMessage as log, textContent as text, withView } from './core/messages.ts';
+import { completedExchange, logMessage as log, TASK_HEADER, textContent as text, withView } from './core/messages.ts';
 import { AT_WORK } from './core/prompts.ts';
 import { record } from './core/cache.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
@@ -96,7 +96,7 @@ function latestExchange(branch: readonly SessionEntry[]) {
 /** Ends every subagent report, so the parent knows it can check the report against what the child did. */
 export const fullChat = (id: string) => `Full chat: zoom("${id}")`;
 export const withoutFullChat = (text: string) => text.replace(/\n\nFull chat: zoom\("[\w-]+"\)$/gm, '');
-const TASK = '\n</chat>\n\nYour task:\n';
+const TASK = `\n</chat>${TASK_HEADER}`;
 /** Tool calls and results in a run transcript keep their head and tail, so a page holds many steps. */
 const STEP = 1_000;
 /** A subagent's chat for zoom, as `kind|text` lines: its task without the memory view, replies, tool calls and results, and what it was told. */
@@ -104,7 +104,7 @@ export function runTranscript(messages: readonly AgentMessage[]) {
   const task = messages.find(message => message.role === 'user');
   return messages.flatMap(message => {
     if (message.role === 'user') {
-      // Only the task prompt holds the memory view (src/agents.ts): `${view}\n\nYour task:\n${task}`.
+      // Only the task prompt holds the memory view: core's childInput({ view, task }) (src/agents.ts), the view, TASK_HEADER and the task.
       const text = textContent(message.content, false), at = text.indexOf(TASK);
       return [`user|${message === task && isView(text) && at >= 0 ? text.slice(at + '\n</chat>\n\n'.length) : text}`];
     }

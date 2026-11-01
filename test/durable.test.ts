@@ -5,13 +5,14 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRegistry, Harness } from '@earendil-works/pi-durable';
+import { configure, createRegistry, defineExtension, defineTool, Harness, type ConversationId, type Extension } from '@earendil-works/pi-durable';
+import { Type } from 'typebox';
 import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { NodeSqliteDatabase } from '@earendil-works/chord/sqlite/node';
 import { createModels } from '@earendil-works/pi-ai/models';
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from '@earendil-works/pi-ai/providers/faux';
-import { cachePayload, openMemory, type Compressor, type ImageStore, type ImportedEntry, type Mime } from '../src/core/index.ts';
+import { CHILD, cachePayload, openMemory, textContent, type Compressor, type ImageStore, type ImportedEntry, type Mime } from '../src/core/index.ts';
 import { optchat, optchatImport, SqliteStore, withCacheMarks, type OptChatOptions, type Read, type SqliteStoreOptions } from '../src/durable/index.ts';
 import { importTables } from '../src/durable/store.ts';
 import { imageRef } from '../src/images.ts';
@@ -24,7 +25,8 @@ const text = (content: unknown) => typeof content === 'string' ? content
 /** One OptChat agent on Pi Durable, over one SQLite database as in a Durable Object: Pi's tables `pi_*`, memory's `optchat_*`. */
 /** `importing` builds an import's summaries (`compress` by default). */
 async function open(file: string, replies: FauxResponseStep[], compress: Compressor = async ({ part }) => `line ${part.l}/${part.i}`,
-  { contextWindow, images, importing = compress, afterView }: { contextWindow?: number; importing?: Compressor } & SqliteStoreOptions & Pick<OptChatOptions, 'afterView'> = {}) {
+  { contextWindow, images, importing = compress, afterView, search, extensions = () => [] }:
+    { contextWindow?: number; importing?: Compressor; extensions?: (chat: ReturnType<typeof optchat>) => Extension[] } & SqliteStoreOptions & Pick<OptChatOptions, 'afterView' | 'search'> = {}) {
   const sync = new DatabaseSync(file), db = new NodeSqliteDatabase(sync);
   const faux = fauxProvider(contextWindow ? { models: [{ id: 'small', contextWindow }] } : {}), models = createModels();
   models.setProvider(faux.provider);
@@ -35,7 +37,7 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
   }));
   const query: Read = (sql, ...params) => sync.prepare(sql).iterate(...params);
   const memory = await openMemory(new SqliteStore(db, query, { images }), compress);
-  const memoryExtension = optchat({ memory, afterView });
+  const memoryExtension = optchat({ memory, afterView, search });
   // Resolves when an import goes live, and rejects when a task fails, so a failed import doesn't leave a test waiting.
   let activate = () => {}, fault = (_: unknown) => {};
   const activated = new Promise<void>((resolve, reject) => { activate = resolve; fault = reject; });
@@ -50,6 +52,7 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
   const registry = createRegistry();
   registry.install(memoryExtension.extension);
   registry.install(importer.extension);
+  for (const extension of extensions(memoryExtension)) registry.install(extension);
   const harness = await Harness.open(await SqliteStorage.open(db, { prefix: 'pi_' }),
     { models: withCacheMarks(models), registry, settings: { compaction: { enabled: false }, afterFailedRun: 'continue' },
       onReport: (error, info) => { if (info.type === 'task_faulted' || info.type === 'task_parked') fault(error); } }, context);
@@ -73,7 +76,7 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
   };
   const close = async () => { await harness.close(context); await memory.close(); await db.close(); };
   const keptInSqlite = () => sync.prepare('SELECT count(*) AS n FROM optchat_images').get()?.n;
-  return { memory, root, sent, ask, idle, close, keptInSqlite, harness, importer, activated, loaded, db, query, sql: sync };
+  return { memory, root, sent, ask, idle, close, keptInSqlite, harness, importer, activated, loaded, db, query, sql: sync, chat: memoryExtension };
 }
 // A test may close a database and open it again, so the folders go once every test is done.
 const dirs: string[] = [];
@@ -375,6 +378,85 @@ test('when afterView throws, the request still carries the view', async (t) => {
     await agent.ask('hello');
     assert.deepEqual(agent.sent[0].filter(m => m.role !== 'system').map(m => text(m.content)), ['<chat>\n\n</chat>\n\nhello']);
     assert.match(String(errors.mock.calls[0]?.arguments[0]), /no state/);
+  } finally { await agent.close(); }
+});
+
+test('a snapshot starts a child with the view, afterView, the previous exchange and the run so far; it reads memory and is never logged', async () => {
+  // Pi Durable's subagent recipe, as docs/durable.md gives it. The tool runs twice, as a rerun after a crash would: the second time
+  // it finds the child and its submission, so it takes no second snapshot and the child keeps its first input.
+  let child: ConversationId | undefined;
+  const review = (chat: ReturnType<typeof optchat>): Extension => defineExtension({ name: 'review', tools: [defineTool({
+    name: 'review', description: 'A second opinion on a draft.', parameters: Type.Object({ draft: Type.String() }), replay: 'safe',
+    execute: async ({ draft }, api, ctx) => {
+      const requestId = `review:${api.taskId}`;
+      let answer = '';
+      for (const _rerun of [false, true]) {
+        const found = await api.commit(async tx => {
+          const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
+          if (existing) return { id: existing.id, submitted: !!await tx.submissionByRequest(existing.id, requestId) };
+          const created = await tx.createConversation({ ownership: { kind: 'task', taskId: api.taskId } });
+          await configure(tx, created.id, { extensions: { remove: [review(chat)] } });
+          return { id: created.id, submitted: false };
+        }, ctx);
+        child = found.id;
+        const content = found.submitted ? [] : await chat.snapshot(`Review this draft: ${draft}`, ctx);
+        const settled = await (await (await api.conversation(found.id, ctx))!.submit({ type: 'input', content, requestId }, ctx)).wait(ctx);
+        if (settled.answer) answer = textContent((await api.commit(tx => tx.entry(settled.answer), ctx))?.model?.[0]?.content);
+      }
+      return { output: [{ type: 'text', text: answer }] };
+    },
+  })] });
+  const requests: { sections: string[]; tools: string[]; sent: string[] }[] = [];
+  const childAnswers = (reply: FauxResponseStep): FauxResponseStep => (request, ...rest) => {
+    const system = request.messages.flatMap(m => m.role === 'system' ? [m] : []);
+    requests.push({ sections: system.flatMap(m => Object.values(m.sections ?? {}).flatMap(s => s ?? [])),
+      tools: system.flatMap(m => m.toolsAdded ?? []).map(t => t.name),
+      sent: request.messages.flatMap(m => m.role === 'system' ? [] : [`${m.role}: ${text(m.content)}`]) });
+    return typeof reply === 'function' ? reply(request, ...rest) : reply;
+  };
+  const agent = await open(file(), [
+    fauxAssistantMessage('Hi Jonas'),
+    read(0),
+    fauxAssistantMessage(fauxToolCall('review', { draft: 'Hei Kari' }), { stopReason: 'toolUse' }),
+    childAnswers(fauxAssistantMessage(fauxToolCall('zoom', { id: 0 }), { stopReason: 'toolUse' })),
+    childAnswers(fauxAssistantMessage('Looks fine.')),
+    fauxAssistantMessage('Sent.'),
+  ], undefined, { afterView: () => 'Now: Monday', search: true, extensions: chat => [review(chat)] });
+  try {
+    await agent.ask('hello');
+    await agent.ask('write to Kari');
+    const logged = agent.memory.entries().map(e => `${e.kind}: ${e.text}`), echo = `echo: date: ${new Date(agent.memory.root[0].date).toString()}`;
+    // The run so far holds this tool's own call, and the steps before it as text lines.
+    const input = [
+      '<chat>\n0+1|user: hello\n1+1|talk: Hi Jonas\n</chat>\n\nNow: Monday',
+      'The exchange before this run:\nuser: hello\ntalk: Hi Jonas',
+      `This run so far:\nuser: write to Kari\ntool: date {"id":0}\n${echo}\ntool: review {"draft":"Hei Kari"}`,
+      'Your task:\nReview this draft: Hei Kari',
+    ].join('\n\n');
+    // The child's requests are its own: no view put before its input, nothing refreshed, one input for both runs of the tool.
+    assert.deepEqual(requests.map(r => r.sent), [[`user: ${input}`], [`user: ${input}`, 'assistant: [toolCall]', 'toolResult: 0+1|user: hello']]);
+    assert.ok(requests[0].sections.some(s => s.startsWith(CHILD)));
+    assert.deepEqual(requests[0].tools, ['zoom', 'date', 'search']);
+    // Memory logs the parent's run, with the child's answer only as the tool's result: not the child's zoom, nor its reply.
+    assert.deepEqual(logged.slice(2), [
+      'user: write to Kari', 'tool: date {"id":0}', echo, 'tool: review {"draft":"Hei Kari"}', 'echo: review: Looks fine.', 'talk: Sent.',
+    ]);
+    // Only the parent is reset once idle; the child keeps its context.
+    const kinds = (await (await agent.harness.conversation(child!, context))!.context(context)).entries.map(e => e.kind);
+    assert.deepEqual(kinds.filter(kind => kind !== 'pi.system'), ['pi.user', 'pi.assistant', 'pi.tool-result', 'pi.assistant']);
+  } finally { await agent.close(); }
+});
+
+test('a snapshot while idle leaves the next request its own view: afterView is asked again; a reset\'s note shows as memory logs it', async () => {
+  let calls = 0;
+  const agent = await open(file(), [fauxAssistantMessage('Hi'), fauxAssistantMessage('Again')], undefined, { afterView: () => `Now: ${++calls}` });
+  try {
+    await agent.ask('hello');
+    await agent.root.reset('Carry on with the draft', context);
+    assert.equal(text(await agent.chat.snapshot('Check the draft', context)).split('</chat>\n\n')[1],
+      'Now: 2\n\nThis run so far:\nuser: [Handoff note] Carry on with the draft\n\nYour task:\nCheck the draft');
+    await agent.ask('again');
+    assert.match(text(agent.sent[1].find(m => m.role === 'user')?.content ?? ''), /<\/chat>\n\nNow: 3\n/);
   } finally { await agent.close(); }
 });
 
