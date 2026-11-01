@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { parseArgs, parseSessionEntries, parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type FileEntry, type SessionStartEvent } from '@earendil-works/pi-coding-agent';
+import { parseArgs, parseSessionEntries, parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type CustomEntry, type FileEntry, type SessionStartEvent } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
@@ -40,8 +40,8 @@ import { showMenu } from './menu.ts';
 const binding = 'optchat.profile';
 /** The profile a session is bound to; the latest binding wins. */
 function boundProfile(entries: readonly FileEntry[]) {
-  const saved = entries.findLast(e => e.type === 'custom' && e.customType === binding);
-  return saved?.type === 'custom' && record(saved.data) && typeof saved.data.name === 'string' ? saved.data.name : undefined;
+  const saved = entries.findLast((e): e is CustomEntry => e.type === 'custom' && e.customType === binding);
+  return record(saved?.data) && typeof saved.data.name === 'string' ? saved.data.name : undefined;
 }
 const CONNECT_MODES = ['auto', 'join', 'off'] as const;
 /** Print mode routes `process.stdout` to stderr so only the answer reaches stdout; the joined reply goes to fd 1 itself. */
@@ -291,7 +291,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport);
       untitle = children.subscribe(() => showTitle(ctx)); showTitle(ctx);
       status(ctx);
-      ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})\nSwitch profiles with /optchat profile.`, 'info');
+      ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
       const queuedReports = [...reports];
       if (!pendingImport(dir)) {
         const recover = (work: Promise<void>, what: string) => work.catch(error => ctx.ui.notify(`${what}: ${errorText(error)}`, 'error'));

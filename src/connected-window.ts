@@ -129,7 +129,7 @@ export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContex
     ended = true; commit(); hideLive();
     ctx.ui.setStatus('optchat', `OptChat: ${profile} · disconnected`); title('disconnected');
     ctx.ui.notify(agentId ? 'Detached from the background agent. Closing this window does not stop it; no local agent will run here.'
-      : 'Connection closed. If you sent a task here, the main agent gets its handoff when the profile next opens. Use /new to start over: after the profile picker if Pi started without --optchat-profile, a profile still open elsewhere offers Connect again, and a free one opens here.', 'info');
+      : 'Connection closed. If you sent a task here, the main agent gets its handoff when the profile next opens. Use /new to start over: once a profile is chosen as for any new session, a profile still open elsewhere offers Connect again, and a free one opens here.', 'info');
   });
   if (agentId) {
     display(`Opening existing agent ${agentId}. Messages go to that same agent; /tell-main contacts the main agent. /complete or closing this window only detaches. The original Pi window must remain open.`);

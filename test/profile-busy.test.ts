@@ -38,11 +38,13 @@ async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: strin
   return { session, titles, errors, manager };
 }
 
+type Session = Awaited<ReturnType<typeof start>>['session'];
+
 test('a busy profile offers to connect or pick another profile, and picking another opens it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-busy-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = join(dir, 'home');
-  const sessions: Awaited<ReturnType<typeof start>>['session'][] = [];
+  const sessions: Session[] = [];
   let unlock: (() => Promise<void>) | undefined;
   try {
     for (const name of ['busy', 'other', 'third']) {
@@ -92,7 +94,7 @@ test('a connected window whose original window closed can leave: /new, /resume, 
   const dir = mkdtempSync(join(tmpdir(), 'optchat-left-'));
   const oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = join(dir, 'home');
-  let owner: Awaited<ReturnType<typeof start>>['session'] | undefined, window: Awaited<ReturnType<typeof start>>['session'] | undefined;
+  let owner: Session | undefined, window: Session | undefined;
   try {
     createProfile('busy');
     owner = (await start(dir, {}, 'busy')).session;
@@ -206,7 +208,7 @@ test('a socket path over the system limit names OPTCHAT_HOME and its length with
 test('a second writer that got past the lock is refused on its next turn, with the log intact', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'oc-writer-')), oldHome = process.env.OPTCHAT_HOME;
   process.env.OPTCHAT_HOME = join(dir, 'home');
-  let session: Awaited<ReturnType<typeof start>>['session'] | undefined;
+  let session: Session | undefined;
   try {
     createProfile('shared');
     saveConfig(profilePath('shared'), { ...loadConfig(profilePath('shared')), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' }, subagent: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
@@ -229,8 +231,8 @@ test('a second writer that got past the lock is refused on its next turn, with t
 
 // #238: an unbound session skips the picker when the choice is clear.
 const noPicker: Partial<ExtensionUIContext> = { select: async title => assert.fail(`picker shown: ${title}`) };
-async function withHome(prefix: string, body: (dir: string, sessions: Awaited<ReturnType<typeof start>>['session'][]) => Promise<void>) {
-  const dir = mkdtempSync(join(tmpdir(), prefix)), oldHome = process.env.OPTCHAT_HOME, sessions: Awaited<ReturnType<typeof start>>['session'][] = [];
+async function withHome(prefix: string, body: (dir: string, sessions: Session[]) => Promise<void>) {
+  const dir = mkdtempSync(join(tmpdir(), prefix)), oldHome = process.env.OPTCHAT_HOME, sessions: Session[] = [];
   process.env.OPTCHAT_HOME = join(dir, 'home');
   try { await body(dir, sessions); } finally {
     for (const session of sessions) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }

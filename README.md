@@ -33,11 +33,11 @@ To uninstall, run `pi remove git:github.com/jonaslsaa/pi-optchat`. Profile data 
 2. Choose **+ Create profile** and name it, for example `work`.
 3. Chat normally.
 
-The footer shows the active profile. Memory follows the profile across directories and Pi sessions. Resumed sessions restore their profile and `/new` keeps the window's. Other new sessions open `OPTCHAT_PROFILE` if set (`OPTCHAT_PROFILE=work pi`), or your only profile, else show the picker with the last-used profile first. `/optchat profile` always shows the picker.
+The footer shows the active profile. Memory follows the profile across directories and Pi sessions. Resumed sessions restore their profile, and `/new` keeps the window's once its session has a message. Other new sessions open `OPTCHAT_PROFILE` if set (`OPTCHAT_PROFILE=work pi`, interactive Pi only), or your only profile, else show the picker with the last-used profile first. `/optchat profile` always shows the picker.
 
 ### Headless and RPC
 
-- `pi -p`, `--mode rpc` and other extensions' runners need `--optchat-profile work`. Without it (and without a saved profile in a resumed session) the run is plain Pi with no OptChat memory.
+- `pi -p`, `--mode rpc` and other extensions' runners need `--optchat-profile work`; `OPTCHAT_PROFILE` and a lone profile apply to interactive Pi only. Without it (and without a saved profile in a resumed session) the run is plain Pi with no OptChat memory.
 - In hosts that create sessions themselves (Pi Web), send `/optchat profile work` as the first message of a new session.
 - If the profile is open in another Pi, `pi -p` joins it as a connected window by default; `--optchat-connect auto|join|off` controls this.
 
