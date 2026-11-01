@@ -113,10 +113,10 @@ export class TranscriptView {
       } else if (message.role === 'assistant') {
         const live = message === streaming;
         let component: Component | undefined;
-        if (live) { this.streaming ??= new AssistantMessageComponent(undefined, true, getMarkdownTheme()); this.streaming.updateContent(message, true); component = this.streaming; }
+        if (live) { this.streaming ??= new AssistantMessageComponent(undefined, false, getMarkdownTheme()); this.streaming.updateContent(message, true); component = this.streaming; }
         else {
           component = this.messages.get(message);
-          if (!component) { component = new AssistantMessageComponent(message, true, getMarkdownTheme()); this.messages.set(message, component); }
+          if (!component) { component = new AssistantMessageComponent(message, false, getMarkdownTheme()); this.messages.set(message, component); }
         }
         parts.push(component);
         for (const part of message.content) {
