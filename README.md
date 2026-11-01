@@ -33,7 +33,7 @@ To uninstall, run `pi remove git:github.com/jonaslsaa/pi-optchat`. Profile data 
 2. Choose **+ Create profile** and name it, for example `work`.
 3. Chat normally.
 
-The footer shows the active profile. Memory follows the profile across directories and Pi sessions. New sessions show the profile picker with the last-used profile first; resumed sessions restore their profile.
+The footer shows the active profile. Memory follows the profile across directories and Pi sessions. Resumed sessions restore their profile and `/new` keeps the window's. Other new sessions open `OPTCHAT_PROFILE` if set (`OPTCHAT_PROFILE=work pi`), or your only profile, else show the picker with the last-used profile first. `/optchat profile` always shows the picker.
 
 ### Headless and RPC
 

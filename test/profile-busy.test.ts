@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFi
 import { createConnection } from 'node:net';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext, type SessionStartEvent } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { Memory } from '../src/memory.ts';
 import { checkSocketPath, createProfile, isWindows, loadConfig, lockProfile, profilePath, profileSocket, saveConfig, SOCKET_PATH_LIMIT } from '../src/profiles.ts';
@@ -14,7 +14,7 @@ const agentDir = process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'o
 after(() => removeDir(agentDir));
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: string, talked = false) {
+async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: string, talked = false, sessionStartEvent?: SessionStartEvent) {
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
     modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider('fixture', {
@@ -30,7 +30,7 @@ async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: strin
   if (bound) manager.appendCustomEntry('optchat.profile', { name: bound });
   if (talked) manager.appendMessage({ role: 'user', content: 'earlier turn', timestamp: Date.now() });
   const { session } = await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
-    resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom'] });
+    resourceLoader: loader, settingsManager, sessionManager: manager, sessionStartEvent, tools: ['zoom'] });
   const titles: string[] = [], errors: string[] = [];
   const uiContext: ExtensionUIContext = { ...session.extensionRunner.getUIContext(), setTitle: t => { titles.push(t); },
     notify: (text, type) => { if (type === 'error') errors.push(text); }, ...ui };
@@ -226,3 +226,63 @@ test('a second writer that got past the lock is refused on its next turn, with t
   try { assert.deepEqual(reopened.root.map(e => reopened.text(e.i)), ['written by the other process']); }
   finally { await reopened.close(); removeDir(dir); }
 });
+
+// #238: an unbound session skips the picker when the choice is clear.
+const noPicker: Partial<ExtensionUIContext> = { select: async title => assert.fail(`picker shown: ${title}`) };
+async function withHome(prefix: string, body: (dir: string, sessions: Awaited<ReturnType<typeof start>>['session'][]) => Promise<void>) {
+  const dir = mkdtempSync(join(tmpdir(), prefix)), oldHome = process.env.OPTCHAT_HOME, sessions: Awaited<ReturnType<typeof start>>['session'][] = [];
+  process.env.OPTCHAT_HOME = join(dir, 'home');
+  try { await body(dir, sessions); } finally {
+    for (const session of sessions) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    await sleep(50);
+    delete process.env.OPTCHAT_PROFILE;
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    removeDir(dir);
+  }
+}
+
+test('a lone profile opens without the picker', () => withHome('optchat-solo-', async (dir, sessions) => {
+  createProfile('solo');
+  const { session, titles, errors } = await start(dir, noPicker); sessions.push(session);
+  assert.deepEqual(errors, []);
+  assert.equal(titles[0], 'π solo');
+}));
+
+test('/new keeps the profile of the session it replaces', () => withHome('optchat-new-', async (dir, sessions) => {
+  createProfile('work'); createProfile('personal');
+  const previous = SessionManager.create(dir, join(dir, 'sessions'));
+  previous.appendCustomEntry('optchat.profile', { name: 'work' });
+  previous.appendMessage({ role: 'user', content: 'earlier turn', timestamp: Date.now() }); // Pi writes the file once it has a message
+  const { session, titles, errors } = await start(dir, noPicker, undefined, false, { type: 'session_start', reason: 'new', previousSessionFile: previous.getSessionFile() });
+  sessions.push(session);
+  assert.deepEqual(errors, []);
+  assert.equal(titles[0], 'π work');
+}));
+
+test('OPTCHAT_PROFILE picks among several profiles, and a missing one warns and falls back to the picker', () => withHome('optchat-env-', async (dir, sessions) => {
+  createProfile('work'); createProfile('personal');
+  process.env.OPTCHAT_PROFILE = 'personal';
+  const chosen = await start(dir, noPicker); sessions.push(chosen.session);
+  assert.deepEqual(chosen.errors, []);
+  assert.equal(chosen.titles[0], 'π personal');
+
+  process.env.OPTCHAT_PROFILE = 'nope';
+  const warnings: string[] = [], asked: string[] = [];
+  const fallback = await start(dir, { notify: (text, type) => { if (type === 'warning') warnings.push(text); },
+    select: async title => { asked.push(title); return 'work'; } });
+  sessions.push(fallback.session);
+  assert.deepEqual(warnings, ['OPTCHAT_PROFILE: no profile named nope.']);
+  assert.deepEqual(asked, ['OptChat profile']);
+  assert.equal(fallback.titles[0], 'π work');
+}));
+
+test('Back from a lone busy profile shows the picker instead of retrying it', () => withHome('optchat-lone-busy-', async (dir, sessions) => {
+  createProfile('busy');
+  const unlock = await lockProfile(profilePath('busy'), 'busy · PID 1 · elsewhere');
+  try {
+    const asked: string[] = [], picks = ['Back', undefined];
+    const { session } = await start(dir, { select: async title => { asked.push(title.split('\n')[0]); return picks.shift(); } });
+    sessions.push(session);
+    assert.deepEqual(asked, ['busy is open in another window', 'OptChat profile']);
+  } finally { await unlock(); }
+}));

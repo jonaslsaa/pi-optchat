@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { parseArgs, parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import { parseArgs, parseSessionEntries, parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type FileEntry, type SessionStartEvent } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
@@ -38,6 +38,11 @@ import { showModelPicker, showSettings } from './settings-page.ts';
 import { showMenu } from './menu.ts';
 
 const binding = 'optchat.profile';
+/** The profile a session is bound to; the latest binding wins. */
+function boundProfile(entries: readonly FileEntry[]) {
+  const saved = entries.findLast(e => e.type === 'custom' && e.customType === binding);
+  return saved?.type === 'custom' && record(saved.data) && typeof saved.data.name === 'string' ? saved.data.name : undefined;
+}
 const CONNECT_MODES = ['auto', 'join', 'off'] as const;
 /** Print mode routes `process.stdout` to stderr so only the answer reaches stdout; the joined reply goes to fd 1 itself. */
 async function printReply(text: string) {
@@ -227,6 +232,24 @@ export default function optchat(pi: ExtensionAPI) {
     if (!name) return undefined;
     createProfile(name); return name;
   };
+  // An unbound TUI session skips the picker when the choice is clear (#238): /new keeps the window's profile, then OPTCHAT_PROFILE, then a lone profile.
+  const defaultProfile = (ctx: ExtensionContext, event: SessionStartEvent): string | undefined => {
+    if (ctx.mode !== 'tui') return undefined;
+    const names = listProfiles();
+    // Pi reloads extensions on /new, so the window's profile is only in the previous session's file (written once it has a message).
+    if (event.reason === 'new' && event.previousSessionFile) {
+      try {
+        const kept = boundProfile(parseSessionEntries(readFileSync(event.previousSessionFile, 'utf8')));
+        if (kept && names.includes(kept)) return kept;
+      } catch {}
+    }
+    const env = process.env.OPTCHAT_PROFILE?.trim();
+    if (env) {
+      if (names.includes(env)) return env;
+      ctx.ui.notify(`OPTCHAT_PROFILE: no profile named ${env}.`, 'warning');
+    }
+    return names.length === 1 ? names[0] : undefined;
+  };
   const openProfile = async (name: string, ctx: ExtensionContext) => {
     const dir = profilePath(name);
     if (!existsSync(dir)) throw new Error(`Profile ${name} does not exist. Use /optchat profile to create it.`);
@@ -268,7 +291,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport);
       untitle = children.subscribe(() => showTitle(ctx)); showTitle(ctx);
       status(ctx);
-      ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
+      ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})\nSwitch profiles with /optchat profile.`, 'info');
       const queuedReports = [...reports];
       if (!pendingImport(dir)) {
         const recover = (work: Promise<void>, what: string) => work.catch(error => ctx.ui.notify(`${what}: ${errorText(error)}`, 'error'));
@@ -288,11 +311,9 @@ export default function optchat(pi: ExtensionAPI) {
     }
   };
 
-  pi.on('session_start', async (_event, ctx) => {
+  pi.on('session_start', async (event, ctx) => {
     stopping = false;
-    const entries = ctx.sessionManager.getEntries();
-    const saved = entries.findLast(e => e.type === 'custom' && e.customType === binding);
-    const boundName = saved?.type === 'custom' && record(saved.data) && typeof saved.data.name === 'string' ? saved.data.name : undefined;
+    const entries = ctx.sessionManager.getEntries(), boundName = boundProfile(entries);
     // A session with conversation in it belongs to its profile. One that is only bound (a fresh `/optchat profile` session) may still pick another.
     const settled = boundName !== undefined && entries.some(e => e.type === 'message' || e.type === 'custom_message');
     const flag = pi.getFlag('optchat-profile');
@@ -311,7 +332,7 @@ export default function optchat(pi: ExtensionAPI) {
         for (const ms of [0, 250, 1000]) setTimeout(() => title.reapply(), ms).unref();
         return;
       }
-      let name = boundName ?? (typeof flag === 'string' ? flag : await chooseProfile(ctx));
+      let name = boundName ?? (typeof flag === 'string' ? flag : defaultProfile(ctx, event) ?? await chooseProfile(ctx));
       // Only plain `pi -p` joins: JSON and RPC output carry Pi's own events, which a joined reply would bypass.
       const connect = ctx.mode === 'print' ? connectMode() : 'off';
       if (connect === 'join' && !name) { process.exitCode = 1; throw new Error('--optchat-connect join needs a profile: pass --optchat-profile'); }
