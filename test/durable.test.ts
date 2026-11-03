@@ -316,6 +316,17 @@ test('after a restart, zoom returns a tool\'s kept image; its own result keeps o
   } finally { await again.close(); }
 });
 
+test('zoom returns a user\'s image that came in as unpadded base64: the store gives it back padded, under another name', async () => {
+  const { images } = memoryImages(), unpadded = { ...photo, data: photo.data.replace(/=+$/, '') };
+  const agent = await open(file(), [fauxAssistantMessage('nice'), fauxAssistantMessage(fauxToolCall('zoom', { id: 0 }), { stopReason: 'toolUse' }), fauxAssistantMessage('here')], undefined, { images });
+  try {
+    await (await agent.root.submit({ type: 'input', content: await agent.chat.offloadImages([{ type: 'text', text: 'look' }, unpadded]) }, context)).wait(context);
+    await agent.idle();
+    await agent.ask('show it again');
+    assert.deepEqual(imagesIn(agent.sent.at(-1), 'toolResult'), [photo]);
+  } finally { await agent.close(); }
+});
+
 test('an image the store refuses stays inline in Pi\'s row and still reaches the model', async (t) => {
   t.mock.method(console, 'error', () => {});
   const { kept, images } = memoryImages(), refused = { ...photo, data: Buffer.alloc(1000, 8).toString('base64') }, putImage = images.putImage;
@@ -346,6 +357,27 @@ test('a ref the store lacks or can\'t read is sent as its text, and the run goes
   try {
     assert.equal((await agent.ask('take two')).status, 'done');
     assert.deepEqual(contentOf(agent.sent[1], 'toolResult'), [{ type: 'text', text: 'snap' }, { type: 'text', text: imageRef(photo) }, { type: 'text', text: imageRef(missing) }]);
+  } finally { await agent.close(); }
+});
+
+test('a step a refresh dropped has its image read once more, for its summary, not for each request after', async () => {
+  // A window of 10,000 tokens: a refresh once the run passes 12,000 characters (30%), each step here an image of about 4,800.
+  let shot = 0;
+  const camera: Extension = defineExtension({ name: 'camera', tools: [defineTool({
+    name: 'camera', description: 'Takes a photo.', parameters: Type.Object({}), replay: 'safe',
+    execute: async () => ({ output: [{ type: 'text', text: 'snap' }, { ...photo, data: Buffer.alloc(1000, ++shot).toString('base64') }] }),
+  })] });
+  const { images } = memoryImages(), store = images.image, reads: { request: number; name: string }[] = [];
+  const agent = await open(file(), [...Array.from({ length: 5 }, () => fauxAssistantMessage(fauxToolCall('camera', {}), { stopReason: 'toolUse' })), fauxAssistantMessage('done')],
+    undefined, { images: { ...images, image: name => { reads.push({ request: agent.sent.length, name }); return store(name); } }, extensions: () => [camera], contextWindow: 10_000 });
+  try {
+    await agent.ask('take five');
+    assert.ok(agent.sent.some(request => request.some(m => text(m.content).includes('this turn grew long'))), 'a request was refreshed');
+    // The first photo is read for the two requests that send it and once for its summary, not again for the requests after the
+    // refresh that dropped it.
+    const first = nameOf({ ...photo, data: Buffer.alloc(1000, 1).toString('base64') });
+    assert.deepEqual(reads.filter(read => read.name === first).map(read => read.request), [1, 2, 3]);
+    assert.deepEqual(agent.sent.map(request => imagesIn(request, 'toolResult').some(image => nameOf(image) === first)), [false, true, true, false, false, false]);
   } finally { await agent.close(); }
 });
 

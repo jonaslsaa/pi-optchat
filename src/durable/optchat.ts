@@ -89,10 +89,10 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
   };
 
   /** A model-issued tool's images go to the store, so Pi's transcript keeps their refs, unless its text could pass Pi Durable's
-   * bound (images.ts). Zoom's images are in the store already. */
+   * bound (images.ts). */
   const afterTool: ToolHooks['afterTool'] = async (call, result, api) => {
     if (api.conversationId !== id || call.parent || !result.output?.some(isImage) || !fitsBound(result.output)) return undefined;
-    return { ...result, output: await offload(memory.store, result.output, call.name !== 'zoom') };
+    return { ...result, output: await offload(memory.store, result.output) };
   };
 
   const handle = async (ctx: Context): Promise<Conversation> => {
@@ -203,9 +203,9 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
   };
   const beforeRequest: GenerationHooks['beforeRequest'] = async (request, api, ctx) => {
     if (api.conversationId !== id) return undefined;
-    const messages = await restore(memory.store, request.messages);
-    const { system, previous, run, view } = await compose(ctx, { messages, models: api.models });
-    return system.length < messages.length ? { messages: withView([...system, ...previous, ...run], view) } : undefined;
+    const { system, previous, run, view } = await compose(ctx, { messages: request.messages, models: api.models });
+    // Images go back in last, into only what is sent: a refresh drops older steps' refs unread.
+    return system.length < request.messages.length ? { messages: withView(await restore(memory.store, [...system, ...previous, ...run]), view) } : undefined;
   };
 
   const Remember = defineTask<Record<string, never>, { phase: 'remember' }, null>({

@@ -1,5 +1,5 @@
 import type { GenerationHooks, ToolExecutionResult } from '@earendil-works/pi-durable';
-import { decode, isImage, isMime, loadImages, ref, refName, type AnyMessage, type ImageContent, type ImageRef, type Store } from '../core/index.ts';
+import { decode, isImage, isMime, loadImage, ref, refName, type AnyMessage, type ImageContent, type ImageRef, type Store } from '../core/index.ts';
 
 export type Message = Parameters<GenerationHooks['beforeRequest']>[0]['messages'][number];
 type Block = NonNullable<ToolExecutionResult['output']>[number];
@@ -44,11 +44,11 @@ export async function keep(store: Store, image: ImageContent, name: string) {
   }
 }
 
-/** `content` with each image the store keeps replaced by its ref; one it refuses stays. `put: false` for images it has already,
- * such as zoom's. */
-export async function offload(store: Store, content: readonly Block[], put = true): Promise<Block[]> {
+/** `content` with each image the store keeps replaced by its ref; one it refuses stays. Zoom's images are put again too: the store
+ * gives them back as canonical base64, whose name differs from the stored one when the image came in otherwise. */
+export async function offload(store: Store, content: readonly Block[]): Promise<Block[]> {
   const { named, imageRef } = await imageNames(content.filter(isImage));
-  const kept = await Promise.all(named.map(async ({ image, name }) => !put || await keep(store, image, name) ? [image.data] : []));
+  const kept = await Promise.all(named.map(async ({ image, name }) => await keep(store, image, name) ? [image.data] : []));
   const offloaded = new Set(kept.flat());
   return content.map(block => isImage(block) && offloaded.has(block.data) ? { type: 'text', text: imageRef(block) } : block);
 }
@@ -68,18 +68,22 @@ export function fitsBound(output: readonly Block[]) {
  * store lacks or can't read stays as it is. */
 export async function restore(store: Store, messages: readonly Message[]) {
   const reads = new Map<string, Promise<Block>>();
-  const read = (block: Text) => {
-    const pending = reads.get(block.text);
+  const read = (name: string, block: Text) => {
+    const pending = reads.get(name);
     if (pending) return pending;
-    const image = loadImages(store, block.text).then(([found]) => found ?? block, error => {
+    const image = loadImage(store, name).then(found => found ?? block, error => {
       console.error(`OptChat could not read an image: ${error instanceof Error ? error.message : String(error)}`);
       return block;
     });
-    reads.set(block.text, image);
+    reads.set(name, image);
     return image;
   };
   return Promise.all(messages.map(async m => {
     if ((m.role !== 'user' && m.role !== 'toolResult') || typeof m.content === 'string') return m;
-    return { ...m, content: await Promise.all(m.content.map(block => isRef(block) ? read(block) : block)) };
+    return { ...m, content: await Promise.all(m.content.map(block => {
+      if (block.type !== 'text') return block;
+      const name = refName(block.text);
+      return name === undefined ? block : read(name, block);
+    })) };
   }));
 }
