@@ -1,4 +1,4 @@
-import type { Api, AssistantMessage, Message, Model, Models, SimpleStreamOptions } from '@earendil-works/pi-ai';
+import type { Api, AssistantMessage, ImageContent, Message, Model, Models, SimpleStreamOptions } from '@earendil-works/pi-ai';
 import { COMPACT, compaction, IMPORT_GUIDANCE, tooLong } from './prompts.ts';
 import { bytes, cut, NODE, Refused, type Compressor } from './memory.ts';
 import { cachePayload, splitView } from './cache.ts';
@@ -74,9 +74,16 @@ export function createCompressor({ model: resolve, retryable, onUsage = () => {}
   const gate = primeFirst();
   return async (input, signal) => {
     const { model, reasoning: thinking, stream: streamSimple } = resolve();
-    const step = `${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}${compaction(input)}`;
-    // OpenAI joins text blocks with nothing between them, so the task starts its own paragraph after the view.
-    const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: input.context }, { type: 'text', text: `\n\n${step}` }], timestamp: Date.now() }];
+    // A model without image input gets none, and a short message it can't see more of stays its own line, word for word.
+    let images = model.input.includes('image') ? input.images ?? [] : [];
+    if (!images.length && bytes(input.source) <= NODE) return input.source;
+    // The images go after the task, so the view stays the cached prefix its sibling compactions share.
+    const task = (images: ImageContent[]): Message => ({ role: 'user', timestamp: Date.now(), content: [
+      // OpenAI joins text blocks with nothing between them, so the task starts its own paragraph after the view.
+      { type: 'text', text: input.context },
+      { type: 'text', text: `\n\n${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}${compaction({ ...input, images })}` },
+      ...images] });
+    const messages: Message[] = [task(images)];
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
     const tries: string[] = [];
@@ -97,6 +104,13 @@ export function createCompressor({ model: resolve, retryable, onUsage = () => {}
     const answer = () => retryTransient(ask, onUsage, retryable, retryDelays, signal);
     for (let attempt = 0; attempt < 5; attempt++) {
       const reply = await answer();
+      // A provider that rejects the images (too big, too many) rejects them at every retry: they are asked about once by name only.
+      if (images.length && reply.stopReason === 'error' && !retryable(reply)) {
+        images = [];
+        if (bytes(input.source) <= NODE) return input.source;
+        messages.splice(0, messages.length, task(images));
+        continue;
+      }
       // A stop reason means the model answered: a refusal or a content filter, which asking again repeats.
       // A provider's own 'error' stop (Mistral) is a failure on its side, not an answer: a plain error, tried again later.
       if (reply.stopReason === 'error' && reply.rawStopReason !== undefined && reply.rawStopReason !== 'error' && !retryable(reply))
@@ -108,8 +122,9 @@ export function createCompressor({ model: resolve, retryable, onUsage = () => {}
       const line = reply.content.filter(c => c.type === 'text').map(c => c.text).join('').trim().replace(/^\d+\+\d+\|\s*/, '');
       if (!line) throw new Refused('Compactor returned no text.');
       tries.push(line);
-      // A merge of two short lines can come back nearly as big as both, so a line must also shrink what it replaces.
-      if (bytes(line) <= accepted() && bytes(line) < bytes(input.source)) break;
+      // A merge of two short lines can come back nearly as big as both, so a line must also shrink what it replaces; a line that
+      // says what images show may be longer than the names it replaces.
+      if (bytes(line) <= accepted() && (images.length > 0 || bytes(line) < bytes(input.source))) break;
       messages.push(reply);
       messages.push({ role: 'user', content: tooLong(bytes(line), cut(line)), timestamp: Date.now() });
     }

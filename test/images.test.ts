@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { crc32, deflateSync } from 'node:zlib';
 import { saveImages } from '../src/images.ts';
 import { Memory } from '../src/memory.ts';
-import { PAGE } from '../src/core/memory.ts';
+import { PAGE, type Compression } from '../src/core/memory.ts';
 import { memoryTools } from '../src/tools.ts';
 import { logMessage, textContent } from '../src/transcript.ts';
 import { removeDir } from './support.ts';
@@ -65,3 +65,17 @@ test('a large image is shrunk to 2048 px on its long side and about 1.5 MB', () 
   assert.match(noisy.file, /\.jpg$/);
   assert.ok(noisy.bytes.length <= 1.5 * 1024 * 1024, `${noisy.bytes.length} bytes`);
 }));
+
+test('a short message naming a kept image is summarized with that image, and one naming no kept image stays word for word', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-images-')), inputs: Compression[] = [];
+  const memory = new Memory(dir, async input => { inputs.push(input); return 'user sent a red square'; }, () => {});
+  try {
+    const red = image(png(2, 2, () => [255, 0, 0]));
+    await saveImages(memory.store, [red]);
+    memory.append('user', textContent([red]));
+    memory.append('user', '[image 0123456789abcdef]');
+    await memory.settle();
+    assert.deepEqual(inputs.map(input => input.images), [[red]]);
+    assert.deepEqual([0, 1].map(i => memory.summary({ l: 0, i })), ['user sent a red square', 'user: [image 0123456789abcdef]']);
+  } finally { await memory.close(); removeDir(dir); }
+});

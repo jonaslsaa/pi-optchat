@@ -1,3 +1,5 @@
+import type { ImageContent } from '@earendil-works/pi-ai';
+import { loadImages } from './images.ts';
 import type { Saved, Store } from './store.ts';
 
 export const NODE = 512;
@@ -22,8 +24,9 @@ export interface Summary extends Part { text: string; size: number }
 /** A summary node as memory keeps it in RAM: `Memory.summary(part)` reads its text from the store. */
 export type Node = Omit<Summary, 'text'>;
 /** `part` is the node to build: a message's leaf, or the merge of its two halves. `call` is the tool call a tool result's leaf
- * answers, raw, since its own line is often not built yet (#153). */
-export interface Compression { context: string; source: string; part: Part; historical?: boolean; call?: { i: number; text: string } }
+ * answers, raw, since its own line is often not built yet (#153). `images` are the kept images a leaf's message names, in order:
+ * a message with any is compressed even when short, since its line is all that merges will ever know of them. */
+export interface Compression { context: string; source: string; part: Part; historical?: boolean; call?: { i: number; text: string }; images?: ImageContent[] }
 export type Compressor = (input: Compression, signal: AbortSignal) => Promise<string>;
 /** A compressor throws this when the model itself gives no line for an input (a refusal, an empty reply, 5 cut-off replies):
  * asked again it fails alike, so the node keeps the start of its source instead of being retried forever (#193). */
@@ -331,15 +334,18 @@ export class Memory {
       : [0, 1].map(offset => this.line({ l: part.l - 1, i: 2 * part.i + offset })).join('\n');
     const mergeSource = part.l > 0 ? [0, 1].map(offset => flat(this.line({ l: part.l - 1, i: 2 * part.i + offset }))).join('\n') : source;
     const call = part.l === 0 ? this.callOf(part.i) : undefined;
+    // A failed image read fails the build, which is retried like any store error; an image never kept is skipped.
+    const images = part.l === 0 ? await loadImages(this.store, source) : [];
     let text = source;
-    if (bytes(source) > NODE) try {
+    if (bytes(source) > NODE || images.length) try {
       text = (await this.compress({ context: this.compactionView(part), source: cap(mergeSource, SOURCE), part,
         historical: this.root.slice(start(part), end(part)).some(entry => !!entry.origin),
-        ...(call !== undefined ? { call: { i: call, text: cap(`tool: ${this.text(call)}`, 4000) } } : {}) }, this.controller.signal)).trim();
+        ...(call !== undefined ? { call: { i: call, text: cap(`tool: ${this.text(call)}`, 4000) } } : {}),
+        ...(images.length ? { images } : {}) }, this.controller.signal)).trim();
       if (!text) throw new Refused('Compactor returned an empty summary.');
     } catch (error) {
       if (!(error instanceof Refused) || this.stopped) throw error;
-      text = cut(`${CLIPPED} ${flat(mergeSource)}`);
+      text = bytes(source) > NODE ? cut(`${CLIPPED} ${flat(mergeSource)}`) : source;
       this.warn(`Compactor ${start(part)}+${2 ** part.l}: ${error.message} (kept its start instead)`);
     }
     if (this.stopped) return;

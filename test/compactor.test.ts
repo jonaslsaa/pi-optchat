@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
+import { createAssistantMessageEventStream, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
 import { ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { createCompressor } from '../src/compactor.ts';
 import { createCompressor as coreCompressor } from '../src/core/compactor.ts';
@@ -175,4 +175,35 @@ test("a host's own compactor prompt is the one the model gets, and COMPACT is us
   assert.equal(await compressor('Summarize a board chat with many people.')(input, new AbortController().signal), 'a line');
   await compressor()(input, new AbortController().signal);
   assert.deepEqual(prompts, ['Summarize a board chat with many people.', COMPACT]);
+});
+
+test('a leaf gets its images after the task, by name only once the provider rejects them, and none on a text-only model', async () => {
+  const sent: Context['messages'][number]['content'][] = [];
+  const compressor = (input: ('text' | 'image')[], rejects = false) => coreCompressor({ retryable: () => false, model: () => ({
+    model: { id: 'compactor', name: 'compactor', api: 'openai-completions', provider: 'host', baseUrl: 'https://invalid.local', reasoning: false,
+      input, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1000 },
+    stream: (model, context) => {
+      const content = context.messages[0].content, images = Array.isArray(content) && content.some(c => c.type === 'image');
+      sent.push(content);
+      const stream = createAssistantMessageEventStream(), message: AssistantMessage = { role: 'assistant', api: model.api, provider: model.provider,
+        model: model.id, timestamp: Date.now(), usage: emptyUsage(), content: [{ type: 'text', text: 'user sent a bar chart: sales doubled in May' }],
+        ...(rejects && images ? { stopReason: 'error', errorMessage: 'image exceeds 5 MB maximum' } : { stopReason: 'stop' }) };
+      stream.push({ type: 'done', reason: 'stop', message }); stream.end();
+      return stream;
+    } }) });
+  const chart = { type: 'image' as const, data: 'iVBORw0K', mimeType: 'image/png' };
+  const input = { context: '<chat>\n</chat>', source: 'user: [image 0123456789abcdef]', part: { l: 0, i: 0 }, images: [chart] };
+  const signal = new AbortController().signal;
+  assert.equal(await compressor(['text', 'image'])(input, signal), 'user sent a bar chart: sales doubled in May', 'a line about an image may outgrow its source');
+  const [content] = sent;
+  assert.ok(Array.isArray(content));
+  assert.deepEqual(content.map(c => c.type), ['text', 'text', 'image']);
+  assert.equal(content[0].type === 'text' && content[0].text, input.context, 'the cached view comes first, as without images');
+  assert.match(content[1].type === 'text' ? content[1].text : '', /The images after <input> are the ones it names/);
+  assert.equal(await compressor(['text', 'image'], true)(input, signal), input.source, 'rejected images: a short message stays word for word');
+  assert.equal(await compressor(['text'])(input, signal), input.source);
+  assert.equal(sent.length, 2, 'the rejection is not asked again with the images, and a text-only model is not asked at all');
+  const long = { ...input, source: `user: ${'see this chart '.repeat(40)}[image 0123456789abcdef]` };
+  assert.equal(await compressor(['text', 'image'], true)(long, signal), 'user sent a bar chart: sales doubled in May');
+  assert.deepEqual(sent.slice(2).map(c => Array.isArray(c) && c.some(part => part.type === 'image')), [true, false], 'a long one is asked once more, by name only');
 });
