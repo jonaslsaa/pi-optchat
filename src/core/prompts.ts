@@ -141,7 +141,7 @@ export function compaction({ source, part, call, images }: Pick<Compression, 'so
 ${RULER}
 ${callBlock(part.i, call)}<input>
 ${source}
-</input>${images?.length ? `
+</input>${images.length ? `
 The images after <input> are the ones it names, in order. Say what matters in each, and keep
 each [image <name>] as written, so OptChat can zoom it.` : ''}`;
   const a = { l: part.l - 1, i: 2 * part.i }, b = { l: part.l - 1, i: 2 * part.i + 1 };

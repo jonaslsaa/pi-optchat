@@ -1,4 +1,4 @@
-import type { Api, AssistantMessage, ImageContent, Message, Model, Models, SimpleStreamOptions } from '@earendil-works/pi-ai';
+import type { Api, AssistantMessage, Message, Model, Models, SimpleStreamOptions } from '@earendil-works/pi-ai';
 import { COMPACT, compaction, IMPORT_GUIDANCE, tooLong } from './prompts.ts';
 import { bytes, cut, NODE, Refused, type Compressor } from './memory.ts';
 import { cachePayload, splitView } from './cache.ts';
@@ -75,15 +75,16 @@ export function createCompressor({ model: resolve, retryable, onUsage = () => {}
   return async (input, signal) => {
     const { model, reasoning: thinking, stream: streamSimple } = resolve();
     // A model without image input gets none, and a short message it can't see more of stays its own line, word for word.
-    let images = model.input.includes('image') ? input.images ?? [] : [];
-    if (!images.length && bytes(input.source) <= NODE) return input.source;
+    const short = bytes(input.source) <= NODE;
+    let images = model.input.includes('image') ? input.images : [];
+    if (short && !images.length) return input.source;
     // The images go after the task, so the view stays the cached prefix its sibling compactions share.
-    const task = (images: ImageContent[]): Message => ({ role: 'user', timestamp: Date.now(), content: [
+    const task = (): Message => ({ role: 'user', timestamp: Date.now(), content: [
       // OpenAI joins text blocks with nothing between them, so the task starts its own paragraph after the view.
       { type: 'text', text: input.context },
       { type: 'text', text: `\n\n${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}${compaction({ ...input, images })}` },
       ...images] });
-    const messages: Message[] = [task(images)];
+    let messages: Message[] = [task()];
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
     const tries: string[] = [];
@@ -104,18 +105,17 @@ export function createCompressor({ model: resolve, retryable, onUsage = () => {}
     const answer = () => retryTransient(ask, onUsage, retryable, retryDelays, signal);
     for (let attempt = 0; attempt < 5; attempt++) {
       const reply = await answer();
-      // A provider that rejects the images (too big, too many) rejects them at every retry: they are asked about once by name only.
-      if (images.length && reply.stopReason === 'error' && !retryable(reply)) {
-        images = [];
-        if (bytes(input.source) <= NODE) return input.source;
-        messages.splice(0, messages.length, task(images));
-        continue;
-      }
+      // Any error the retry rule doesn't cover, with images sent: the images (too big, too many), which every retry would send again,
+      // or not (a bad key, no quota, a dropped connection). Asked once more by name only, the second kind fails again below and the
+      // summary is tried again later, images and all.
+      if (images.length && reply.stopReason === 'error' && !retryable(reply)) { images = []; messages = [task()]; continue; }
       // A stop reason means the model answered: a refusal or a content filter, which asking again repeats.
       // A provider's own 'error' stop (Mistral) is a failure on its side, not an answer: a plain error, tried again later.
       if (reply.stopReason === 'error' && reply.rawStopReason !== undefined && reply.rawStopReason !== 'error' && !retryable(reply))
         throw new Refused(reply.errorMessage ?? `Compactor stopped: ${reply.rawStopReason}`);
       if (reply.stopReason === 'error' || reply.stopReason === 'aborted') throw new Error(reply.errorMessage ?? `Compactor ${reply.stopReason}`);
+      // Answered by name only, so the images were the error: a short message has nothing more to say than its names.
+      if (short && !images.length) return input.source;
       // A reply cut off at the token limit, or one that calls a tool, is no summary: ask again.
       if (reply.stopReason === 'length' || reply.content.some(c => c.type === 'toolCall')) continue;
       // The compactions' view shows each line under its id+n| head, which a line can copy.
