@@ -80,7 +80,7 @@ test('a short message naming a kept image is summarized with that image; one nam
     memory.append('user', '[image 0123456789abcdef]');
     memory.append('echo', `zoom: 0+1|user: ${textContent([red])}`);
     await memory.settle();
-    assert.deepEqual(inputs.map(input => input.images), [[red]]);
+    assert.deepEqual(inputs.map(input => input.images), [[{ name: /[0-9a-f]{16}/.exec(textContent([red]))?.[0], image: red }]]);
     assert.deepEqual([0, 1].map(i => memory.summary({ l: 0, i })), ['user sent a red square', 'user: [image 0123456789abcdef]']);
   });
 });
@@ -97,7 +97,7 @@ test('a failed image read leaves the leaf to be built later, with the image', as
     assert.match(memory.lastError ?? '', /image store unavailable/);
     down = false;
     await memory.settle(undefined, 'tree');
-    assert.deepEqual(inputs.map(input => input.images), [[red]]);
+    assert.deepEqual(inputs.map(input => input.images), [[{ name: /[0-9a-f]{16}/.exec(textContent([red]))?.[0], image: red }]]);
     assert.equal(memory.summary({ l: 0, i: 0 }), 'user sent a red square');
   }, 10);
 });

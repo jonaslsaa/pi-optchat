@@ -1,5 +1,5 @@
 import type { ImageContent } from '@earendil-works/pi-ai';
-import { loadImages } from './images.ts';
+import { namedImages } from './images.ts';
 import type { Saved, Store } from './store.ts';
 
 export const NODE = 512;
@@ -24,9 +24,10 @@ export interface Summary extends Part { text: string; size: number }
 /** A summary node as memory keeps it in RAM: `Memory.summary(part)` reads its text from the store. */
 export type Node = Omit<Summary, 'text'>;
 /** `part` is the node to build: a message's leaf, or the merge of its two halves. `call` is the tool call a tool result's leaf
- * answers, raw, since its own line is often not built yet (#153). `images` are the kept images a leaf's message names, in order
- * (none for a merge): a message with any is compressed even when short, since its line is all that merges will ever know of them. */
-export interface Compression { context: string; source: string; part: Part; historical?: boolean; call?: { i: number; text: string }; images: ImageContent[] }
+ * answers, raw, since its own line is often not built yet (#153). `images` are the kept images a leaf's `source` names, with
+ * those names, in order (none for a merge): a message with any is compressed even when short, since its line is all that merges
+ * will ever know of them. */
+export interface Compression { context: string; source: string; part: Part; historical?: boolean; call?: { i: number; text: string }; images: { name: string; image: ImageContent }[] }
 export type Compressor = (input: Compression, signal: AbortSignal) => Promise<string>;
 /** A compressor throws this when the model itself gives no line for an input (a refusal, an empty reply, 5 cut-off replies):
  * asked again it fails alike, so the node keeps the start of its source instead of being retried forever (#193). */
@@ -336,11 +337,13 @@ export class Memory {
     const call = part.l === 0 ? this.callOf(part.i) : undefined;
     // A failed image read fails the build, which is retried like any store error; an image never kept is skipped. A zoom's page
     // names images its message's own leaf already saw.
-    const images = part.l === 0 && !this.copiesMemory(part.i) ? await loadImages(this.store, source) : [];
+    const input = cap(mergeSource, SOURCE);
+    // Only the images whose names the compactor gets: a huge message's cut middle sends neither.
+    const images = part.l === 0 && !this.copiesMemory(part.i) ? await namedImages(this.store, input) : [];
     const short = bytes(source) <= NODE;
     let text = source;
     if (!short || images.length) try {
-      text = (await this.compress({ context: this.compactionView(part), source: cap(mergeSource, SOURCE), part, images,
+      text = (await this.compress({ context: this.compactionView(part), source: input, part, images,
         historical: this.root.slice(start(part), end(part)).some(entry => !!entry.origin),
         ...(call !== undefined ? { call: { i: call, text: cap(`tool: ${this.text(call)}`, 4000) } } : {}) }, this.controller.signal)).trim();
       if (!text) throw new Refused('Compactor returned an empty summary.');

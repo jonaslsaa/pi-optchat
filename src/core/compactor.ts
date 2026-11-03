@@ -78,12 +78,12 @@ export function createCompressor({ model: resolve, retryable, onUsage = () => {}
     const short = bytes(input.source) <= NODE;
     let images = model.input.includes('image') ? input.images : [];
     if (short && !images.length) return input.source;
-    // The images go after the task, so the view stays the cached prefix its sibling compactions share.
+    // The images go after the task, so the view stays the cached prefix its sibling compactions share; each follows its name.
     const task = (): Message => ({ role: 'user', timestamp: Date.now(), content: [
       // OpenAI joins text blocks with nothing between them, so the task starts its own paragraph after the view.
       { type: 'text', text: input.context },
       { type: 'text', text: `\n\n${input.historical ? IMPORT_GUIDANCE + '\n\n' : ''}${compaction({ ...input, images })}` },
-      ...images] });
+      ...images.flatMap(({ name, image }) => [{ type: 'text' as const, text: `\n[image ${name}]` }, image])] });
     let messages: Message[] = [task()];
     const view = splitView(input.context);
     const prefix = model.api === 'anthropic-messages' && view.length > 1 ? `${model.provider}/${model.id}/${thinking ?? 'off'}\n${view.slice(0, -1).join('')}` : undefined;
@@ -107,8 +107,8 @@ export function createCompressor({ model: resolve, retryable, onUsage = () => {}
       const reply = await answer();
       // Any error the retry rule doesn't cover, with images sent: the images (too big, too many), which every retry would send again,
       // or not (a bad key, no quota, a dropped connection). Asked once more by name only, the second kind fails again below and the
-      // summary is tried again later, images and all.
-      if (images.length && reply.stopReason === 'error' && !retryable(reply)) { images = []; messages = [task()]; continue; }
+      // summary is tried again later, images and all. It is not one of the 5 tries, so a fifth reply can't end the loop without it.
+      if (images.length && reply.stopReason === 'error' && !retryable(reply)) { images = []; messages = [task()]; attempt--; continue; }
       // A stop reason means the model answered: a refusal or a content filter, which asking again repeats.
       // A provider's own 'error' stop (Mistral) is a failure on its side, not an answer: a plain error, tried again later.
       if (reply.stopReason === 'error' && reply.rawStopReason !== undefined && reply.rawStopReason !== 'error' && !retryable(reply))

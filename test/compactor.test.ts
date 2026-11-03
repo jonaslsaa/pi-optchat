@@ -195,7 +195,7 @@ function imageCompressor(input: ('text' | 'image')[], rejects?: 'images' | 'all'
       stream.push({ type: 'done', reason: 'stop', message }); stream.end();
       return stream;
     } }) });
-  return { sent, compress: (source: string) => compress({ context: '<chat>\n</chat>', source, part: { l: 0, i: 0 }, images: [chart] }, new AbortController().signal) };
+  return { sent, compress: (source: string) => compress({ context: '<chat>\n</chat>', source, part: { l: 0, i: 0 }, images: [{ name: '0123456789abcdef', image: chart }] }, new AbortController().signal) };
 }
 
 test('a leaf gets its images after the view and the task, and a text-only model gets none', async () => {
@@ -203,9 +203,10 @@ test('a leaf gets its images after the view and the task, and a text-only model 
   assert.equal(await seeing.compress(SHORT), LINE, 'a line about an image may outgrow its source');
   const [content] = seeing.sent;
   assert.ok(Array.isArray(content));
-  assert.deepEqual(content.map(c => c.type), ['text', 'text', 'image']);
+  assert.deepEqual(content.map(c => c.type), ['text', 'text', 'text', 'image']);
   assert.equal(content[0].type === 'text' && content[0].text, '<chat>\n</chat>');
-  assert.match(content[1].type === 'text' ? content[1].text : '', /The images after <input> are the ones it names/);
+  assert.equal(content[2].type === 'text' && content[2].text, '\n[image 0123456789abcdef]', 'each image follows its name');
+  assert.match(content[1].type === 'text' ? content[1].text : '', /After <input>, each image it names follows its \[image <name>\]/);
   const blind = imageCompressor(['text']);
   assert.equal(await blind.compress(SHORT), SHORT);
   assert.equal(blind.sent.length, 0, 'a short message is not asked about at all');
@@ -235,7 +236,7 @@ test("on Anthropic a leaf's cache marks stay on the view, with the task and its 
     models: [{ id: 'claude', name: 'Fake', reasoning: false, input: ['text', 'image'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 1000 }] });
   const compress = createCompressor(new ModelRegistry(runtime), () => ({ provider: 'anthropic-images', model: 'claude', thinking: 'off' }), { retryDelays: [] });
   const view = `<chat>\n${'0+1|user: an old remembered line\n'.repeat(200)}</chat>`;
-  await assert.rejects(compress({ context: view, source: SHORT, part: { l: 0, i: 0 }, images: [chart] }, new AbortController().signal));
+  await assert.rejects(compress({ context: view, source: SHORT, part: { l: 0, i: 0 }, images: [{ name: '0123456789abcdef', image: chart }] }, new AbortController().signal));
   const blocks = bodies[0].messages[0].content, marked = blocks.filter(block => 'cache_control' in block);
   assert.ok(marked.length > 0 && marked.every(block => typeof block.text === 'string' && block.text.includes('0+1|user: an old remembered line')));
   assert.deepEqual(blocks.slice(-2).map(block => [block.type, 'cache_control' in block]), [['text', false], ['image', false]]);
