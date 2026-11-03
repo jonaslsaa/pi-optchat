@@ -5,47 +5,26 @@ import {
 } from '@earendil-works/pi-durable';
 import type { Static, TSchema } from 'typebox';
 import {
-  allowSearch, boundedMessage, cachePayload, CAP, CHILD, childInput, completedExchange, CONTINUITY, decode, isImage, isMime, loadImages, logMessage, memoryTools, refreshBudget, refreshedRun,
-  refreshPoint, SEARCH_DOC, searchTool, textContent, TURN_REFRESHED, VIEW_DOC, withView, type AnyMessage, type ImageContent, type Memory,
+  allowSearch, boundedMessage, cachePayload, CHILD, childInput, completedExchange, CONTINUITY, isImage, logMessage, memoryTools, refreshBudget, refreshedRun,
+  refreshPoint, SEARCH_DOC, searchTool, textContent, TURN_REFRESHED, VIEW_DOC, withView, type Memory,
 } from '../core/index.ts';
+import { dropZoomRefs, fitsBound, imageNames, keep, keptImages, offload, restore, type Message } from './images.ts';
 
 export type Context = Parameters<Harness['commit']>[1];
-type Message = Parameters<GenerationHooks['beforeRequest']>[0]['messages'][number];
 type Models = Exclude<HarnessOptions['models'], () => unknown>;
-type Block = NonNullable<ToolExecutionResult['output']>[number];
-type TextContent = Extract<Block, { type: 'text' }>;
 
 /** The entries that are the chat: other kinds (system prompt changes, resets, compactions, other extensions' own) stay out of memory. */
 const CHAT = new Set([UserEntry.kind, AssistantEntry.kind, ToolResultEntry.kind]);
 const chat = (entry: EntryRecord) => CHAT.has(entry.kind) ? entry.model ?? [] : [];
-/** A text block that is only an image's name: what an image offloaded to memory's store leaves in Pi's transcript. */
-const MARKER = /^\[image [0-9a-f]{16}\]$/;
-const isMarker = (block: Block): block is TextContent => block.type === 'text' && MARKER.test(block.text);
-/** A zoom's page names the images it returns already, so memory leaves out the names its offloaded images leave behind. */
-const unmarkZoom = (m: Message) => m.role === 'toolResult' && m.toolName === 'zoom' ? { ...m, content: m.content.filter(block => !isMarker(block)) } : m;
-const failure = (error: unknown) => error instanceof Error ? error.message : String(error);
 /** What memory logs of an entry: its chat, or a reset's note (`Conversation.reset(text)`, a tool's handoff) marked as one. Pi sends
  * the note in the context it starts, which is logged only once it ends, so the model never sees it twice. */
-const remembered = (entry: EntryRecord) => !ResetEntry.is(entry) ? chat(entry).map(unmarkZoom)
+const remembered = (entry: EntryRecord) => !ResetEntry.is(entry) ? chat(entry).map(dropZoomRefs)
   : (entry.model ?? []).map(note => ({ role: 'user' as const, content: `[Handoff note] ${textContent(note.content)}`, timestamp: note.timestamp }));
 /** Each message OptChat logs from a Pi entry carries the entry's id, so the log itself says how far it has read Pi's transcript. */
 const RECEIPT = 'pi:';
 /** The answer that ends a run, whether it succeeded, failed or was aborted. */
 const endsRun = (m: Message) => m.role === 'assistant' && m.stopReason !== 'toolUse';
 const encoder = new TextEncoder();
-
-/** The images memory names, as Pi keeps them: a user's and a tool's, but not zoom's, which are kept already. */
-const keptImages = (message: AnyMessage) => message.role === 'user' || message.role === 'toolResult' && !('toolName' in message && message.toolName === 'zoom')
-  ? Array.isArray(message.content) ? message.content.filter(isImage) : [] : [];
-/** Each distinct image by its base64, named as Pi's OptChat names it: the first 16 hex digits of the SHA-256 of its base64. Web
- * Crypto is asynchronous and core's ImageRef is not, so images are named before core reads the names. */
-async function imageNames(images: readonly ImageContent[]) {
-  const distinct = new Map(images.map(image => [image.data, image]));
-  return new Map(await Promise.all([...distinct.values()].map(async image => {
-    const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(image.data)), 0, 8);
-    return [image.data, { image, name: Array.from(hash, byte => byte.toString(16).padStart(2, '0')).join('') }] as const;
-  })));
-}
 
 /** One of core's memory tools as a Pi Durable tool, its arguments typed by its own schema. */
 const durableTool = <P extends TSchema>(tool: {
@@ -109,38 +88,11 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
     }
   };
 
-  /** `content` with each image kept in memory's store and replaced by its name, as memory names it; one the store refuses stays. */
-  const offload = async (content: readonly Block[]) => {
-    const names = await imageNames(content.filter(isImage)), kept = new Set<string>();
-    await Promise.all([...names.values()].map(async ({ image, name }) => {
-      if (!isMime(image.mimeType)) return;
-      try { await memory.store.putImage(name, image.mimeType, decode(image.data)); kept.add(image.data); }
-      catch (error) { console.error(`OptChat could not keep an image: ${failure(error)}`); }
-    }));
-    return content.map(block => isImage(block) && kept.has(block.data) ? { type: 'text' as const, text: `[image ${names.get(block.data)?.name}]` } : block);
-  };
-  /** A model-issued tool's images go to the store, so Pi's transcript holds their names. A result whose text would pass CAP keeps
-   * them: Pi Durable bounds a result's text by keeping one of its text blocks, and a text over CAP is sent as its head and tail,
-   * either of which can drop a name. */
+  /** A model-issued tool's images go to the store, so Pi's transcript keeps their refs, unless its text could pass Pi Durable's
+   * bound (images.ts). Zoom's images are in the store already. */
   const afterTool: ToolHooks['afterTool'] = async (call, result, api) => {
-    if (api.conversationId !== id || call.parent || !result.output?.some(isImage)) return undefined;
-    const output = await offload(result.output);
-    return encoder.encode(textContent(output)).length <= CAP ? { ...result, output } : undefined;
-  };
-  /** The request's messages with each image name in a user message or tool result replaced by the image, read from the store once
-   * per request. A name the store lacks or can't read stays as it is. */
-  const restore = async (messages: readonly Message[]) => {
-    const loads = new Map<string, Promise<Block>>();
-    const load = (block: TextContent) => {
-      let image = loads.get(block.text);
-      if (!image) loads.set(block.text, image = loadImages(memory.store, block.text).then(([found]) => found ?? block, error => {
-        console.error(`OptChat could not read an image: ${failure(error)}`);
-        return block;
-      }));
-      return image;
-    };
-    return Promise.all(messages.map(async m => m.role !== 'user' && m.role !== 'toolResult' || typeof m.content === 'string' || !m.content.some(isMarker) ? m
-      : { ...m, content: await Promise.all(m.content.map(block => isMarker(block) ? load(block) : block)) }));
+    if (api.conversationId !== id || call.parent || !result.output?.some(isImage) || !fitsBound(result.output)) return undefined;
+    return { ...result, output: await offload(memory.store, result.output, call.name !== 'zoom') };
   };
 
   const handle = async (ctx: Context): Promise<Conversation> => {
@@ -157,17 +109,14 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
         if (logged + 1 > head - 1) return;
         const page = await conversation.entries({ order: 'ascending', minEntryId: logged + 1 as EntryId, maxEntryId: head - 1 as EntryId }, 256, cursor, ctx);
         for (const entry of page.items) {
-          const messages = remembered(entry), names = await imageNames(messages.flatMap(keptImages));
+          const messages = remembered(entry), { named, imageRef } = await imageNames(messages.flatMap(keptImages));
           // Kept before the message is logged, so the image its text names is there for zoom; one that can't be kept is only named.
           // An image sent again, or read again after a restart, is written again under its name.
-          for (const { image, name } of names.values()) if (isMime(image.mimeType)) {
-            try { await memory.store.putImage(name, image.mimeType, decode(image.data)); }
-            catch (error) { console.error(`OptChat could not keep an image: ${error instanceof Error ? error.message : String(error)}`); }
-          }
+          for (const { image, name } of named) await keep(memory.store, image, name);
           // Once a save failed (also one queued before, failing during the awaits above), memory refuses appends: requests keep the
           // view it has, and a restart logs the rest from Pi's transcript.
           if (memory.saveError) return;
-          for (const message of messages) logMessage(resumed, message, { receipt: `${RECEIPT}${entry.id}`, imageRef: image => `[image ${names.get(image.data)?.name}]` });
+          for (const message of messages) logMessage(resumed, message, { receipt: `${RECEIPT}${entry.id}`, imageRef });
           logged = entry.id;
         }
         cursor = page.next;
@@ -185,8 +134,8 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
     if (!last) return [];
     const messages = (await conversation.context(ctx, { at: last.id })).entries.flatMap(chat);
     const start = messages.slice(0, messages.findLastIndex(m => m.role === 'user')).findLastIndex(endsRun) + 1;
-    const run = messages.slice(start), names = await imageNames(run.filter(m => m.role === 'user').flatMap(keptImages));
-    const exchange = completedExchange(run, image => `[image ${names.get(image.data)?.name}]`);
+    const run = messages.slice(start), { imageRef } = await imageNames(run.filter(m => m.role === 'user').flatMap(keptImages));
+    const exchange = completedExchange(run, imageRef);
     const bytes = exchange.reduce((sum, m) => sum + encoder.encode(textContent(m.content)).length, 0);
     return bytes <= previousExchangeBytes ? exchange : [];
   };
@@ -254,7 +203,7 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
   };
   const beforeRequest: GenerationHooks['beforeRequest'] = async (request, api, ctx) => {
     if (api.conversationId !== id) return undefined;
-    const messages = await restore(request.messages);
+    const messages = await restore(memory.store, request.messages);
     const { system, previous, run, view } = await compose(ctx, { messages, models: api.models });
     return system.length < messages.length ? { messages: withView([...system, ...previous, ...run], view) } : undefined;
   };
@@ -326,7 +275,7 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
     /** `input` with its images kept in memory's store, each replaced by its name, as tool results' are: pass a user input through it
      * before submitting it, so Pi's transcript holds no image bytes; requests get the images back. An image the store refuses stays. */
     async offloadImages(input: UserInput): Promise<UserInput> {
-      return typeof input === 'string' ? input : offload(input);
+      return typeof input === 'string' ? input : offload(memory.store, input);
     },
     /** Starts following the conversation, and resets it now if a run ended before a restart. Returns a function that stops. */
     attach(harness: Harness, ctx: Context) {

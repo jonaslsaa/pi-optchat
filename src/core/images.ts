@@ -3,6 +3,11 @@ import type { Store } from './store.ts';
 
 /** How a message's image reads in memory: `[image <16 hex digits>]`, named by the host (Pi: a hash of the image as sent). */
 const REF = /\[image ([0-9a-f]{16})\]/g;
+const ONLY_REF = new RegExp(`^${REF.source}$`);
+/** The ref that names an image in memory's text. */
+export const ref = (name: string) => `[image ${name}]`;
+/** The image name a text is the ref of, when it is that ref and nothing else. */
+export const refName = (text: string) => ONLY_REF.exec(text)?.[1];
 
 export const isImage = (part: unknown): part is ImageContent => typeof part === 'object' && part !== null
   && 'type' in part && part.type === 'image' && 'data' in part && typeof part.data === 'string' && 'mimeType' in part && typeof part.mimeType === 'string';
