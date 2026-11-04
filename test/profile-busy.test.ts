@@ -1,14 +1,14 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext, type SessionStartEvent } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { Memory } from '../src/memory.ts';
-import { checkSocketPath, createProfile, isWindows, loadConfig, lockProfile, profilePath, profileSocket, saveConfig, SOCKET_PATH_LIMIT } from '../src/profiles.ts';
-import { removeDir } from './support.ts';
+import { checkSocketPath, createProfile, isWindows, lastProfile, listProfiles, loadConfig, lockProfile, profilePath, profileSocket, rememberProfile, saveConfig, SOCKET_PATH_LIMIT } from '../src/profiles.ts';
+import { profilePickerAnswers, removeDir } from './support.ts';
 
 const agentDir = process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 after(() => removeDir(agentDir));
@@ -55,21 +55,23 @@ test('a busy profile offers to connect or pick another profile, and picking anot
     unlock = await lockProfile(profilePath('busy'), 'busy · PID 1 · elsewhere');
 
     // New session: pick `busy`, it's taken, choose "Back", then pick `other`.
-    const asked: { title: string, options: string[] }[] = [];
-    const picks = ['busy', 'Back', 'other'];
-    const fresh = await start(dir, { select: async (title, options) => { asked.push({ title, options }); return picks.shift(); } });
+    const asked: { title: string, options: string[] }[] = [], shown: string[][] = [];
+    const fresh = await start(dir, {
+      select: async (title, options) => { asked.push({ title, options }); return 'Back'; },
+      custom: profilePickerAnswers(['busy', 'other'], ['busy', 'other', 'third'], shown),
+    });
     sessions.push(fresh.session);
-    assert.deepEqual(asked.map(a => a.title.split('\n')[0]), ['OptChat profile', 'busy is open in another window', 'OptChat profile']);
-    assert.match(asked[1].title, /busy · PID 1 · elsewhere/);
-    assert.deepEqual(asked[1].options, ['Start a connected subagent conversation here', 'Back']);
+    assert.deepEqual(shown.map(lines => lines.find(line => line.includes('OptChat profile'))?.trim()), ['OptChat profile', 'OptChat profile']);
+    assert.deepEqual(asked.map(a => a.title.split('\n')[0]), ['busy is open in another window']);
+    assert.match(asked[0].title, /busy · PID 1 · elsewhere/);
+    assert.deepEqual(asked[0].options, ['Start a connected subagent conversation here', 'Back']);
     assert.equal(fresh.titles[0], 'π other');
     assert.deepEqual(fresh.errors, []);
     const bound = fresh.manager.getEntries().filter(e => e.type === 'custom' && e.customType === 'optchat.profile');
     assert.deepEqual(bound.map(e => e.type === 'custom' && e.data), [{ name: 'other' }], 'the session is bound to the profile actually opened');
 
     // `/optchat profile` makes a fresh session already bound to its pick; a busy pick can still go Back and rebind.
-    const switchedPicks = ['Back', 'third']; // `other` is held by the session above
-    const switched = await start(dir, { select: async () => switchedPicks.shift() }, 'busy');
+    const switched = await start(dir, { select: async () => 'Back', custom: profilePickerAnswers(['third'], ['busy', 'other', 'third']) }, 'busy');
     sessions.push(switched.session);
     assert.equal(switched.titles[0], 'π third');
     assert.deepEqual(switched.errors, []);
@@ -98,9 +100,10 @@ test('a connected window whose original window closed can leave: /new, /resume, 
   try {
     createProfile('busy');
     owner = (await start(dir, {}, 'busy')).session;
-    const notes: string[] = [], asked: string[] = [];
-    const picks = ['Start a connected subagent conversation here', undefined];
-    window = (await start(dir, { notify: text => { notes.push(text); }, select: async title => { asked.push(title.split('\n')[0]); return picks.shift(); } }, 'busy')).session;
+    const notes: string[] = [], asked: string[] = [], shown: string[][] = [];
+    window = (await start(dir, { notify: text => { notes.push(text); },
+      select: async title => { asked.push(title.split('\n')[0]); return 'Start a connected subagent conversation here'; },
+      custom: profilePickerAnswers([undefined], ['busy'], shown) }, 'busy')).session;
     const switchBlocked = async () => (await window!.extensionRunner.emit({ type: 'session_before_switch', reason: 'new' }))?.cancel === true;
     const forkBlocked = async () => (await window!.extensionRunner.emit({ type: 'session_before_fork', entryId: 'x', position: 'at' }))?.cancel === true;
     assert.equal(await switchBlocked(), true, 'a live connected conversation keeps its window');
@@ -111,7 +114,8 @@ test('a connected window whose original window closed can leave: /new, /resume, 
     assert.equal(await switchBlocked(), false, '/new and /resume are no longer cancelled');
     assert.equal(await forkBlocked(), false, '/fork and /clone are no longer cancelled');
     await window.prompt('/optchat profile');
-    assert.deepEqual(asked, ['busy is open in another window', 'OptChat profile'], '/optchat profile offers the profile picker');
+    assert.deepEqual(asked, ['busy is open in another window']);
+    assert.deepEqual(shown.map(lines => lines.find(line => line.includes('OptChat profile'))?.trim()), ['OptChat profile'], '/optchat profile offers the profile picker');
     assert.ok(!notes.some(n => n.includes('original window')), 'no pointer to a window that is gone');
   } finally {
     for (const session of [owner, window]) if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
@@ -212,7 +216,7 @@ test('a second writer that got past the lock is refused on its next turn, with t
   try {
     createProfile('shared');
     saveConfig(profilePath('shared'), { ...loadConfig(profilePath('shared')), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' }, subagent: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
-    const opened = await start(dir, { select: async () => 'shared' });
+    const opened = await start(dir, { custom: profilePickerAnswers(['shared'], ['shared']) });
     session = opened.session;
     const other = new Memory(profilePath('shared'), async () => 'summary', () => {});
     other.append('user', 'written by the other process'); await other.close();
@@ -269,12 +273,12 @@ test('OPTCHAT_PROFILE picks among several profiles, and a missing one warns and 
   assert.equal(chosen.titles[0], 'π personal');
 
   process.env.OPTCHAT_PROFILE = 'nope';
-  const warnings: string[] = [], asked: string[] = [];
+  const warnings: string[] = [], shown: string[][] = [];
   const fallback = await start(dir, { notify: (text, type) => { if (type === 'warning') warnings.push(text); },
-    select: async title => { asked.push(title); return 'work'; } });
+    custom: profilePickerAnswers(['work'], ['personal', 'work'], shown) });
   sessions.push(fallback.session);
   assert.deepEqual(warnings, ['OPTCHAT_PROFILE: no profile named nope.']);
-  assert.deepEqual(asked, ['OptChat profile']);
+  assert.ok(shown.flat().some(line => line.includes('OptChat profile')), 'the fallback shows the picker');
   assert.equal(fallback.titles[0], 'π work');
 }));
 
@@ -282,9 +286,68 @@ test('Back from a lone busy profile shows the picker instead of retrying it', ()
   createProfile('busy');
   const unlock = await lockProfile(profilePath('busy'), 'busy · PID 1 · elsewhere');
   try {
-    const asked: string[] = [], picks = ['Back', undefined];
-    const { session } = await start(dir, { select: async title => { asked.push(title.split('\n')[0]); return picks.shift(); } });
+    const asked: string[] = [], shown: string[][] = [];
+    const { session } = await start(dir, {
+      select: async title => {
+        if (asked.length) assert.fail(`the busy dialog came back: ${title}`);
+        asked.push(title.split('\n')[0]); return 'Back';
+      },
+      custom: profilePickerAnswers([undefined], ['busy'], shown) });
     sessions.push(session);
-    assert.deepEqual(asked, ['busy is open in another window', 'OptChat profile']);
+    assert.deepEqual(asked, ['busy is open in another window'], 'busy is offered to connect or decline');
+    assert.ok(shown.flat().some(line => line.includes('OptChat profile')), 'the picker is shown, not a busy retry');
   } finally { await unlock(); }
 }));
+
+test('Ctrl+D in the profile picker deletes the profile once it is confirmed', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-delete-')), oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = join(dir, 'home');
+  let session: Awaited<ReturnType<typeof start>>['session'] | undefined;
+  try {
+    createProfile('keep'); createProfile('gone');
+    rememberProfile('gone');
+    const asked: string[][] = [], shown: string[][] = [];
+    const opened = await start(dir, {
+      confirm: async (title, message) => { asked.push([title, message]); return true; },
+      custom: profilePickerAnswers([{ delete: 'gone' }, undefined], ['gone', 'keep'], shown),
+    });
+    session = opened.session;
+    const shownLines = shown.flat();
+    assert.ok(shownLines.some(line => line.includes('gone')), 'the doomed profile was on screen');
+    assert.deepEqual(asked.map(([title]) => title), ['Delete profile gone?']);
+    assert.match(asked[0][1], /removed from disk\. Pi sessions are kept/);
+    assert.deepEqual(listProfiles(), ['keep']);
+    assert.equal(existsSync(profilePath('gone')), false, 'the folder is gone');
+    assert.equal(lastProfile(), undefined, 'and so is the pointer that named it');
+    assert.equal(opened.errors.length, 0, opened.errors.join('\n'));
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    removeDir(dir);
+  }
+});
+
+test('a declined delete keeps the profile and the picker comes back', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-delete-')), oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = join(dir, 'home');
+  let session: Awaited<ReturnType<typeof start>>['session'] | undefined;
+  try {
+    createProfile('keep'); createProfile('safe');
+    const asked: string[] = [], shown: string[][] = [];
+    const opened = await start(dir, {
+      confirm: async title => { asked.push(title); return false; },
+      // Declined once, then the second opening takes the profile instead.
+      custom: profilePickerAnswers([{ delete: 'safe' }, 'safe'], ['keep', 'safe'], shown),
+    });
+    session = opened.session;
+    assert.deepEqual(asked, ['Delete profile safe?']);
+    assert.equal(existsSync(profilePath('safe')), true);
+    assert.equal(shown.length, 2, 'the picker reopened after the refusal');
+    assert.deepEqual(opened.errors, []);
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    removeDir(dir);
+  }
+});
+
