@@ -1,4 +1,4 @@
-import { getMarkdownTheme, keyText, UserMessageComponent, type ExtensionAPI, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
+import { getMarkdownTheme, getAgentDir, keyText, SettingsManager, UserMessageComponent, type ExtensionAPI, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
 import { Container, Editor, getKeybindings, Loader, Markdown, Spacer, TruncatedText, TuiAltScreen, TuiMainScreen, type Component, type TUI } from '@earendil-works/pi-tui';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { connectWindow, type LiveState, type WindowEvent } from './window-bridge.ts';
@@ -16,7 +16,8 @@ type Details = { from?: WindowEvent['from']; turn?: AgentMessage[] };
  * look Pi gives any registered tool without a renderer (`spawn tasks=[…]`) instead of the raw-JSON look of an unknown one.
  */
 let transcript: TranscriptView | undefined;
-const transcriptOn = (tui: TUI) => new TranscriptView(tui, process.cwd(), () => ({}));
+let hideThinkingForWindow = false;
+const transcriptOn = (tui: TUI) => new TranscriptView(tui, process.cwd(), () => ({}), hideThinkingForWindow);
 const view = (tui: TUI) => transcript ??= transcriptOn(tui);
 /** Turns drawn before this window has a live view (after /reload) still get their tool boxes; there is just no live screen to redraw. */
 let detached: TranscriptView | undefined;
@@ -87,6 +88,7 @@ class LiveTurn implements Component {
 export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContext, profile: string, setTitle: (title: string) => void = title => ctx.ui.setTitle(title), agentId?: string, activeOnly = false) {
   // Each window draws with its own transcript, so nothing from an earlier window carries over.
   transcript = undefined;
+  hideThinkingForWindow = SettingsManager.create(ctx.cwd, getAgentDir()).getHideThinkingBlock();
   let label: string | undefined, started = false, ended = false, liveTurn: LiveTurn | undefined, live: LiveState | undefined, turn: AgentMessage[] = [];
   const title = (state: WindowState) => setTitle(windowTitle(profile, state, label));
   const display = (text: string, details: Details = {}) => pi.sendMessage<Details>({ customType: 'optchat-connected', content: text, display: true, details }, { triggerTurn: false });
