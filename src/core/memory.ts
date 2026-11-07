@@ -18,6 +18,11 @@ export interface Origin { source: string; conversation: string; message: string;
 export interface Entry { i: number; kind: Kind; text: string; date: string; receipt?: string; origin?: Origin }
 /** A message as memory keeps it in RAM: its text stays in the store, and `Memory.text(i)` reads it. */
 export type Message = Omit<Entry, 'text'>;
+/** A message's head as the model reads it, in its leaf, zoom and search: its kind, after `[IMP]` for imported history (#201). */
+export const head = ({ kind, origin }: Message) => origin ? `[IMP] ${kind}` : kind;
+/** Imports before #201 started each message's text with a "[Historical …]" line; its `[IMP]` head says that now, so reads drop
+ * it. A Claude Code memory note's line names the memory, so it stays. */
+const LEGACY_HEADER = /^\[Historical (?!Claude Code memory )[\s\S]*?\]\n/;
 export interface Part { l: number; i: number }
 /** A summary node as stores save it. `size` is its line's bytes in a view. */
 export interface Summary extends Part { text: string; size: number }
@@ -197,7 +202,10 @@ export class Memory {
   }
   node(part: Part) { return this.tree.get(key(part)); }
   /** Message `i`'s text, from the store. */
-  text(i: number) { return this.unsaved.texts.get(i) ?? this.store.text(i); }
+  text(i: number) {
+    const text = this.unsaved.texts.get(i) ?? this.store.text(i);
+    return this.root[i]?.origin ? text.replace(LEGACY_HEADER, '') : text;
+  }
   /** Every message with its text, read from the store: for imports, which plan from the whole log. */
   entries(): Entry[] { return this.root.map(m => ({ ...m, text: this.text(m.i) })); }
   /** A built node's text, from the store. */
@@ -331,7 +339,7 @@ export class Memory {
   /** Nothing is being built, nothing more can start, and something failed: only a retry can make progress. */
   private get stalled() { return this.busy.size === 0 && !this.scheduled && this.retryAt.size > 0; }
   private async build(part: Part) {
-    const source = part.l === 0 ? `${this.root[part.i].kind}: ${this.text(part.i)}`
+    const source = part.l === 0 ? `${head(this.root[part.i])}: ${this.text(part.i)}`
       : [0, 1].map(offset => this.line({ l: part.l - 1, i: 2 * part.i + offset })).join('\n');
     const mergeSource = part.l > 0 ? [0, 1].map(offset => flat(this.line({ l: part.l - 1, i: 2 * part.i + offset }))).join('\n') : source;
     const call = part.l === 0 ? this.callOf(part.i) : undefined;
@@ -413,7 +421,7 @@ export class Memory {
     if (!Number.isSafeInteger(id) || id < 0 || !Number.isSafeInteger(n) || n < 1 || !Number.isInteger(Math.log2(n)) || id % n || id + n > this.root.length)
       throw new Error(`No line ${id}+${n}: n is a power of 2, id a multiple of n. The tree's roots: ${this.roots() || 'none, the chat is empty'}.`);
     if (n === 1) {
-      const { kind } = this.root[id], text = this.text(id), page = Math.min(limit ?? PAGE, PAGE);
+      const kind = head(this.root[id]), text = this.text(id), page = Math.min(limit ?? PAGE, PAGE);
       if (!Number.isSafeInteger(page) || page < 1) throw new Error('limit must be a positive integer.');
       if (offset === undefined && text.length <= page) return `${id}+1|${kind}: ${text}`;
       if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0 || offset >= Math.max(1, text.length)))

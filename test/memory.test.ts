@@ -16,6 +16,7 @@ import { logMessage, buildContext } from '../src/transcript.ts';
 import { boundedMessage } from '../src/core/messages.ts';
 import { Inbox } from '../src/inbox.ts';
 import { compaction } from '../src/core/prompts.ts';
+import { searchPage } from '../src/core/tools.ts';
 import type { ToolResultMessage } from '@earendil-works/pi-ai';
 import type { AssistantMessage, SystemMessage, UserMessage } from '@earendil-works/pi-ai';
 import { removeDir } from './support.ts';
@@ -943,5 +944,20 @@ test("a tool result's summary sees the raw call it answers, paired in order thro
     assert.match(task, /message 4 answers \(message 2,[^]*<call>\ntool: bash \{"command":"ls"\}[^]*<\/call>\n<input>\necho: bash: listing/);
     assert.doesNotMatch(compaction(leaf(1)), /<call>/);
     assert.doesNotMatch(leaf(4).context, /tool: bash/);
+  } finally { await memory.close(); removeDir(dir); }
+});
+
+test('an imported message reads as [IMP] in its leaf, zoom and search, and an older import\'s header line is dropped', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
+  const origin = { source: 'claude', conversation: 'c', message: 'm', title: 'Old chat' };
+  const memory = new Memory(dir, async input => input.source);
+  try {
+    memory.append('user', 'kept verbatim', '2026-04-08T10:00:00.000Z', 'import:a', origin);
+    memory.append('user', '[Historical claude · 2026-04-08T10:00:00.000Z · conversation c · Old chat]\nstored by an older import', '2026-04-08T10:01:00.000Z', 'import:b', origin);
+    memory.append('user', 'native');
+    await memory.settle(AbortSignal.timeout(5000), 'tree');
+    assert.deepEqual(memory.render().split('\n').slice(1, 4), ['0+1|[IMP] user: kept verbatim', '1+1|[IMP] user: stored by an older import', '2+1|user: native']);
+    assert.equal(memory.zoom(1, 1), '1+1|[IMP] user: stored by an older import');
+    assert.match(searchPage(memory, 'older import'), / · \[IMP\] user: stored by an older import$/m);
   } finally { await memory.close(); removeDir(dir); }
 });

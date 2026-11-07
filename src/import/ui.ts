@@ -1,7 +1,7 @@
 import type { ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import type { Memory } from '../memory.ts';
 import { bytes } from '../core/memory.ts';
-import { scanLocal, scanChatGPT, scanClaudeMemories, readConversation, type Conversation, type ImportedEntry, type Source } from './sources.ts';
+import { conversationNote, scanLocal, scanChatGPT, scanClaudeMemories, readConversation, type Conversation, type ImportedEntry, type Source } from './sources.ts';
 import { deduplicate, type ImportMode, type ImportJob, type ImportProgress } from './job.ts';
 import { selectMany } from './multi-select.ts';
 import { homedir } from 'node:os';
@@ -55,6 +55,8 @@ export async function chooseImport(ctx: ImportUI, profile: string, memory: Memor
     for (const [i, c] of conversations.entries()) {
       ctx.ui.setWidget('optchat-import', [`Reading ${i + 1}/${conversations.length}: ${clean(c.title)}`]);
       const parsed = await readConversation(c, signal);
+      // A memory file is already one note.
+      if (c.source !== 'claude-memory' && parsed.entries.length) entries.push(conversationNote(c, parsed.entries));
       for (const entry of parsed.entries) entries.push(entry);
       for (const warning of parsed.warnings) warnings.push(warning);
     }

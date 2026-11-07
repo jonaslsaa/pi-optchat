@@ -32,8 +32,6 @@ export function timestamp(value: unknown, fallback: string): string {
   const date = new Date(time);
   return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
 }
-/** Header time: minutes are enough to place a message, and the rest of an ISO stamp costs summary bytes. */
-const minute = (date: string) => `${date.slice(0, 16).replace('T', ' ')}Z`;
 function text(value: unknown): string {
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) return value.map(text).filter(Boolean).join('\n');
@@ -104,21 +102,19 @@ function piUserText(v: Record<string, unknown>): string | undefined {
 const digest = (s: string) => createHash('sha256').update(s).digest('hex');
 /**
  * A resumed Claude Code session copies the earlier messages into its own file, each with its uuid and text, so a copy
- * matches on those across files. The header line names the file (and its format has changed), and a command stored raw
- * by an older import is read as typed, so entries already in a profile match too. Messages without a uuid never match.
+ * matches on those across files. A command stored raw by an older import is read as typed, so entries already in a profile
+ * match too (memory reads drop an older import's header line). Messages without a uuid never match.
  */
 export function copyKey(e: Pick<ImportedEntry, 'kind' | 'text' | 'origin'>): string | undefined {
   if (e.origin?.source !== 'claude' || e.origin.message.startsWith('line:')) return undefined;
-  const body = e.text.slice(e.text.indexOf('\n') + 1);
-  return JSON.stringify([e.origin.message, e.kind, claudeCommand(body) || body]);
+  return JSON.stringify([e.origin.message, e.kind, claudeCommand(e.text) || e.text]);
 }
 function imported(c: Conversation, id: string, kind: Kind, content: string, date: string, identity = content): ImportedEntry | undefined {
   if (!content.trim()) return undefined;
   // Text provenance survives compression. Stable per-message receipts survive moved files and repeated exports.
+  // Memory shows the message as `[IMP]` from its origin; its conversation's note says where it came from (#201).
   const origin: Origin = { source: c.source, conversation: c.id, message: id, title: c.title, project: c.project };
-  // The agent reads only text, so the id's first 13 characters stay in it: enough to find a Claude or Codex transcript by
-  // glob. Codex ids are UUIDv7, whose first 8 characters are a coarse timestamp shared by many sessions.
-  return { kind, date, origin, text: `[Historical ${c.source} · ${minute(date)} · ${c.id.slice(0, 13)} · ${c.title}]\n${content}`,
+  return { kind, date, origin, text: content,
     // A Pi or OMP fork copies the earlier entries, ids and dates included, into a new session, so the session id stays out.
     receipt: `import:${digest(JSON.stringify(c.source === 'pi' ? [c.source, id, kind, date, identity] : [c.source, c.id, id, kind, identity]))}` };
 }
@@ -336,7 +332,7 @@ async function readMemory(c: Conversation, signal?: AbortSignal): Promise<{ entr
   const date = timestamp(fields.get('modified'), modified.toISOString());
   return { warnings: [], entries: [{ kind: 'note', date,
     origin: { source: c.source, conversation: c.id, message: hash.slice(0, 16), title: name, project: c.project },
-    text: `[Historical Claude Code memory · ${minute(date)} · project ${c.project}${type ? ` · type ${one(type)}` : ''} · ${name}]\n${description ? one(description) + '\n\n' : ''}${body.trim()}`,
+    text: `[Claude Code memory · project ${c.project}${type ? ` · type ${one(type)}` : ''} · ${name}]\n${description ? one(description) + '\n\n' : ''}${body.trim()}`,
     receipt: `import:${digest(JSON.stringify([c.source, c.id, hash]))}` }] };
 }
 
@@ -513,4 +509,13 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
   }
   const unique = new Map(entries.map(e => [e.receipt, e]));
   return { entries: [...unique.values()], warnings };
+}
+/** One note ahead of a conversation's messages, so the tree knows what it was (#201). Its receipt follows the first message's:
+ * a Pi fork copies that message, so the fork adds no second note for the conversation it continues. The id's first 13
+ * characters find a Claude or Codex transcript by glob (Codex ids are UUIDv7: the first 8 are a coarse timestamp). */
+export function conversationNote(c: Conversation, entries: readonly ImportedEntry[]): ImportedEntry {
+  const dates = entries.map(e => e.date).sort(), from = dates[0].slice(0, 10), to = dates[dates.length - 1].slice(0, 10);
+  return { kind: 'note', date: dates[0], origin: { source: c.source, conversation: c.id, message: 'conversation', title: c.title, project: c.project },
+    text: `Imported ${c.source} conversation "${c.title}"${c.project ? ` in ${c.project}` : ''}, ${from === to ? from : `${from} to ${to}`}, ${entries.length} messages, id ${c.id.slice(0, 13)}.`,
+    receipt: `import:${digest(JSON.stringify(['conversation', entries[0].receipt]))}` };
 }
