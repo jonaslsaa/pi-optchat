@@ -112,7 +112,7 @@ export function copyKey(e: Pick<ImportedEntry, 'kind' | 'text' | 'origin'>): str
 function imported(c: Conversation, id: string, kind: Kind, content: string, date: string, identity = content): ImportedEntry | undefined {
   if (!content.trim()) return undefined;
   // Text provenance survives compression. Stable per-message receipts survive moved files and repeated exports.
-  // Memory shows the message as `[IMP]` from its origin; its conversation's note says where it came from (#201).
+  // Memory shows the message as `[IMP <day>]` from its origin and date; its conversation's note says where it came from (#201).
   const origin: Origin = { source: c.source, conversation: c.id, message: id, title: c.title, project: c.project };
   return { kind, date, origin, text: content,
     // A Pi or OMP fork copies the earlier entries, ids and dates included, into a new session, so the session id stays out.

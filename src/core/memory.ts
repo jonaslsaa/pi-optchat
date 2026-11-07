@@ -18,8 +18,9 @@ export interface Origin { source: string; conversation: string; message: string;
 export interface Entry { i: number; kind: Kind; text: string; date: string; receipt?: string; origin?: Origin }
 /** A message as memory keeps it in RAM: its text stays in the store, and `Memory.text(i)` reads it. */
 export type Message = Omit<Entry, 'text'>;
-/** A message's head as the model reads it, in its leaf, zoom and search: its kind, after `[IMP]` for imported history (#201). */
-export const head = ({ kind, origin }: Message) => origin ? `[IMP] ${kind}` : kind;
+/** A message's head as the model reads it, in its leaf, zoom and search: its kind, after `[IMP <day>]` for imported history (#201).
+ * The day costs 11 bytes, and in the A/B it kept dates in the summaries and saved most date() calls. */
+export const head = ({ kind, origin, date }: Message) => origin ? `[IMP ${date.slice(0, 10)}] ${kind}` : kind;
 /** Imports before #201 started each message's text with a "[Historical …]" line; its `[IMP]` head says that now, so reads drop
  * it. A Claude Code memory note's line names the memory, so it stays. */
 const LEGACY_HEADER = /^\[Historical (?!Claude Code memory )[\s\S]*?\]\n/;

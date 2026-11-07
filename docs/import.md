@@ -34,7 +34,9 @@ The preview shows a rough token estimate. This is not a price quote: a big impor
 
 ## What gets imported
 
-User messages and final assistant replies, with original dates and source labels, as in Victor's recipe. Imported records are marked as historical so old requests are not treated as new instructions.
+User messages and final assistant replies, word for word, with their original dates, as in Victor's recipe. Each conversation starts with one note naming its source, title, project and days. The model sees an imported message as `[IMP 2026-04-08] user: …`, rendered from its origin and date rather than stored in its text, so old requests are not treated as new instructions and the text keeps its whole 512-byte line.
+
+Older imports stored a `[Historical …]` header line in each message's text. Memory drops it when reading, so zoom, search and new summaries see the `[IMP <day>]` form; summaries already built keep their wording.
 
 Left out:
 

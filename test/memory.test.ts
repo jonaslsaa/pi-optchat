@@ -947,7 +947,7 @@ test("a tool result's summary sees the raw call it answers, paired in order thro
   } finally { await memory.close(); removeDir(dir); }
 });
 
-test('an imported message reads as [IMP] in its leaf, zoom and search, and an older import\'s header line is dropped', async () => {
+test('an imported message reads as [IMP <day>] in its leaf, zoom and search, and an older import\'s header line is dropped', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
   const origin = { source: 'claude', conversation: 'c', message: 'm', title: 'Old chat' };
   const memory = new Memory(dir, async input => input.source);
@@ -956,8 +956,8 @@ test('an imported message reads as [IMP] in its leaf, zoom and search, and an ol
     memory.append('user', '[Historical claude · 2026-04-08T10:00:00.000Z · conversation c · Old chat]\nstored by an older import', '2026-04-08T10:01:00.000Z', 'import:b', origin);
     memory.append('user', 'native');
     await memory.settle(AbortSignal.timeout(5000), 'tree');
-    assert.deepEqual(memory.render().split('\n').slice(1, 4), ['0+1|[IMP] user: kept verbatim', '1+1|[IMP] user: stored by an older import', '2+1|user: native']);
-    assert.equal(memory.zoom(1, 1), '1+1|[IMP] user: stored by an older import');
-    assert.match(searchPage(memory, 'older import'), / · \[IMP\] user: stored by an older import$/m);
+    assert.deepEqual(memory.render().split('\n').slice(1, 4), ['0+1|[IMP 2026-04-08] user: kept verbatim', '1+1|[IMP 2026-04-08] user: stored by an older import', '2+1|user: native']);
+    assert.equal(memory.zoom(1, 1), '1+1|[IMP 2026-04-08] user: stored by an older import');
+    assert.match(searchPage(memory, 'older import'), / · \[IMP 2026-04-08\] user: stored by an older import$/m);
   } finally { await memory.close(); removeDir(dir); }
 });
