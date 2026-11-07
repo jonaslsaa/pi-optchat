@@ -9,8 +9,10 @@ const MIMES = new Map<string, Mime>((Object.keys(EXTENSIONS) as Mime[]).map(mime
 export const storeFor = (directory: string, warn: (s: string) => void = console.error): Store => new FileStore(directory, warn);
 
 /** Pi's imports before #201 started each message's text with a "[Historical …]" line; its `[IMP <day>]` head says that now, so
- * loading drops it. A Claude Code memory note's line names the memory, so it stays. */
-export const LEGACY_HEADER = /^\[Historical (?!Claude Code memory )[\s\S]*?\]\n/;
+ * loading drops it. Only the two shapes Pi wrote match, `<source> · <ISO time> · conversation <id> · <title>` and (from #64)
+ * `<source> · <YYYY-MM-DD HH:MM>Z · <13 characters of the id> · <title>`, so a message that itself starts "[Historical" keeps it.
+ * A Claude Code memory note's line names the memory, and its source isn't one word, so it stays. */
+export const LEGACY_HEADER = /^\[Historical [a-z]+ · \d{4}-\d{2}-\d{2}(?:T[\d:.]+Z · conversation \S+| \d{2}:\d{2}Z · \S+) · [\s\S]*?\]\n/;
 
 export function localDay(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
