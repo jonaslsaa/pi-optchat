@@ -947,17 +947,24 @@ test("a tool result's summary sees the raw call it answers, paired in order thro
   } finally { await memory.close(); removeDir(dir); }
 });
 
-test('an imported message reads as [IMP <day>] in its leaf, zoom and search, and an older import\'s header line is dropped', async () => {
+test('an imported message reads as [IMP <day>] in its leaf, zoom and search, and loading drops an older import\'s header line', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-test-'));
-  const origin = { source: 'claude', conversation: 'c', message: 'm', title: 'Old chat' };
+  const origin = { source: 'claude', conversation: 'c', message: 'm', title: 'Old chat' }, date = '2026-04-08T10:00:00.000Z';
+  mkdirSync(join(dir, 'main'), { recursive: true });
+  writeFileSync(join(dir, 'main', '000-import.jsonl'), [
+    { i: 0, kind: 'user', text: 'kept verbatim', date, receipt: 'import:a', origin },
+    { i: 1, kind: 'user', text: '[Historical claude · 2026-04-08T10:00:00.000Z · conversation c · Old chat]\nstored by an older import', date, receipt: 'import:b', origin },
+    { i: 2, kind: 'note', text: '[Historical Claude Code memory · 2026-04-08 10:00Z · project /p · Deploys]\nNever on Fridays', date, receipt: 'import:c', origin },
+  ].map(e => JSON.stringify(e)).join('\n') + '\n');
   const memory = new Memory(dir, async input => input.source);
   try {
-    memory.append('user', 'kept verbatim', '2026-04-08T10:00:00.000Z', 'import:a', origin);
-    memory.append('user', '[Historical claude · 2026-04-08T10:00:00.000Z · conversation c · Old chat]\nstored by an older import', '2026-04-08T10:01:00.000Z', 'import:b', origin);
     memory.append('user', 'native');
     await memory.settle(AbortSignal.timeout(5000), 'tree');
-    assert.deepEqual(memory.render().split('\n').slice(1, 4), ['0+1|[IMP 2026-04-08] user: kept verbatim', '1+1|[IMP 2026-04-08] user: stored by an older import', '2+1|user: native']);
+    assert.deepEqual(memory.render().split('\n').slice(1, 3), ['0+1|[IMP 2026-04-08] user: kept verbatim', '1+1|[IMP 2026-04-08] user: stored by an older import']);
+    assert.equal(memory.render().split('\n')[4], '3+1|user: native');
     assert.equal(memory.zoom(1, 1), '1+1|[IMP 2026-04-08] user: stored by an older import');
+    // A Claude Code memory note's line names the memory, so it stays.
+    assert.equal(memory.zoom(2, 1), '2+1|[IMP 2026-04-08] note: [Historical Claude Code memory · 2026-04-08 10:00Z · project /p · Deploys]\nNever on Fridays');
     assert.match(searchPage(memory, 'older import'), / · \[IMP 2026-04-08\] user: stored by an older import$/m);
   } finally { await memory.close(); removeDir(dir); }
 });

@@ -13,7 +13,7 @@ import { bytes, openMemory, type Compressor, type Entry, type Summary } from '..
 import type { Store } from '../src/core/store.ts';
 import type { Memory as CoreMemory } from '../src/core/memory.ts';
 import { localDay } from '../src/store.ts';
-import { conversationNote, scanLocal, scanChatGPT, scanClaudeMemories, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
+import { withNotes, scanLocal, scanChatGPT, scanClaudeMemories, readConversation, timestamp, type Conversation, type ImportedEntry } from '../src/import/sources.ts';
 import { prepareImport, runImport, memoryDirectory, pendingImport, discardImport, deduplicate } from '../src/import/job.ts';
 import { chronological, planImport, runImport as runCore } from '../src/core/import.ts';
 import { chooseImport, showProgress } from '../src/import/ui.ts';
@@ -282,14 +282,10 @@ test('a Pi / OMP fork adds only its new messages, though it copies the earlier o
   piSession(original, { id: 'original' }, earlier);
   piSession(fork, { id: 'fork', parentSession: original }, [...earlier, piUser('u2', 'question on the fork')]);
   try {
-    const read = async (file: string, id: string) => {
-      const c = { ...conversation('pi', file), id }, { entries } = await readConversation(c);
-      return [conversationNote(c, entries), ...entries];
-    };
+    const read = async (file: string, id: string) => (await readConversation({ ...conversation('pi', file), id })).entries;
     const { added, skipped } = deduplicate([], [...await read(original, 'original'), ...await read(fork, 'fork')]);
-    // The fork's note follows its first message, which it copied: one note for the conversation.
-    assert.deepEqual(added.map(e => e.kind === 'note' ? 'note' : e.text), ['note', 'first question', 'first answer', 'question on the fork']);
-    assert.equal(skipped, 3);
+    assert.deepEqual(added.map(e => e.text), ['first question', 'first answer', 'question on the fork']);
+    assert.equal(skipped, 2);
   } finally { removeDir(dir); }
 });
 
@@ -379,12 +375,14 @@ test('a resumed Claude session adds only its new messages, also over entries an 
   lines(join(dir, 'aaaa.jsonl'), copied('aaaa'));
   lines(join(dir, 'bbbb.jsonl'), [...copied('bbbb'), user('u3', 'bbbb', 'q3', 4), reply('a3', 'bbbb', 'r3', 5), user('u2', 'bbbb', 'q2 edited', 6)]);
   const read = async (id: string) => (await readConversation({ ...conversation('claude', join(dir, `${id}.jsonl`)), id })).entries;
-  const memory = new Memory(join(dir, 'profile'), short), text = (e: ImportedEntry) => e.text;
+  let memory = new Memory(join(dir, 'profile'), short);
+  const text = (e: ImportedEntry) => e.text;
   try {
     const [a, b] = [await read('aaaa'), await read('bbbb')];
     assert.deepEqual(deduplicate([], [...a, ...b]).added.map(text), ['/model opus', 'q2', 'r2', 'q3', 'r3', 'q2 edited']);
-    // An older import stored the original under a "[Historical …]" header and the command as Claude Code logged it; memory reads drop the header.
+    // An older import stored the original under a "[Historical …]" header and the command as Claude Code logged it; loading drops the header.
     for (const e of a) memory.append(e.kind, `[Historical claude · ${e.date} · conversation aaaa · Fixture]\n${e.text === '/model opus' ? model : e.text}`, e.date, e.receipt, e.origin);
+    await memory.close(); memory = new Memory(join(dir, 'profile'), short);
     assert.deepEqual(deduplicate(memory.entries(), b).added.map(text), ['q3', 'r3', 'q2 edited'], 'a uuid with other text is another message');
   } finally { await memory.close(); removeDir(dir); }
 });
@@ -708,11 +706,25 @@ test('an imported message is its text alone; its conversation note names the sou
     for (const [source, file, id] of [['claude', claude, 'cbcb64a5-871a-4179-a897-e3683852d011'], ['codex', codex, '0199c0de-1111-7222-8333-444455556666']] as const) {
       const c = { ...conversation(source, file), id }, { entries } = await readConversation(c);
       assert.deepEqual(entries.map(e => [e.text, e.origin?.conversation]), [['question', id]]);
-      const later = { ...entries[0], date: '2026-01-05T09:00:00.000Z' };
-      assert.equal(conversationNote(c, [later, entries[0]]).text, `Imported ${source} conversation "Fixture" in /synthetic, 2026-01-02 to 2026-01-05, 2 messages, id ${id.slice(0, 13)}.`);
-      assert.equal(conversationNote(c, [later, entries[0]]).date, date);
+      const [note] = withNotes([{ ...entries[0], date: '2026-01-05T09:00:00.000Z' }, entries[0]]);
+      assert.deepEqual([note.kind, note.date, note.text], ['note', date, `Imported ${source} conversation "Fixture" in /synthetic, 2026-01-02 to 2026-01-05, id ${id.slice(0, 13)}.`]);
     }
   } finally { removeDir(dir); }
+});
+
+test('re-importing a conversation adds nothing, and a later message comes with one note', async () => {
+  const dir = temp(), file = join(dir, 'claude.jsonl'), memory = new Memory(join(dir, 'profile'), short);
+  const user = (uuid: string, content: string) => ({ type: 'user', uuid, timestamp: date, message: { role: 'user', content } });
+  const fresh = async () => withNotes(deduplicate(memory.entries(), (await readConversation(conversation('claude', file))).entries).added);
+  try {
+    lines(file, [user('u1', 'first'), user('u2', 'second')]);
+    const first = await fresh();
+    assert.deepEqual(first.map(e => e.kind === 'note' ? 'note' : e.text), ['note', 'first', 'second']);
+    for (const e of first) memory.append(e.kind, e.text, e.date, e.receipt, e.origin);
+    assert.deepEqual(await fresh(), []);
+    lines(file, [user('u1', 'first'), user('u2', 'second'), user('u3', 'third')]);
+    assert.deepEqual((await fresh()).map(e => e.kind === 'note' ? 'note' : e.text), ['note', 'third']);
+  } finally { await memory.close(); removeDir(dir); }
 });
 
 test('a time without a zone is UTC whatever the machine zone', () => {

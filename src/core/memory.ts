@@ -21,9 +21,6 @@ export type Message = Omit<Entry, 'text'>;
 /** A message's head as the model reads it, in its leaf, zoom and search: its kind, after `[IMP <day>]` for imported history (#201).
  * The day costs 11 bytes, and in the A/B it kept dates in the summaries and saved most date() calls. */
 export const head = ({ kind, origin, date }: Message) => origin ? `[IMP ${date.slice(0, 10)}] ${kind}` : kind;
-/** Imports before #201 started each message's text with a "[Historical …]" line; its `[IMP]` head says that now, so reads drop
- * it. A Claude Code memory note's line names the memory, so it stays. */
-const LEGACY_HEADER = /^\[Historical (?!Claude Code memory )[\s\S]*?\]\n/;
 export interface Part { l: number; i: number }
 /** A summary node as stores save it. `size` is its line's bytes in a view. */
 export interface Summary extends Part { text: string; size: number }
@@ -203,10 +200,7 @@ export class Memory {
   }
   node(part: Part) { return this.tree.get(key(part)); }
   /** Message `i`'s text, from the store. */
-  text(i: number) {
-    const text = this.unsaved.texts.get(i) ?? this.store.text(i);
-    return this.root[i]?.origin ? text.replace(LEGACY_HEADER, '') : text;
-  }
+  text(i: number) { return this.unsaved.texts.get(i) ?? this.store.text(i); }
   /** Every message with its text, read from the store: for imports, which plan from the whole log. */
   entries(): Entry[] { return this.root.map(m => ({ ...m, text: this.text(m.i) })); }
   /** A built node's text, from the store. */
@@ -422,9 +416,9 @@ export class Memory {
     if (!Number.isSafeInteger(id) || id < 0 || !Number.isSafeInteger(n) || n < 1 || !Number.isInteger(Math.log2(n)) || id % n || id + n > this.root.length)
       throw new Error(`No line ${id}+${n}: n is a power of 2, id a multiple of n. The tree's roots: ${this.roots() || 'none, the chat is empty'}.`);
     if (n === 1) {
-      const kind = head(this.root[id]), text = this.text(id), page = Math.min(limit ?? PAGE, PAGE);
+      const line = head(this.root[id]), text = this.text(id), page = Math.min(limit ?? PAGE, PAGE);
       if (!Number.isSafeInteger(page) || page < 1) throw new Error('limit must be a positive integer.');
-      if (offset === undefined && text.length <= page) return `${id}+1|${kind}: ${text}`;
+      if (offset === undefined && text.length <= page) return `${id}+1|${line}: ${text}`;
       if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0 || offset >= Math.max(1, text.length)))
         throw new Error(`Message ${id} has ${text.length} characters; offset must be 0 to ${Math.max(0, text.length - 1)}.`);
       // Never split a surrogate pair: a page starts on its first half and ends after its second.
@@ -433,7 +427,7 @@ export class Memory {
       // A one-unit page on a pair takes the whole pair, so the next offset always moves forward.
       if (to < text.length && /[\ud800-\udbff]/.test(text[to - 1])) to += to - 1 === from ? 1 : -1;
       const hint = text.length <= PAGE ? `\n[note: this message is only ${text.length.toLocaleString('en-US')} characters and fits in one zoom; offset/limit are for messages over ${PAGE.toLocaleString('en-US')}]` : '';
-      return `${id}+1|${kind}: ${text.slice(from, to)}\n[showing characters ${from}-${to} of ${text.length}${to < text.length ? `; next page: offset ${to}` : ''}]${hint}`;
+      return `${id}+1|${line}: ${text.slice(from, to)}\n[showing characters ${from}-${to} of ${text.length}${to < text.length ? `; next page: offset ${to}` : ''}]${hint}`;
     }
     if (offset !== undefined) throw new Error('offset and limit page one message: use them with n = 1.');
     const l = Math.log2(n) - 1, i = 2 * id / n;

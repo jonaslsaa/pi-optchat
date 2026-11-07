@@ -510,12 +510,22 @@ export async function readConversation(c: Conversation, signal?: AbortSignal): P
   const unique = new Map(entries.map(e => [e.receipt, e]));
   return { entries: [...unique.values()], warnings };
 }
-/** One note ahead of a conversation's messages, so the tree knows what it was (#201). Its receipt follows the first message's:
- * a Pi fork copies that message, so the fork adds no second note for the conversation it continues. The id's first 13
- * characters find a Claude or Codex transcript by glob (Codex ids are UUIDv7: the first 8 are a coarse timestamp). */
-export function conversationNote(c: Conversation, entries: readonly ImportedEntry[]): ImportedEntry {
-  const dates = entries.map(e => e.date).sort(), from = dates[0].slice(0, 10), to = dates[dates.length - 1].slice(0, 10);
-  return { kind: 'note', date: dates[0], origin: { source: c.source, conversation: c.id, message: 'conversation', title: c.title, project: c.project },
-    text: `Imported ${c.source} conversation "${c.title}"${c.project ? ` in ${c.project}` : ''}, ${from === to ? from : `${from} to ${to}`}, ${entries.length} messages, id ${c.id.slice(0, 13)}.`,
-    receipt: `import:${digest(JSON.stringify(['conversation', entries[0].receipt]))}` };
+/** `added`, the messages an import adds after deduplication, with one note ahead of each conversation's, so the tree knows what it
+ * was (#201). A conversation with nothing new gets none, and a memory file is a note already. The id's first 13 characters find a
+ * Claude or Codex transcript by glob (Codex ids are UUIDv7: the first 8 are a coarse timestamp). */
+export function withNotes(added: readonly ImportedEntry[]): ImportedEntry[] {
+  const key = (o: Origin) => JSON.stringify([o.source, o.conversation]), conversations = new Map<string, ImportedEntry[]>();
+  for (const e of added) if (e.origin && e.origin.source !== 'claude-memory') {
+    const messages = conversations.get(key(e.origin));
+    if (messages) messages.push(e); else conversations.set(key(e.origin), [e]);
+  }
+  return added.flatMap(e => {
+    const messages = e.origin && conversations.get(key(e.origin));
+    if (!e.origin || messages?.[0] !== e) return [e];
+    const { source, conversation, title, project } = e.origin, dates = messages.map(m => m.date).sort();
+    const [from, to] = [dates[0].slice(0, 10), dates[dates.length - 1].slice(0, 10)];
+    return [{ kind: 'note', date: dates[0], origin: { source, conversation, message: 'conversation', title, project },
+      text: `Imported ${source} conversation "${title}"${project ? ` in ${project}` : ''}, ${from === to ? from : `${from} to ${to}`}, id ${conversation.slice(0, 13)}.`,
+      receipt: `import:${digest(JSON.stringify(['conversation', e.receipt]))}` }, e];
+  });
 }
