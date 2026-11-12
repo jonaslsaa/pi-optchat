@@ -18,7 +18,8 @@ import { textContent } from './transcript.ts';
  * `window.connected`: whether the window reaches the profile's owner now; `completed`: /complete has handed off.
  */
 export const ROLE_STATUS = 'optchat.role';
-export type Role = { role: 'owner'; profile: string } | { role: 'window'; profile: string; id: string; connected: boolean; completed: boolean };
+export type Role = { role: 'owner'; profile: string }
+  | { role: 'window'; profile: string; id: string; connected: boolean; completed: boolean; after?: number };
 /** Tools that need the owner's agents: a window delegates nothing. */
 const OWNER_TOOLS = ['spawn', 'tell', 'models'];
 const RECONNECT_MS = 5000;
@@ -57,7 +58,7 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
   const publish = () => {
     if (closed) return; // Pi's context is gone with the session.
     const show = (key: string, text: string) => { if (shown.get(key) !== text) { shown.set(key, text); ctx.ui.setStatus(key, text); } };
-    if (ctx.mode === 'rpc') show(ROLE_STATUS, JSON.stringify({ role: 'window', profile, id, connected: !!connection, completed } satisfies Role));
+    if (ctx.mode === 'rpc') show(ROLE_STATUS, JSON.stringify({ role: 'window', profile, id, connected: !!connection, completed, ...(after === undefined ? {} : { after }) } satisfies Role));
     show('optchat', `OptChat: ${profile} · ${completed ? 'completed' : `connected window${connection ? '' : ' · main window not reachable'}`}`);
   };
   /** `required`: only when the window opens with --optchat-connect join; later it falls back to the queue like any window. */

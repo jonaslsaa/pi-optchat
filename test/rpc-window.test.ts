@@ -67,6 +67,14 @@ async function rpc(name: string, connect?: string, mode: 'rpc' | 'json' = 'rpc',
   return { ask, close, sent, notes, errors, roles, session, role: () => roles.at(-1) };
 }
 
+/** The window's `after` is where its conversation starts: a host that shows messages from it shows what the agent read, then its reply. */
+function assertBoundary(window: Awaited<ReturnType<typeof rpc>>) {
+  const role = window.role(), marker = window.session.sessionManager.getBranch().findLast(e => e.type === 'custom' && e.customType === 'optchat-window-completed');
+  assert.ok(role?.role === 'window' && marker && role.after === Date.parse(marker.timestamp), 'the boundary is the completion marker');
+  const shown = window.session.messages.filter(m => m.timestamp >= role.after!);
+  assert.deepEqual(shown.map(m => m.role), ['user', 'assistant'], 'from it on: the request the agent read, and its reply');
+}
+
 test('an RPC session on a busy profile joins as a connected window: its own agent answers with the view, memory stays the owner\'s, and /complete hands off', async () => {
   const name = profile(), owner = await rpc(name);
   const window = await rpc(name);
@@ -116,6 +124,7 @@ test('an RPC session on a busy profile joins as a connected window: its own agen
     assert.ok(record[0].sessionFile && existsSync(record[0].sessionFile), 'the owner keeps a copy of the window\'s transcript');
     const done = window.role();
     assert.equal(done?.role === 'window' && done.completed, true);
+    assert.ok(!window.roles.some(r => r.role === 'window' && r.after !== undefined), 'no boundary before one is set');
 
     // A host that keeps prompting gets a new connected conversation in the same session, not a hang.
     assert.equal(await window.ask('Next topic?'), 'Reply: Next topic?');
@@ -125,6 +134,7 @@ test('an RPC session on a busy profile joins as a connected window: its own agen
     assert.match(window.sent.at(-1)!.system, /You are a connected window of OptChat/, 'with its system prompt still in front');
     assert.match(window.sent.at(-1)!.messages[0], /<chat>/, 'and the view on its request');
     assert.deepEqual(window.errors, []);
+    assertBoundary(window);
     await until(() => owner.sent.some(s => s.last.includes(`[${next.id}] User started a connected conversation`)));
     // Closed without /complete: the compactor gets this conversation's transcript only, not the completed one before it.
     await window.close();
@@ -163,6 +173,7 @@ test('a completed window\'s session resumed in a new process starts a new conver
     assert.equal(window.sent.at(-1)!.messages.length, 1, 'the completed conversation stays out of its context');
     assert.match(window.sent.at(-1)!.system, /You are a connected window of OptChat/, 'with its system prompt still in front');
     assert.deepEqual(window.errors, []);
+    assertBoundary(window);
     // Back on a branch from before /complete (Pi's tree navigation), that conversation is this window's again.
     const first = window.session.sessionManager.getEntries().find(e => e.type === 'message' && e.message.role === 'assistant');
     window.session.sessionManager.branch(first!.id);

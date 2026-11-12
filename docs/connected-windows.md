@@ -73,6 +73,7 @@ Hosts that drive Pi over RPC start one `pi --mode rpc` process per thread or win
 | `{"role":"owner","profile":"work"}` | This process owns the profile: the main chat. |
 | `{"role":"window","profile":"work","id":"3f2a9c11","connected":true,"completed":false}` | A connected window. `connected`: whether it reaches the owner now. `id` is its agent ID in the owner's Agents page and reports. |
 | the same with `"completed":true` | `/complete` has finished and the handoff is with the owner (or queued). The next prompt starts a new window, sent with a new `id`. |
+| the same with `"after":1762956000000` | The window continues a session that was completed before (the next prompt after `/complete`, or a resumed session). `after` is when that happened, in milliseconds since the epoch. The agent reads only messages with `timestamp >= after`, so a host that shows only those shows exactly the conversation the agent has. Absent when nothing came before. |
 
 It is sent during `session_start`, before Pi reads the host's first command, so it has arrived by the time the first `get_state` (or any other command) is answered, and again after `new_session` and `switch_session`, and whenever it changes (only then). No `optchat.role` by then means no profile is open (plain Pi). The window's closing request for its handoff is a hidden custom message (`optchat-handoff-request`), so a host shows the handoff reply but not the request as the user's.
 
