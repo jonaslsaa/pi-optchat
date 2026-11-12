@@ -1,10 +1,10 @@
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs, { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import fs, { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createProfile, fingerprint, listProfiles, memoryDirectory, profileOwner, profilePath, readImage, readMemory } from '../src/files.ts';
+import { createProfile, fingerprint, listProfiles, memoryDirectory, profileOwner, profilePath, readImage, readMemory, readRuns } from '../src/files.ts';
 import { Memory } from '../src/memory.ts';
 import { localDay } from '../src/store.ts';
 import { describeOwner, lockProfile, ProfileBusyError } from '../src/profiles.ts';
@@ -105,5 +105,21 @@ test('createProfile makes a profile under the home it is given, once', () => {
     createProfile('work', home);
     assert.deepEqual(listProfiles(home), ['work']);
     assert.throws(() => createProfile('work', home), /already exists/);
+  } finally { removeDir(home); }
+});
+
+test('readRuns lists a profile\'s saved runs and leaves out one it can\'t read', () => {
+  const home = temp();
+  try {
+    createProfile('work', home);
+    const dir = profilePath('work', home);
+    assert.deepEqual(readRuns(dir), [], 'no runs folder yet');
+    const runs = join(dir, 'runs');
+    mkdirSync(runs);
+    const run = { id: 'a1', task: 'Check CI', cwd: '/tmp', model: 'anthropic/claude-sonnet-5-5', thinking: 'high', parentSession: 's',
+      started: 1, depth: 1, state: 'completed', guidance: [], connected: true, window: { pid: 42 } };
+    writeFileSync(join(runs, 'a1.optchat.json'), JSON.stringify(run));
+    writeFileSync(join(runs, 'b2.optchat.json'), '{"id":"b2"');
+    assert.deepEqual(readRuns(dir), [run]);
   } finally { removeDir(home); }
 });
