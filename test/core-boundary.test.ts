@@ -29,3 +29,18 @@ test('durable imports only core, typebox and Pi Durable, and uses no Node global
   const core = new URL('../src/core/index.ts', import.meta.url).href;
   assert.deepEqual(outside('durable', from => from === core || from === 'typebox' || from === '@earendil-works/pi-durable' || from.startsWith('@earendil-works/pi-durable/')), []);
 });
+
+// pi-optchat/files is for another app on the machine, which has Node but not Pi: following its relative imports reaches no package.
+test('files loads only Node modules at runtime, besides its own', () => {
+  const seen = new Set<string>(), packages = new Set<string>();
+  const visit = (url: URL) => {
+    if (seen.has(url.href)) return;
+    seen.add(url.href);
+    for (const [, what, , from] of readFileSync(url, 'utf8').matchAll(/^(?:import|export)\b([^;]*?)\bfrom\s*(['"])([^'"]+)\2/gm)) {
+      if (/^\s*type\b/.test(what)) continue;
+      if (from.startsWith('.')) visit(new URL(from, url)); else packages.add(from);
+    }
+  };
+  visit(new URL('../src/files.ts', import.meta.url));
+  assert.deepEqual([...packages].filter(from => !from.startsWith('node:')), []);
+});

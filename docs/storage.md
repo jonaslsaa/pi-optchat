@@ -19,6 +19,15 @@ Memory reaches disk through one seam, `Store` in `src/core/store.ts` (Pi's `File
 - Its lease (take, heartbeat, release) is optional: without one, OptChat keeps its machine-local profile lock.
 - Import records (`imports/*.json`, the staging generations and the `active-memory.json` pointer) are per machine, so a second machine with the same `~/.claude` or Codex history on disk may offer those sessions for import again.
 
+## Reading profiles from another app
+
+`pi-optchat/files` lets another app on the same machine, such as a GUI, read profiles while Pi runs them. It writes nothing and needs Node but not Pi; like `./core`, it ships compiled.
+
+- `dataHome()`, `listProfiles(home?)`, `profilePath(name, home?)`: the data directory (`OPTCHAT_HOME` or `~/.optchat`), its profiles, and one's directory. `home` defaults to `dataHome()`.
+- `memoryDirectory(profileDir)`: the generation `active-memory.json` points at, or the profile itself.
+- `readMemory(memoryDir)`: a closed `Memory` with history, view, zoom, search and images as the files are now. It creates no directory, builds no summary and takes no lock. A line Pi is still writing is skipped; read again for later messages.
+- `profileOwner(profileDir)`: who holds the profile (Pi's `<profile> · PID <pid> · <host> · <cwd>`), or `undefined`. It asks the lock and never takes it; it rejects if the holder doesn't answer in 1.5 s.
+
 ## Windows differences
 
 - **Named pipes, not socket files.** The profile lock and the connected-window bridge listen on `\\.\pipe\optchat-<hash>-lock` and `optchat-<hash>-windows`, where the hash comes from the profile path: a Windows pipe has no filesystem entry inside the profile, so the hash is the only thing separating profiles. Pipes are machine-wide and carry no file permissions, so a Windows profile is not permission-protected the way a POSIX socket file (mode 0600) is.

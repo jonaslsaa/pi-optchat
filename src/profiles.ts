@@ -21,13 +21,30 @@ export const defaults: ProfileConfig = {
   ...DEFAULT_SETTINGS,
 };
 export const THINKING = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
-export function profilePath(name: string) {
-  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) throw new Error('Profile names: 1–64 lowercase letters, digits, hyphens, or underscores.');
-  return join(dataHome(), 'profiles', name);
+const PROFILE_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+/** `home` is OptChat's data directory, `dataHome()` unless a host passes its own. */
+export function profilePath(name: string, home = dataHome()) {
+  if (!PROFILE_NAME.test(name)) throw new Error('Profile names: 1–64 lowercase letters, digits, hyphens, or underscores.');
+  return join(home, 'profiles', name);
 }
-export function listProfiles() {
-  const root = join(dataHome(), 'profiles');
-  return existsSync(root) ? readdirSync(root, { withFileTypes: true }).filter(f => f.isDirectory() && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(f.name)).map(f => f.name).sort() : [];
+export function listProfiles(home = dataHome()) {
+  const root = join(home, 'profiles');
+  return existsSync(root) ? readdirSync(root, { withFileTypes: true }).filter(f => f.isDirectory() && PROFILE_NAME.test(f.name)).map(f => f.name).sort() : [];
+}
+/** A memory generation's directory in profile `dir`: `.` is the profile itself, the others are imports' `memories/<id>`. */
+export function generationPath(dir: string, name: string) {
+  if (name !== '.' && !/^memories\/[a-f0-9-]{36}$/.test(name)) throw new Error('Invalid memory generation path.');
+  return join(dir, name);
+}
+/** The generation `active-memory.json` points at, which holds the profile's `main/` and `tree/`; without a pointer, the profile itself. */
+export function memoryDirectory(dir: string): string {
+  const file = join(dir, 'active-memory.json');
+  if (!existsSync(file)) return dir;
+  const name: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  if (typeof name !== 'string') throw new Error('Invalid active memory pointer.');
+  const path = generationPath(dir, name);
+  if (!existsSync(join(path, 'main'))) throw new Error('Active memory generation is missing.');
+  return path;
 }
 export function createProfile(name: string) {
   const dir = profilePath(name);
@@ -101,6 +118,13 @@ function readOwner(path: string) {
     socket.on('end', () => resolve(message || 'another Pi instance'));
     socket.on('error', e => { if ('code' in e && (e.code === 'ECONNREFUSED' || isWindows && e.code === 'ENOENT')) resolve(undefined); else reject(e); });
   });
+}
+
+/** Who holds the profile in `dir`, as its holder described itself (Pi: `<profile> · PID <pid> · <host> · <cwd>`), without taking
+ * it; undefined when nobody does. Rejects when the holder doesn't answer within 1.5 seconds, so a hung Pi still counts as busy. */
+export async function profileOwner(dir: string) {
+  const path = profileSocket(dir);
+  return isWindows || existsSync(path) ? readOwner(path) : undefined;
 }
 
 /** OS-owned socket lifetime, no timeout-based stealing of a busy profile. */

@@ -4,7 +4,7 @@
 
 Core imports nothing from Pi or Node at runtime: only `typebox` (the tools' schemas) and pi-ai's types. `test/core-boundary.test.ts` keeps it that way. Pi's packages are optional peer dependencies, so installing `pi-optchat` outside Pi pulls in none of them.
 
-`pi-optchat/core` and `pi-optchat/durable` ship as compiled JavaScript with declarations, so a host needs no special tsconfig or bundler.
+`pi-optchat/core`, `pi-optchat/durable` and `pi-optchat/files` (read-only profile access for another app, see [storage.md](storage.md#reading-profiles-from-another-app)) ship as compiled JavaScript with declarations, so a host needs no special tsconfig or bundler.
 
 ## What a host supplies
 

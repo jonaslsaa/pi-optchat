@@ -12,6 +12,10 @@
       "types": "./dist/durable/index.d.ts",
       "import": "./dist/durable/index.js"
     },
+    "./files": {
+      "types": "./dist/files.d.ts",
+      "import": "./dist/files.js"
+    },
     "./package.json": "./package.json"
   },
   "pi": {

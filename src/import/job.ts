@@ -5,6 +5,7 @@ import { Memory } from '../memory.ts';
 import { isEntry, type Entry, type Compressor } from '../core/memory.ts';
 import { deduplicate as dedupe, planImport, runImport as build, type ImportMode } from '../core/import.ts';
 import { atomicWrite } from '../store.ts';
+import { generationPath, memoryDirectory } from '../profiles.ts';
 import { record } from '../core/cache.ts';
 import { copyKey, type ImportedEntry } from './sources.ts';
 import { DEFAULT_SETTINGS } from '../settings.ts';
@@ -17,19 +18,6 @@ export interface ImportJob {
 const pendingFile = (dir: string) => join(dir, 'imports', 'pending.json');
 // The whole planned log. `main/` holds only the part already given to Memory, so resume continues from its length.
 const STAGED = 'staged.jsonl';
-function generationPath(dir: string, name: string) {
-  if (name !== '.' && !/^memories\/[a-f0-9-]{36}$/.test(name)) throw new Error('Invalid memory generation path.');
-  return join(dir, name);
-}
-export function memoryDirectory(dir: string): string {
-  const file = join(dir, 'active-memory.json');
-  if (!existsSync(file)) return dir;
-  const name: unknown = JSON.parse(readFileSync(file, 'utf8'));
-  if (typeof name !== 'string') throw new Error('Invalid active memory pointer.');
-  const path = generationPath(dir, name);
-  if (!existsSync(join(path, 'main'))) throw new Error('Active memory generation is missing.');
-  return path;
-}
 export function pendingImport(dir: string): ImportJob | undefined {
   if (!existsSync(pendingFile(dir))) return undefined;
   const j: unknown = JSON.parse(readFileSync(pendingFile(dir), 'utf8'));

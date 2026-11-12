@@ -46,10 +46,10 @@ export function appendJson(file: string, value: unknown, size?: number) {
     return fstatSync(fd).size;
   } finally { closeSync(fd); }
 }
+const logs = (dir: string) => existsSync(dir) ? readdirSync(dir).filter(n => n.endsWith('.jsonl')).sort() : [];
 function records(dir: string, warn: (s: string) => void): unknown[] {
-  if (!existsSync(dir)) return [];
   const result: unknown[] = [];
-  for (const name of readdirSync(dir).filter(n => n.endsWith('.jsonl')).sort()) {
+  for (const name of logs(dir)) {
     const file = join(dir, name);
     for (const [index, line] of readFileSync(file, 'utf8').split('\n').entries()) {
       if (!line.trim()) continue;
@@ -71,13 +71,19 @@ export class FileStore implements Store {
   constructor(readonly directory: string, private readonly warn: (s: string) => void = console.error) {}
   load(): Saved {
     for (const sub of ['main', 'tree']) mkdirSync(join(this.directory, sub), { recursive: true, mode: 0o700 });
-    const main = join(this.directory, 'main'), entries = records(main, this.warn);
-    for (const name of readdirSync(main).filter(n => n.endsWith('.jsonl'))) this.lastSeenBytes.set(join(main, name), statSync(join(main, name)).size);
+    return this.read();
+  }
+  /** Loads without creating anything. Another process may be writing meanwhile (FileReader): the view refers only to nodes and
+   * messages written before it, and a node only to messages, so reading them in that order never meets a part not read yet; a
+   * line still being written fails to parse and is skipped. */
+  protected read(): Saved {
     const view = join(this.directory, 'view.json');
     // An unreadable view is rebuilt, as a damaged one is.
     let saved: string | undefined;
     if (existsSync(view)) try { saved = readFileSync(view, 'utf8'); } catch { saved = ''; }
     const tree = records(join(this.directory, 'tree'), this.warn);
+    const main = join(this.directory, 'main'), entries = records(main, this.warn);
+    for (const name of logs(main)) this.lastSeenBytes.set(join(main, name), statSync(join(main, name)).size);
     // Memory checks the rest; a record without its text is as broken here as before.
     if (!entries.every(isEntry)) throw new Error('Invalid/noncontiguous OptChat log; refusing to change it.');
     if (!tree.every(isSummary)) throw new Error('Invalid OptChat summary record.');
@@ -94,7 +100,7 @@ export class FileStore implements Store {
     this.texts[entry.i] = entry.text;
   }
   private checkLog(next: string) {
-    const main = dirname(next), names = readdirSync(main).filter(n => n.endsWith('.jsonl'));
+    const main = dirname(next), names = logs(main);
     if (names.length !== this.lastSeenBytes.size || names.some(n => statSync(join(main, n)).size !== this.lastSeenBytes.get(join(main, n)))) throw otherWriter(next);
   }
   appendNode(node: Summary): undefined { appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), node); this.summaries.set(`${node.l}:${node.i}`, node.text); }
@@ -106,4 +112,12 @@ export class FileStore implements Store {
     const mimeType = file && MIMES.get(file.slice(name.length + 1));
     return file && mimeType ? { mimeType, data: readFileSync(join(this.directory, 'images', file)) } : undefined;
   }
+}
+/** A FileStore's directory as it is, for a process that must not change it: loading creates nothing, and every write is dropped. */
+export class FileReader extends FileStore {
+  override load() { return this.read(); }
+  override append(): undefined {}
+  override appendNode(): undefined {}
+  override saveView(): undefined {}
+  override putImage(): undefined {}
 }
