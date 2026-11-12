@@ -123,7 +123,8 @@ export class FileReader extends FileStore {
 }
 /** The image kept under `name` in the memory in `directory`, read without opening the memory. */
 export const readImage = (directory: string, name: string) => new FileReader(directory, () => {}).image(name);
-/** Changes whenever the memory in `directory` does: its logs only grow and its view is replaced. */
+/** Changes whenever the memory in `directory` does: its logs only grow and its view is replaced. Images are left out: each is
+ * kept before the message that names it, under a name taken from its bytes, and never replaced, so a new one comes with a new message. */
 export function fingerprint(directory: string) {
   const sizes = ['main', 'tree'].flatMap(sub => logs(join(directory, sub)).map(name => `${sub}/${name}:${statSync(join(directory, sub, name)).size}`));
   const view = statSync(join(directory, 'view.json'), { throwIfNoEntry: false });
