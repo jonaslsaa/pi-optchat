@@ -146,6 +146,21 @@ test('a window that completes and then closes is handed off once', async () => {
   } finally { await owner.close(); }
 });
 
+test('a completed window\'s session resumed in a new process starts a new conversation without the completed one', async () => {
+  const name = profile(), owner = await rpc(name), window = await rpc(name);
+  try {
+    await window.ask('First topic.');
+    await window.ask('/complete');
+    // The host released the process and resumes the thread later: Pi closes the session, then starts it again from its file.
+    await window.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+    await window.session.extensionRunner.emit({ type: 'session_start', reason: 'resume' });
+    const role = window.role();
+    assert.ok(role?.role === 'window' && !role.completed);
+    assert.equal(await window.ask('Second topic.'), 'Reply: Second topic.');
+    assert.equal(window.sent.at(-1)!.messages.length, 1, 'the completed conversation stays out of its context');
+  } finally { await window.close(); await owner.close(); }
+});
+
 test('a window keeps its conversation when Pi binds the same session again, and its record survives an owner restart', async () => {
   const name = profile();
   let owner = await rpc(name);

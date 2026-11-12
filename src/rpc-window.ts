@@ -23,6 +23,8 @@ const OWNER_TOOLS = ['spawn', 'tell', 'models'];
 const RECONNECT_MS = 5000;
 /** The closing message that asks a window for its handoff (`windowHandoff`). */
 const HANDOFF_TYPE = 'optchat-handoff-request';
+/** Marks where a window's conversation completed in its Pi session (see `after`). */
+const COMPLETED_TYPE = 'optchat-window-completed';
 
 /**
  * A connected window whose agent runs here, in its own Pi process: an RPC host's second session on a profile another Pi owns.
@@ -30,12 +32,11 @@ const HANDOFF_TYPE = 'optchat-handoff-request';
  * each run and never written; the profile's owner keeps this conversation's record and gets its handoff over the window socket.
  * With no owner to reach, the window queues itself in the profile directory for the next one (see `queueWindow`).
  */
-export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, profile: string, { requireOwner = false, after }: {
-  requireOwner?: boolean;
-  /** Set when a completed window's session goes on as a new conversation: what came before is not this window's to see. */
-  after?: number;
-} = {}) {
+export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, profile: string, { requireOwner = false } = {}) {
   const dir = profilePath(profile), id = randomUUID().slice(0, 8);
+  // A session that goes on after /complete, now or resumed later, is a new conversation: what came before is not this window's.
+  const ended = ctx.sessionManager.getEntries().findLast(entry => entry.type === 'custom' && entry.customType === COMPLETED_TYPE);
+  const after = ended ? Date.parse(ended.timestamp) : undefined;
   if (!existsSync(dir)) throw new Error(`Profile ${profile} does not exist.`);
   let memory = await readMemory(memoryDirectory(dir));
   type Connection = Awaited<ReturnType<typeof connectWindow>>;
@@ -164,6 +165,7 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
       if (task !== undefined) try { text = await writeHandoff(command); }
       catch (error) { command.ui.notify(`This window could not write its handoff, so the main window's compactor writes it: ${error instanceof Error ? error.message : String(error)}`, 'warning'); }
       await end('complete', text);
+      pi.appendEntry(COMPLETED_TYPE, {});
       completed = true; clearInterval(reconnect); publish();
       command.ui.notify(task === undefined ? 'Nothing to hand off: this conversation had no request.'
         : queued ? 'Completed. No main window is open; the handoff waits in the profile for the next one.' : 'Completed. The main agent has the handoff.', 'info');

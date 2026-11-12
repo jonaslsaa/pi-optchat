@@ -439,7 +439,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (rpcWindow) {
       // A prompt after /complete starts the next connected conversation, as new_session would, without the one before in its context.
       if (rpcWindow.completed) {
-        try { await joinBusy(rpcWindow.profile, ctx, { after: Date.now() }); }
+        try { await joinBusy(rpcWindow.profile, ctx); }
         catch (error) { ctx.ui.notify(errorText(error), 'error'); return { action: 'handled' }; }
       }
       return { action: 'continue' };
