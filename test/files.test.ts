@@ -4,7 +4,7 @@ import fs, { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fingerprint, listProfiles, memoryDirectory, profileOwner, profilePath, readImage, readMemory } from '../src/files.ts';
+import { createProfile, fingerprint, listProfiles, memoryDirectory, profileOwner, profilePath, readImage, readMemory } from '../src/files.ts';
 import { Memory } from '../src/memory.ts';
 import { localDay } from '../src/store.ts';
 import { describeOwner, lockProfile, ProfileBusyError } from '../src/profiles.ts';
@@ -97,4 +97,13 @@ test('profileOwner tells who holds a profile without taking it, even from a cwd 
     await unlock();
     assert.equal(await profileOwner(dir), undefined);
   } finally { removeDir(dir); }
+});
+
+test('createProfile makes a profile under the home it is given, once', () => {
+  const home = temp();
+  try {
+    createProfile('work', home);
+    assert.deepEqual(listProfiles(home), ['work']);
+    assert.throws(() => createProfile('work', home), /already exists/);
+  } finally { removeDir(home); }
 });

@@ -48,8 +48,8 @@ export function memoryDirectory(dir: string): string {
   if (!existsSync(join(path, 'main'))) throw new Error('Active memory generation is missing.');
   return path;
 }
-export function createProfile(name: string) {
-  const dir = profilePath(name);
+export function createProfile(name: string, home = dataHome()) {
+  const dir = profilePath(name, home);
   if (existsSync(dir)) throw new Error(`Profile already exists: ${name}`);
   mkdirSync(resolve(dir, '..'), { recursive: true, mode: 0o700 });
   // Claim the directory exclusively, so a competing creator cannot have its

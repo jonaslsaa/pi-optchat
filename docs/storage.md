@@ -21,9 +21,10 @@ Memory reaches disk through one seam, `Store` in `src/core/store.ts` (Pi's `File
 
 ## Reading profiles from another app
 
-`pi-optchat/files` lets another app on the same machine, such as a GUI, read profiles while Pi runs them. It writes nothing and loads only Node at runtime. Like `./core`, it ships compiled; its declarations name pi-ai's types, so without pi-ai installed, use `skipLibCheck`.
+`pi-optchat/files` lets another app on the same machine, such as a GUI, read profiles while Pi runs them. Apart from `createProfile`, it writes nothing, and it loads only Node at runtime. Like `./core`, it ships compiled; its declarations name pi-ai's types, so without pi-ai installed, use `skipLibCheck`.
 
 - `dataHome()`, `listProfiles(home?)`, `profilePath(name, home?)`: the data directory (`OPTCHAT_HOME` or `~/.optchat`), its profiles, and one's directory. `home` defaults to `dataHome()`.
+- `createProfile(name, home?)`: a new profile with the default config and AGENTS.md, as `/optchat profile` creates one. It throws if the profile exists or the name isn't valid.
 - `memoryDirectory(profileDir)`: the generation `active-memory.json` points at, or the profile itself.
 - `readMemory(memoryDir)`: a closed `Memory` with history, view, zoom, search and images as the files are now. It creates no directory, builds no summary and takes no lock. A directory that doesn't exist reads as an empty memory. A line Pi is still writing is skipped; read again for later messages.
 - `readImage(memoryDir, name)`: one kept image, `{ mimeType, data }`, without reading the memory.
