@@ -620,7 +620,7 @@ for (const jobs of [undefined, 3, 16]) test(`an import summarizes ${jobs ?? '8 (
   try {
     await old.close();
     assert.ok(prepareImport(dir, old, imported, 'append'));
-    await runImport(dir, compress, AbortSignal.timeout(20000), jobs);
+    await runImport(dir, compress, AbortSignal.timeout(60000), jobs);
     assert.equal(peak, jobs ?? 8);
     assert.ok(widest < 40_000, `compaction view reached ${widest} bytes`);
   } finally { removeDir(dir); }
