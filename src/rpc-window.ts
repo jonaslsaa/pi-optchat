@@ -150,7 +150,8 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
     },
     /** Pi's messages with the view put in front of the request it was read for. */
     context<M extends AgentMessage>(messages: M[]) {
-      const own = after === undefined ? messages : messages.filter(message => message.timestamp >= after);
+      // System messages carry the prompt and tool state (the first, then any changes), not the conversation: they all stay.
+      const own = after === undefined ? messages : messages.filter(message => message.role === 'system' || message.timestamp >= after);
       if (view === undefined) return own;
       if (anchoring) { anchor = undefined; anchoring = false; }
       const placed = placeView(own, view, anchor);

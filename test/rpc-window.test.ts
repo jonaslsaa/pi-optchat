@@ -122,6 +122,9 @@ test('an RPC session on a busy profile joins as a connected window: its own agen
     const next = window.role();
     assert.ok(next?.role === 'window' && next.id !== record[0].id && !next.completed, 'a new window, announced to the host');
     assert.equal(window.sent.at(-1)!.messages.length, 1, 'only its own request: the completed conversation is not in its context');
+    assert.match(window.sent.at(-1)!.system, /You are a connected window of OptChat/, 'with its system prompt still in front');
+    assert.match(window.sent.at(-1)!.messages[0], /<chat>/, 'and the view on its request');
+    assert.deepEqual(window.errors, []);
     await until(() => owner.sent.some(s => s.last.includes(`[${next.id}] User started a connected conversation`)));
     // Closed without /complete: the compactor gets this conversation's transcript only, not the completed one before it.
     await window.close();
@@ -158,6 +161,8 @@ test('a completed window\'s session resumed in a new process starts a new conver
     assert.ok(role?.role === 'window' && !role.completed);
     assert.equal(await window.ask('Second topic.'), 'Reply: Second topic.');
     assert.equal(window.sent.at(-1)!.messages.length, 1, 'the completed conversation stays out of its context');
+    assert.match(window.sent.at(-1)!.system, /You are a connected window of OptChat/, 'with its system prompt still in front');
+    assert.deepEqual(window.errors, []);
     // Back on a branch from before /complete (Pi's tree navigation), that conversation is this window's again.
     const first = window.session.sessionManager.getEntries().find(e => e.type === 'message' && e.message.role === 'assistant');
     window.session.sessionManager.branch(first!.id);

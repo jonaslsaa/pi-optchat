@@ -83,6 +83,7 @@ test('two real pi --mode rpc processes on one profile: the second is a window, /
   window.prompt('Next topic?');
   await until('the next conversation\'s reply', () => window.text().includes('Reply: Next topic?'));
   assert.ok(window.role()?.id !== done && window.role()?.completed === false, 'a new window id, not completed');
+  assert.ok(!window.events.some(e => e.type === 'extension_error'), 'Pi accepted every request the window shaped');
 
   const killed = pi('work');
   await until('the second window role', () => killed.role()?.role === 'window');
