@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, getAgentDir, type AgentSession, type AgentSessionEvent, type ExtensionAPI, type InlineExtension, type ModelRegistry } from '@earendil-works/pi-coding-agent';
@@ -15,12 +15,12 @@ import type { Memory } from './memory.ts';
 import type { ModelChoice } from './profiles.ts';
 import { cachePayload } from './core/cache.ts';
 import { childInput } from './core/messages.ts';
-import { CUT_OFF, reportHead, RunHistory, isRunning, transition, sessionMessages, savedSession, undelivered, sentText, type Guidance, type RunInfo, type RunState, type FinishReason } from './runs.ts';
+import { alive, runMessages, runsElsewhere, CUT_OFF, reportHead, RunHistory, isActiveRun, isRunning, transition, sessionMessages, savedSession, undelivered, sentText, queuedWindows, unqueueWindow, type Guidance, type RemoteWindow, type RunInfo, type RunState, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { fullChat, refreshFraction, textContent } from './transcript.ts';
 import { Type, type Static } from 'typebox';
 import { result } from './core/tools.ts';
-import { handoffText, withUndelivered, type HandoffEvidence } from './handoff.ts';
+import { HANDOFF_TIMEOUT, handoffText, withUndelivered, type HandoffEvidence } from './handoff.ts';
 import { DEFAULT_SETTINGS, type Settings } from './settings.ts';
 import { THINKING } from './profiles.ts';
 import { oneLine } from './inspector.ts';
@@ -183,8 +183,8 @@ export class Children {
   messages(id: string): AgentMessage[] {
     const live = this.running.get(id);
     if (live) return [...live.session.messages, ...(live.streaming ? [live.streaming] : [])];
-    const file = this.history.records.get(id)?.sessionFile;
-    return file ? sessionMessages(file) : [];
+    const run = this.history.records.get(id);
+    return run ? runMessages(run) : [];
   }
   /**
    * Every message a run has finalized, in order and never rewritten: Pi's session entries, for a live run too.
@@ -548,8 +548,9 @@ export class Children {
   /** `caller` is the agent sending a manager message: undefined for the main agent, else the parent subagent's ID. */
   async tell(id: string, message: string, source: 'manager' | 'user' = 'manager', caller?: string) {
     if (this.deleting.has(id)) throw new Error(`${id} is being deleted by the user.`);
-    const live = this.running.get(id);
-    if (!live && source === 'manager' && this.history.records.has(id)) return this.track(this.resume(id, message, caller));
+    const live = this.running.get(id), run = this.history.records.get(id);
+    if (!live && run && runsElsewhere(run)) throw new Error(`${id} is a connected window running in its own Pi process, which tell can't reach. Its handoff arrives when it ends.`);
+    if (!live && source === 'manager' && run) return this.track(this.resume(id, message, caller));
     if (live && !['running', 'waiting', 'paused'].includes(live.info.state)) throw new Error(`${id} is finishing. Its report will arrive on its own${live.info.connected || source === 'user' ? '' : '; tell it again after that to resume it'}.`);
     if (!live) throw new Error(`No running subagent ${id}.`);
     const text = live.info.connected && source === 'manager' ? `[Main agent guidance]\n${message.trim()}` : message.trim(); if (!message.trim()) throw new Error('Message is empty.');
@@ -709,8 +710,46 @@ export class Children {
     }
     return this.history.records.get(id)?.handoff;
   }
+  /**
+   * Registers a connected window whose agent runs in its own Pi process, or takes back one an earlier owner registered
+   * (see `RunInfo.window`). Its agent loop, tools and transcript stay there; this process keeps its record and delivers its handoff.
+   */
+  async adopt(window: RemoteWindow, { quiet = false } = {}) {
+    const { id, task, cwd, model, thinking, title, pid, session, after } = window, known = this.history.records.get(id);
+    if (known && !runsElsewhere(known)) throw new Error(`${id} is already a run in this profile`);
+    const where = { pid, session, after };
+    this.save(known ? { ...known, window: where } : { id, task, cwd, model, thinking, ...(title ? { title } : {}), parentSession: this.options.parentSession ?? '',
+      depth: 1, started: Date.now(), state: 'running', guidance: [], connected: true, window: where });
+    if (!known && !quiet) await this.report(`[${id}] User started a connected conversation in ${cwd}, in a Pi window of its own. That agent is handling this request with the user directly; don't do it yourself. Initial message: ${task}\n\nIt runs in another Pi process, so tell can't reach it. It sends a final handoff on completion or disconnect.`);
+  }
+  /** A window in its own process has ended. `written`: the handoff it wrote itself (/complete); without one the compactor writes it from the window's transcript. */
+  async endRemote(id: string, reason: FinishReason, written?: string) {
+    const run = this.history.records.get(id);
+    if (!run?.window || run.handoff) return;
+    run.handoff = { reason }; run.ended = Date.now();
+    transition(run, reason === 'complete' ? 'completed' : 'interrupted');
+    this.save(run);
+    const work = this.deliverHandoff(run, undefined, written);
+    this.completions.add(work);
+    try { await work; } finally { this.completions.delete(work); this.changed(); }
+  }
   async recoverHandoffs() {
-    const eligible = [...this.history.records.values()].filter(run => run.connected && !this.running.has(run.id) && !run.handoff?.delivered);
+    // Windows that found no owner queued themselves; one still running without a reason is left for later.
+    for (const window of queuedWindows(this.profileDirectory)) {
+      if (!window.reason && alive(window.pid)) continue;
+      const { reason = 'disconnected', text, ...rest } = window, known = this.history.records.get(window.id);
+      try {
+        if (!known || known.window && !known.handoff?.delivered) {
+          // Its own ending wins over the `owner-stopped` one a restart gave a record whose window was gone by then.
+          if (known && !isActiveRun(known)) delete known.handoff;
+          else await this.adopt(rest, { quiet: true });
+          await this.endRemote(window.id, reason, text);
+        }
+        unqueueWindow(this.profileDirectory, window.id);
+      } catch (error) { this.warn(`Could not take the handoff of window ${window.id}: ${String(error)}`); }
+    }
+    // A window in its own process that is still active is still running there.
+    const eligible = [...this.history.records.values()].filter(run => run.connected && !this.running.has(run.id) && !run.handoff?.delivered && !runsElsewhere(run));
     const recovery = (async () => {
       for (const run of eligible) {
         run.handoff ??= { reason: 'owner-stopped' };
@@ -722,16 +761,17 @@ export class Children {
     try { await recovery; } finally { this.completions.delete(recovery); this.changed(); }
   }
   /** `live`: the run's still open session; without it, the window's session is reopened from its file. */
-  private async deliverHandoff(run: RunInfo, live?: AgentSession) {
+  private async deliverHandoff(run: RunInfo, live?: AgentSession, written?: string) {
     const handoff = run.handoff;
     if (!handoff || handoff.delivered) return;
     if (!handoff.text) {
       const deferred = this.deferring.signal;
-      if (deferred.aborted) return;
+      if (!written && deferred.aborted) return;
       // Written by the window itself, else by the compactor from every transcript (read after the window's try, which may have
-      // checked things), else a labelled stub.
-      let summary: string | undefined;
-      try { summary = await this.writtenByWindow(run, live, deferred); }
+      // checked things), else a labelled stub. A window in its own process wrote its handoff there, or it ended without one.
+      let summary = written;
+      if (run.window) this.keepTranscript(run);
+      else try { summary = await this.writtenByWindow(run, live, deferred); }
       catch (error) {
         if (deferred.aborted) return;
         this.warn(`${run.id} could not write its own handoff, so the compactor writes it: ${error instanceof Error ? error.message : String(error)}`);
@@ -762,6 +802,18 @@ export class Children {
     await this.report(handoff.text, { once: true });
     handoff.delivered = true; this.save(run);
   }
+  /** A window in its own process keeps its transcript in its host's Pi sessions, which may go away: the handoff's evidence is a copy in this profile. */
+  private keepTranscript(run: RunInfo) {
+    const from = run.window?.session;
+    if (run.sessionFile || !from || !existsSync(from)) return;
+    const copy = join(this.profileDirectory, 'runs', `${run.id}.jsonl`);
+    try { copyFileSync(from, copy); run.sessionFile = copy; this.save(run); }
+    catch (error) { this.warn(`Could not copy the transcript of window ${run.id}: ${String(error)}`); return; }
+    // Its turns, the handoff's too, count as this profile's, as a subagent's do.
+    const after = run.window?.after;
+    try { this.options.usage?.backfill(SessionManager.open(copy).getEntries().filter(entry => after === undefined || entry.type !== 'message' || entry.message.timestamp >= after), run.parentSession, 'subagent', run.id); }
+    catch (error) { this.warn(`Could not record the usage of window ${run.id}: ${String(error)}`); }
+  }
   /** The window's own session writes the handoff: Pi sends it one more message, so the request repeats the window's last one and
    * the provider reads it from its cache. After a restart the session is reopened from its file; a close while it reopens doesn't
    * wait for it, and it is disposed once open. */
@@ -786,7 +838,7 @@ export class Children {
   private async askForHandoff(session: AgentSession, run: RunInfo, signal: AbortSignal) {
     // Its children that this ending stopped never reported to it, so it is told they were stopped.
     const stopped = this.history.descendants(run.id).filter(child => child.parentId === run.id && child.state !== 'completed' && child.state !== 'failed').map(child => child.id);
-    const limit = AbortSignal.any([AbortSignal.timeout(this.options.windowHandoffTimeout ?? 300_000), signal]);
+    const limit = AbortSignal.any([AbortSignal.timeout(this.options.windowHandoffTimeout ?? HANDOFF_TIMEOUT), signal]);
     limit.throwIfAborted();
     // It may check facts with tools first, as in any turn. The handoff is its final reply: text next to an earlier tool call never counts.
     let reply: AgentMessage | undefined;
@@ -822,7 +874,9 @@ export class Children {
   }
   /** The user's delete: stops the run and its descendants if they still work, lets their reports reach their parents, then deletes their files. */
   async remove(id: string) {
-    if (!this.history.records.has(id)) throw new Error(`No subagent ${id}.`);
+    const record = this.history.records.get(id);
+    if (!record) throw new Error(`No subagent ${id}.`);
+    if (runsElsewhere(record)) throw new Error(`${id} is a connected window in a Pi process of its own: it ends when that window runs /complete or closes, and can be deleted then.`);
     if (this.deleting.has(id)) throw new Error(`${id} is already being deleted.`);
     // A run that is live while being deleted reports its own deletion, even one a tell was resuming; a finished one has nothing left to say, so memory is told here.
     let reports = false;

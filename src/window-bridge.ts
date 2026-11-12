@@ -5,10 +5,14 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './core/cache.ts';
 import { checkSocketPath, isWindows, profileSocket, removeStaleSocket } from './profiles.ts';
 import { textContent } from './transcript.ts';
-import { isActiveRun, type RunInfo } from './runs.ts';
+import { isActiveRun, isRemoteWindow, type RunInfo } from './runs.ts';
 import { HANDOFF_REQUEST } from './prompts.ts';
 
-const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'withdraw', 'complete'] as const;
+/** `register` and `handoff` are a window whose agent runs in its own process (an RPC host's): it registers once it has a request,
+ * and `handoff` ends it with the handoff it wrote. A window that drops its connection without one ended without /complete. */
+const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'withdraw', 'complete', 'register', 'handoff'] as const;
+/** What a registered window may still ask: its agent and conversation are its own. */
+const REMOTE_ACTIONS: readonly Action[] = ['handoff', 'tell-main'];
 type Action = typeof ACTIONS[number];
 const isAction = (value: unknown): value is Action => ACTIONS.some(action => action === value);
 interface Request { kind: 'request'; id: number; action: Action; text?: string; cwd?: string; activeOnly?: boolean }
@@ -102,7 +106,7 @@ export async function serveWindows(directory: string, children: Children, availa
   const server = createServer(socket => {
     if (closing) { socket.destroy(); return; }
     connections.add(socket);
-    let child: string | undefined, attached = false, cursor = 0, firstUser = true, lastStatus = '', ending = false;
+    let child: string | undefined, attached = false, remote = false, cursor = 0, firstUser = true, lastStatus = '', ending = false;
     let finalMessages: AgentMessage[] | undefined;
     const controller = new AbortController();
     let queue = Promise.resolve();
@@ -135,6 +139,14 @@ export async function serveWindows(directory: string, children: Children, availa
             attached = true; child = id; finalMessages = live ? undefined : messages;
             send({ kind: 'event', name: 'started', text: child, title: info.title });
             drainMessages(messages, info);
+          } else if (frame.action === 'register') {
+            if (child) throw new Error('This window already has a conversation');
+            if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
+            let window: unknown;
+            try { window = JSON.parse(frame.text ?? ''); } catch { window = undefined; }
+            if (!isRemoteWindow(window)) throw new Error('Invalid window registration');
+            await children.adopt(window);
+            child = window.id; remote = true;
           } else if (frame.action === 'start') {
             if (child) throw new Error('This window already has a conversation');
             if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
@@ -144,6 +156,14 @@ export async function serveWindows(directory: string, children: Children, availa
             send({ kind: 'event', name: 'started', text: child });
           } else {
             if (!child) throw new Error('Send your first request to start a conversation');
+            if (remote && !REMOTE_ACTIONS.includes(frame.action)) throw new Error('This window runs its own agent');
+            if (!remote && frame.action === 'handoff') throw new Error('Only a window running its own agent hands off');
+            if (frame.action === 'handoff') {
+              ending = true;
+              // Delivered (or saved for the next start) before the reply, so the window queues it if this owner fails it.
+              await children.endRemote(child, 'complete', frame.text?.trim() || undefined);
+              send({ kind: 'reply', id: frame.id }); return;
+            }
             if (frame.action === 'answer') {
               // The agent's last reply in full, not the display copy that events carry (headless `pi -p` prints it).
               const text = children.live(child)?.session.getLastAssistantText() ?? '';
@@ -209,7 +229,7 @@ export async function serveWindows(directory: string, children: Children, availa
       return true;
     };
     const timer = setInterval(() => {
-      if (!child || socket.destroyed || ending) return;
+      if (!child || remote || socket.destroyed || ending) return;
       const live = children.live(child), info = children.history.records.get(child);
       if (!info) {
         // Deleted from the Agents page: end the window (and a headless join) instead of leaving it waiting forever.
@@ -242,7 +262,9 @@ export async function serveWindows(directory: string, children: Children, availa
     const connection = ended.then(async () => {
       clearInterval(timer); controller.abort(); connections.delete(socket);
       await queue;
-      if (child && !attached) await children.finish(child, closing ? 'owner-stopped' : 'disconnected');
+      // A window running its own agent outlives this owner: it hands off to whoever owns the profile when it ends.
+      if (child && remote) { if (!closing) await children.endRemote(child, 'disconnected'); }
+      else if (child && !attached) await children.finish(child, closing ? 'owner-stopped' : 'disconnected');
     });
     track(connection);
     socket.once('close', resolve);

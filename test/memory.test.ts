@@ -13,7 +13,7 @@ import { appendJson, localDay } from '../src/store.ts';
 import { lockProfile } from '../src/profiles.ts';
 import { splitView, cachePayload } from '../src/core/cache.ts';
 import { logMessage, buildContext } from '../src/transcript.ts';
-import { boundedMessage } from '../src/core/messages.ts';
+import { boundedMessage, placeView } from '../src/core/messages.ts';
 import { Inbox } from '../src/inbox.ts';
 import { compaction } from '../src/core/prompts.ts';
 import { searchPage } from '../src/core/tools.ts';
@@ -968,4 +968,16 @@ test('an imported message reads as [IMP <day>] in its leaf, zoom and search, and
     assert.equal(memory.zoom(1, 1), '1+1|[IMP 2026-04-08] user: stored by an older import');
     assert.match(searchPage(memory, 'older import'), / · \[IMP 2026-04-08\] user: stored by an older import$/m);
   } finally { await memory.close(); removeDir(dir); }
+});
+
+test('placeView puts the view at its anchored request, else at the newest one, and says where it went', () => {
+  const user = (text: string, timestamp: number) => ({ role: 'user' as const, content: text, timestamp });
+  const messages = [user('one', 1), user('two', 2)], text = (m: { content: unknown }) => JSON.stringify(m.content);
+  const fresh = placeView(messages, 'VIEW');
+  assert.equal(fresh.anchor, 2);
+  assert.ok(text(fresh.messages[1]).includes('VIEW') && !text(fresh.messages[0]).includes('VIEW'));
+  const kept = placeView([...messages, user('three', 3)], 'VIEW', 2);
+  assert.equal(kept.anchor, 2, 'an unchanged view stays put');
+  assert.ok(text(kept.messages[1]).includes('VIEW') && !text(kept.messages[2]).includes('VIEW'));
+  assert.equal(placeView([user('three', 3)], 'VIEW', 2).anchor, 3, 'an anchor compacted away moves to the newest request');
 });

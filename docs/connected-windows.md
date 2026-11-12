@@ -4,7 +4,7 @@ Each profile is locked to one Pi process. This page covers the ways a second Pi 
 
 ## Connected windows
 
-If you open the same profile in a second terminal, Pi offers to connect it to the original window as a subagent, or to go back to the profile picker. Only an interactive or RPC Pi accepts connections; a headless `pi -p` run holding the profile does not.
+If you open the same profile in a second terminal, Pi offers to connect it to the original window as a subagent, or to go back to the profile picker. Only an interactive or RPC Pi accepts connections; a headless `pi -p` run holding the profile does not. An RPC session on a busy profile connects differently, with its agent in its own process: see [RPC hosts](#rpc-hosts-the-optchat-app-and-t3-code).
 
 - Your first message starts a subagent in the second window's working directory. Later messages continue the same conversation.
 - The window looks like a normal Pi chat: replies, tool calls with their output and running time, the working spinner, and reports from the subagent's own agents in the dark box. Ctrl+O expands tool output.
@@ -50,7 +50,33 @@ For headless use (`pi -p`, `--mode rpc`, other extensions' runners), pass `--opt
 - Without it, and without a saved profile in a resumed session, a headless run is plain Pi with no OptChat memory.
 - If the requested profile can't open (misspelled, deleted, or busy and not joinable, see below), the run reports the error and doesn't answer.
 
-In RPC and SDK hosts that create sessions themselves (Pi Web), send `/optchat profile work` as the first message of a new session. A profile is open in one session at a time, so a second session on it gets "Profile already running".
+In RPC and SDK hosts that create sessions themselves (Pi Web), send `/optchat profile work` as the first message of a new session. A second RPC session on a profile that is already open becomes a connected window (next section).
+
+### RPC hosts: the OptChat app and T3 Code
+
+Hosts that drive Pi over RPC start one `pi --mode rpc` process per thread or window. The first one to open a profile owns it. Every later one on the same profile becomes a **connected window**, with its agent in its own process:
+
+- Pi's own agent loop answers there, so the host shows everything as usual, and its tools, approvals and MCP stay its own.
+- Each request comes with the profile's memory view, read from disk at the start of the run, plus `zoom`, `search` and `date` on it. The view stays where it was while it doesn't change, so the rest of the conversation is read from the prompt cache. The window never writes the profile's memory and never takes its lock; its conversation reaches memory only as the handoff. Pi's own compaction keeps a long window in bounds.
+- It can't delegate: `spawn`, `tell` and `models` are off there. `/tell-main <message>` reaches the main agent.
+- `/complete` ends it: the window writes its handoff as one more turn of its own (as above), and the owner logs it. A prompt after that starts a new connected conversation in the same session, with a new ID and without the completed one in its context. A window that closes without `/complete` (a new session, the host stopping it, a crash or a hard kill) is handed off by the owner's compactor from the window's Pi transcript, marked **interrupted**. The owner keeps a copy of that transcript in the profile, so `zoom("<id>")` works after the host deletes the thread.
+- If no owner is reachable (none is open, or a `pi -p` run holds the profile), the window still works from the memory on disk, and its handoff waits in the profile's `remote-windows/` for the next Pi that opens it. A window checks for an owner every 5 seconds and registers with one that opens or restarts, which then hands it off when it ends, so a window killed later is not lost.
+- Opening a window sends the main agent nothing; its first message does, as in a terminal window. A window in its own process can't be deleted from the owner's Agents page while it runs.
+- Known gaps: an idle window killed after the owner restarted, before it re-registered (within 5 seconds), is handed off only when an owner next opens the profile. Liveness is checked by process ID, which the OS may reuse. Once the owner exits, no process owns the profile until a Pi opens it again; windows keep working from disk meanwhile.
+
+`--optchat-connect` picks when, as for `pi -p`: `auto` (default) connects only when the profile is busy, `join` requires a running owner, `off` refuses a busy profile.
+
+**What the host sees.** OptChat sends `setStatus` with key `optchat.role` and a JSON value:
+
+| Value | Meaning |
+| --- | --- |
+| `{"role":"owner","profile":"work"}` | This process owns the profile: the main chat. |
+| `{"role":"window","profile":"work","id":"3f2a9c11","connected":true,"completed":false}` | A connected window. `connected`: whether it reaches the owner now. `id` is its agent ID in the owner's Agents page and reports. |
+| the same with `"completed":true` | `/complete` has finished and the handoff is with the owner (or queued). The next prompt starts a new window, sent with a new `id`. |
+
+It is sent during `session_start`, before Pi reads the host's first command, so it has arrived by the time the first `get_state` (or any other command) is answered, and again after `new_session` and `switch_session`, and whenever it changes (only then). No `optchat.role` by then means no profile is open (plain Pi). The window's closing request for its handoff is a hidden custom message (`optchat-handoff-request`), so a host shows the handoff reply but not the request as the user's.
+
+**T3 Code.** Put `--optchat-profile work` in the Pi provider's launch arguments. The first thread you use owns the profile and is your main chat; other threads on it are connected windows. T3 releases a thread after 30 idle minutes (SIGTERM, then SIGKILL a second later), which hands that thread's conversation off as interrupted; a released owner takes its subagents down with it. T3 shows only assistant messages and tool calls, so OptChat's notices there are easy to miss.
 
 ### Joining a busy profile with `pi -p`
 

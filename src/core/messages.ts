@@ -72,6 +72,14 @@ export function withView<M extends AnyMessage>(messages: readonly M[], view: str
     return { ...message, content: [{ type: 'text' as const, text: view }, ...first?.type === 'text' ? [{ ...first, text: `\n\n${first.text}` }] : first ? [first] : [], ...rest] };
   });
 }
+/** `withView` at the request sent at `anchor` (a timestamp), or the newest one when there is no anchor or it is gone (compacted away,
+ * say); `anchor` comes back as where the view went. Keeping it there while the view is unchanged keeps the rest cached. */
+export function placeView<M extends AnyMessage & { timestamp: number }>(messages: readonly M[], view: string, anchor?: number) {
+  const users = messages.flatMap((message, i) => is(message, 'user') ? [i] : []);
+  const at = users.find(i => messages[i].timestamp === anchor) ?? users.at(-1);
+  if (at === undefined) return { messages: [...messages], anchor };
+  return { messages: [...messages.slice(0, at), ...withView(messages.slice(at), view)], anchor: messages[at].timestamp };
+}
 /** A settled run's requests and its final text answer, for the previous exchange; none unless it ended in one. The caller supplies
  * a single settled run, including any steering after text-only replies. */
 export function completedExchange(history: readonly AnyMessage[], imageRef?: ImageRef): Message[] {

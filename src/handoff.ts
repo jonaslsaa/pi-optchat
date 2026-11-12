@@ -10,6 +10,8 @@ import { textContent } from './transcript.ts';
 
 export interface HandoffEvidence { run: RunInfo; messages: AgentMessage[]; transcriptError?: string }
 
+/** How long writing a handoff may take, by a window or by the compactor. */
+export const HANDOFF_TIMEOUT = 300_000;
 const INPUT_TOKENS = 128_000;
 const OUTPUT_TOKENS = 16_000;
 
@@ -55,7 +57,7 @@ export function createHandoffSummarizer(registry: ModelRegistry, choice: () => M
       const reply = await retryTransient(() => registry.streamSimple(model, {
         systemPrompt: HANDOFF,
         messages: [{ role: 'user', timestamp: Date.now(), content: prefix + transcript.subarray(offset, end).toString('utf8') }],
-      }, { reasoning: reasoningFor(model, selected.thinking), maxTokens, signal: AbortSignal.any([AbortSignal.timeout(300_000), ...signal ? [signal] : []]) }).result(), usage, isRetryableAssistantError, retryDelays, signal);
+      }, { reasoning: reasoningFor(model, selected.thinking), maxTokens, signal: AbortSignal.any([AbortSignal.timeout(HANDOFF_TIMEOUT), ...signal ? [signal] : []]) }).result(), usage, isRetryableAssistantError, retryDelays, signal);
       summary = handoffText(reply);
       offset = end;
     }

@@ -9,7 +9,9 @@ import { textContent } from './transcript.ts';
 /** `paused`: interrupted by the user with nothing queued, alive and waiting for its next message. `interrupted` is a finished run cut off by Pi closing or a connected window ending. */
 export const runStates = ['running', 'waiting', 'stopping', 'completed', 'failed', 'stopped', 'interrupted', 'paused'] as const;
 export type RunState = typeof runStates[number];
-export type FinishReason = 'complete' | 'disconnected' | 'owner-stopped' | 'failed';
+const finishReasons = ['complete', 'disconnected', 'owner-stopped', 'failed'] as const;
+export type FinishReason = typeof finishReasons[number];
+const isFinishReason = (value: unknown): value is FinishReason => finishReasons.some(reason => reason === value);
 export interface RunInfo {
   id: string; task: string; cwd: string; model: string; thinking: string;
   /** The spawning agent's short label for the task, shown instead of it where there is room for one line. */
@@ -18,6 +20,10 @@ export interface RunInfo {
   parentId?: string; depth: number;
   state: RunState; report?: string;
   connected?: boolean;
+  /** A connected window whose agent runs in its own Pi process (an RPC host's second session on a busy profile): `pid` is that
+   * process, `session` its Pi session file, read when the window ends. The record is all this process has of it. `after`: a window
+   * that went on after /complete shares that session with the conversations before it, so only its messages from then on are its. */
+  window?: { pid: number; session?: string; after?: number };
   /** `unread`: reports its subagents sent while it was paused, which it never read; its handoff includes them. */
   handoff?: { reason: FinishReason; text?: string; delivered?: boolean; unread?: string[] };
   /** Working when Pi closed or crashed: the next start resumes it (see `Children.resumeCutOff`). */
@@ -53,6 +59,43 @@ export function savedSession(run: RunInfo) {
   try { return run.sessionFile && existsSync(run.sessionFile) ? SessionManager.open(run.sessionFile) : undefined; } catch { return undefined; }
 }
 
+/** Whether process `pid` still runs (on this machine; windows connect over a local socket). */
+export function alive(pid: number) {
+  try { process.kill(pid, 0); return true; } catch (error) { return record(error) && error.code === 'EPERM'; }
+}
+/** What a connected window in its own process tells the owner about itself (see `RunInfo.window`). */
+export type RemoteWindow = Pick<RunInfo, 'id' | 'task' | 'cwd' | 'model' | 'thinking' | 'title'> & NonNullable<RunInfo['window']>;
+/** A connected window still running in a Pi process of its own: only it can end its conversation. */
+export const runsElsewhere = (run: RunInfo) => !!run.window && isActiveRun(run);
+export function isRemoteWindow(value: unknown): value is RemoteWindow {
+  return record(value) && ['id', 'task', 'cwd', 'model', 'thinking'].every(k => typeof value[k] === 'string') && /^[a-zA-Z0-9-]+$/.test(String(value.id))
+    && Number.isSafeInteger(value.pid) && (value.title === undefined || typeof value.title === 'string')
+    && (value.session === undefined || typeof value.session === 'string' && value.session.endsWith('.jsonl'))
+    && (value.after === undefined || typeof value.after === 'number');
+}
+/** A finished run's saved messages: for a window, only its own conversation (see `RunInfo.window`). */
+export function runMessages(run: RunInfo): AgentMessage[] {
+  const messages = run.sessionFile ? sessionMessages(run.sessionFile) : [], after = run.window?.after;
+  return after === undefined ? messages : messages.filter(message => message.timestamp >= after);
+}
+/** A window that found no owner keeps itself here, in the profile directory, for the next owner to take: `reason` once it has
+ * ended, with `text` if it wrote its own handoff. One without a reason whose process is gone was killed. */
+export type QueuedWindow = RemoteWindow & { reason?: FinishReason; text?: string };
+const isQueuedWindow = (value: unknown): value is QueuedWindow => record(value)
+  && (value.reason === undefined || isFinishReason(value.reason)) && (value.text === undefined || typeof value.text === 'string') && isRemoteWindow(value);
+const queue = (profileDirectory: string) => join(profileDirectory, 'remote-windows');
+export const queueWindow = (profileDirectory: string, window: QueuedWindow) => atomicWrite(join(queue(profileDirectory), `${window.id}.json`), JSON.stringify(window));
+export const unqueueWindow = (profileDirectory: string, id: string) => rmSync(join(queue(profileDirectory), `${id}.json`), { force: true });
+export function queuedWindows(profileDirectory: string): QueuedWindow[] {
+  const dir = queue(profileDirectory);
+  return (existsSync(dir) ? readdirSync(dir) : []).filter(file => file.endsWith('.json')).flatMap(file => {
+    try {
+      const value: unknown = JSON.parse(readFileSync(join(dir, file), 'utf8'));
+      return isQueuedWindow(value) && file === `${value.id}.json` ? [value] : [];
+    } catch { return []; }
+  });
+}
+
 /** A connected run that has ended but whose handoff summary has not reached the main agent yet. */
 export const isHandingOff = (run: RunInfo) => !isActiveRun(run) && !!run.handoff && !run.handoff.delivered;
 function isRun(value: unknown): value is RunInfo {
@@ -65,7 +108,9 @@ function isRun(value: unknown): value is RunInfo {
     && (value.report === undefined || typeof value.report === 'string')
     && (value.connected === undefined || typeof value.connected === 'boolean')
     && (value.cutOff === undefined || typeof value.cutOff === 'boolean')
-    && (value.handoff === undefined || record(value.handoff) && ['complete', 'disconnected', 'owner-stopped', 'failed'].includes(String(value.handoff.reason))
+    && (value.window === undefined || record(value.window) && typeof value.window.pid === 'number' && (value.window.session === undefined || typeof value.window.session === 'string')
+      && (value.window.after === undefined || typeof value.window.after === 'number'))
+    && (value.handoff === undefined || record(value.handoff) && isFinishReason(value.handoff.reason)
       && (value.handoff.text === undefined || typeof value.handoff.text === 'string')
       && (value.handoff.delivered === undefined || typeof value.handoff.delivered === 'boolean')
       && (value.handoff.unread === undefined || Array.isArray(value.handoff.unread) && value.handoff.unread.every(text => typeof text === 'string')))
@@ -78,6 +123,17 @@ export function sessionMessages(file: string): AgentMessage[] {
   return SessionManager.open(file).getEntries().flatMap(e => e.type === 'message' ? [e.message] : []);
 }
 
+/** Run `id`'s record in this profile, as saved; throws if it is missing or invalid. */
+export function readRun(profileDirectory: string, id: string): RunInfo {
+  const directory = join(profileDirectory, 'runs');
+  const run: unknown = JSON.parse(readFileSync(join(directory, `${id}.optchat.json`), 'utf8'));
+  if (record(run) && run.depth === undefined) run.depth = 1;
+  if (!isRun(run) || run.id !== id) throw new Error('Invalid metadata');
+  // Never follow a stored transcript pointer outside this profile's run directory.
+  if (run.sessionFile) run.sessionFile = join(directory, basename(run.sessionFile));
+  return run;
+}
+
 /** Metadata sits beside the SDK's canonical child transcripts, inside this profile. */
 export class RunHistory {
   readonly records = new Map<string, RunInfo>();
@@ -88,13 +144,10 @@ export class RunHistory {
     const files = existsSync(this.directory) ? readdirSync(this.directory) : [];
     for (const file of files.filter(f => f.endsWith('.optchat.json'))) {
       try {
-        const run: unknown = JSON.parse(readFileSync(join(this.directory, file), 'utf8'));
-        if (record(run) && run.depth === undefined) run.depth = 1;
-        if (!isRun(run) || file !== `${run.id}.optchat.json`) throw new Error('Invalid metadata');
-        // Never follow a stored transcript pointer outside this profile's run directory.
-        if (run.sessionFile) run.sessionFile = join(this.directory, basename(run.sessionFile));
+        const run = readRun(profileDirectory, file.slice(0, -'.optchat.json'.length));
         this.records.set(run.id, run);
-        if (isActiveRun(run)) {
+        // A window in its own process outlives the owner that registered it: it hands off when it ends, to whoever owns the profile then.
+        if (isActiveRun(run) && !(run.window && alive(run.window.pid))) {
           if (run.connected) run.handoff ??= { reason: 'owner-stopped' };
           // Paused runs wait for the user and stopping ones were stopped on purpose: neither is picked up again by itself.
           else if (run.state === 'running' || run.state === 'waiting') run.cutOff = true;

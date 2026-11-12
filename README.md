@@ -39,7 +39,7 @@ The footer shows the active profile. Memory follows the profile across directori
 
 - `pi -p`, `--mode rpc` and other extensions' runners need `--optchat-profile work`; `OPTCHAT_PROFILE` and a lone profile apply to interactive Pi only. Without it (and without a saved profile in a resumed session) the run is plain Pi with no OptChat memory.
 - In hosts that create sessions themselves (Pi Web), send `/optchat profile work` as the first message of a new session.
-- If the profile is open in another Pi, `pi -p` joins it as a connected window by default; `--optchat-connect auto|join|off` controls this.
+- If the profile is open in another Pi, `pi -p` joins it as a connected window by default, and so does an RPC session (one T3 Code thread or OptChat app window per process), with its agent running in its own process; `--optchat-connect auto|join|off` controls this.
 
 Details, errors and join rules: [docs/connected-windows.md](docs/connected-windows.md#headless-and-rpc-runs).
 

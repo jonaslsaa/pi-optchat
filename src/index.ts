@@ -32,6 +32,7 @@ import { showAgentView } from './agent-view.ts';
 import { inspectorShortcut, mountNavigation } from './navigation.ts';
 import { joinHeadless, listAttachableAgents, serveWindows } from './window-bridge.ts';
 import { openConnectedWindow, registerConnectedRenderer } from './connected-window.ts';
+import { openRemoteWindow, ROLE_STATUS, type Role } from './rpc-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
 import { showModelPicker, showSettings } from './settings-page.ts';
@@ -68,6 +69,8 @@ export default function optchat(pi: ExtensionAPI) {
   let remote: Awaited<ReturnType<typeof openConnectedWindow>> | undefined;
   /** `pi -p` on a profile another Pi owns: the prompt goes to a subagent in that Pi (--optchat-connect). */
   let joined: Awaited<ReturnType<typeof joinHeadless>> | undefined;
+  /** An RPC session on a profile another Pi owns: a connected window whose agent runs here (--optchat-connect). */
+  let rpcWindow: Awaited<ReturnType<typeof openRemoteWindow>> | undefined;
   let closeWindows: (() => Promise<void>) | undefined;
   let recovery: Promise<void> | undefined;
   let run: AgentMessage[] = [];
@@ -107,9 +110,11 @@ export default function optchat(pi: ExtensionAPI) {
     typeof s === 'string' || record(s) && typeof s.text === 'string' && (s.count === undefined || typeof s.count === 'number');
   const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
   pi.registerFlag('optchat-profile', { description: 'OptChat profile (required for noninteractive sessions without a saved binding)', type: 'string' });
-  pi.registerFlag('optchat-connect', { description: 'pi -p on a profile open in another Pi: auto (join it if busy, default), join (only join), off (error if busy)', type: 'string', default: 'auto' });
+  pi.registerFlag('optchat-connect', { description: 'pi -p or RPC on a profile open in another Pi: auto (join it if busy, default), join (only join), off (error if busy)', type: 'string', default: 'auto' });
   pi.registerFlag('optchat-agent', { description: 'Open an existing background agent by exact ID in this terminal (TUI only; requires a running profile owner)', type: 'string' });
-  const connectMode = () => {
+  /** `pi -p` joins with its prompt, an RPC session as a window running its own agent. JSON output carries Pi's own events, which a joined reply would bypass. */
+  const connectFor = (ctx: ExtensionContext) => {
+    if (ctx.mode !== 'print' && ctx.mode !== 'rpc') return 'off';
     const mode = pi.getFlag('optchat-connect') ?? 'auto';
     const known = CONNECT_MODES.find(m => m === mode);
     if (!known) { process.exitCode = 1; throw new Error(`--optchat-connect must be ${CONNECT_MODES.join(', ')}; got ${String(mode)}`); }
@@ -159,8 +164,11 @@ export default function optchat(pi: ExtensionAPI) {
     } finally { restoring = false; }
   };
   const required = () => { if (!active) throw new Error('Choose an OptChat profile first: /optchat profile'); return active; };
+  /** The status line, and for RPC hosts what this Pi is to its profile (`optchat.role`). A window keeps both itself (rpc-window.ts). */
   const status = (ctx: ExtensionContext) => {
+    if (rpcWindow) return;
     const a = active;
+    if (ctx.mode === 'rpc') ctx.ui.setStatus(ROLE_STATUS, a ? JSON.stringify({ role: 'owner', profile: a.name } satisfies Role) : undefined);
     if (!a) { ctx.ui.setStatus('optchat', 'OptChat: choose profile'); return; }
     // A display only: a broken import journal is refused where it matters, never here.
     let note = '';
@@ -202,6 +210,7 @@ export default function optchat(pi: ExtensionAPI) {
   };
   const stop = async () => {
     remote?.close(); remote = undefined; joined?.close(); joined = undefined;
+    const window = rpcWindow; rpcWindow = undefined; await window?.close();
     inspectorController?.abort(); unmountNavigation?.(); unmountNavigation = undefined;
     stopping = true; importController?.abort(); await importTask?.catch(() => {});
     if (!active) return;
@@ -311,6 +320,22 @@ export default function optchat(pi: ExtensionAPI) {
     }
   };
 
+  /** A busy profile, joined as `pi -p` (its prompt goes to the owner) or as an RPC window (its agent runs here). */
+  const joinBusy = async (name: string, ctx: ExtensionContext, options: Parameters<typeof openRemoteWindow>[3] = {}) => {
+    if (ctx.mode !== 'rpc') { joined = await joinProfile(name); return; }
+    const old = rpcWindow; rpcWindow = undefined; await old?.close();
+    rpcWindow = await openRemoteWindow(pi, ctx, name, options); fault = undefined;
+  };
+  /** Opens `name` here, or joins it where --optchat-connect says to; a busy profile it may not join throws ProfileBusyError. */
+  const openOrJoin = async (name: string, ctx: ExtensionContext) => {
+    const connect = connectFor(ctx);
+    if (connect === 'join') return joinBusy(name, ctx, { requireOwner: true });
+    try { await openProfile(name, ctx); }
+    catch (error) {
+      if (error instanceof ProfileBusyError && connect === 'auto') return joinBusy(name, ctx);
+      throw error;
+    }
+  };
   pi.on('session_start', async (event, ctx) => {
     stopping = false;
     const entries = ctx.sessionManager.getEntries(), boundName = boundProfile(entries);
@@ -319,6 +344,8 @@ export default function optchat(pi: ExtensionAPI) {
     const flag = pi.getFlag('optchat-profile');
     try {
       if (boundName && typeof flag === 'string' && flag !== boundName) throw new Error(`Session belongs to ${boundName}; cannot resume it as ${flag}.`);
+      // RPC binds extensions twice after new_session and the like (see openProfile): the window already serves this session.
+      if (rpcWindow?.session === ctx.sessionManager.getSessionId()) return;
       const agentId = pi.getFlag('optchat-agent');
       if (agentId !== undefined) {
         if (typeof agentId !== 'string' || !agentId.trim()) throw new Error('--optchat-agent requires an exact agent ID');
@@ -333,17 +360,11 @@ export default function optchat(pi: ExtensionAPI) {
         return;
       }
       let name = boundName ?? (typeof flag === 'string' ? flag : defaultProfile(ctx, event) ?? await chooseProfile(ctx));
-      // Only plain `pi -p` joins: JSON and RPC output carry Pi's own events, which a joined reply would bypass.
-      const connect = ctx.mode === 'print' ? connectMode() : 'off';
-      if (connect === 'join' && !name) { process.exitCode = 1; throw new Error('--optchat-connect join needs a profile: pass --optchat-profile'); }
+      if (connectFor(ctx) === 'join' && !name) { process.exitCode = 1; throw new Error('--optchat-connect join needs a profile: pass --optchat-profile'); }
       for (;;) {
         if (!name) { status(ctx); return; }
-        try {
-          if (connect === 'join') joined = await joinProfile(name);
-          else await openProfile(name, ctx);
-          break;
-        } catch (error) {
-          if (error instanceof ProfileBusyError && connect === 'auto') { joined = await joinProfile(name); break; }
+        try { await openOrJoin(name, ctx); break; }
+        catch (error) {
           if (!(error instanceof ProfileBusyError) || ctx.mode !== 'tui') throw error;
           // A resumed conversation already belongs to this profile, so another profile needs a new session (/optchat profile).
           // Older owners have no listing protocol. Keep their existing Connect/Back menu rather than failing startup.
@@ -374,6 +395,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (name !== boundName) pi.appendEntry(binding, { name });
     } catch (error) {
       if (active) await stop().catch(() => {});
+      if (ctx.mode === 'rpc') status(ctx); // The host learns no profile is open; the TUI keeps its line next to the error.
       fault = errorText(error);
       // Pi reports a throwing handler on stderr (print) or as an extension_error event (RPC); notify there is a no-op or easy to miss.
       if (ctx.mode !== 'tui') throw error;
@@ -414,6 +436,14 @@ export default function optchat(pi: ExtensionAPI) {
       } catch (error) { process.stderr.write(`OptChat: ${errorText(error)}\n`); process.exitCode = 1; }
       return { action: 'handled' };
     }
+    if (rpcWindow) {
+      // A prompt after /complete starts the next connected conversation, as new_session would, without the one before in its context.
+      if (rpcWindow.completed) {
+        try { await joinBusy(rpcWindow.profile, ctx, { after: Date.now() }); }
+        catch (error) { ctx.ui.notify(errorText(error), 'error'); return { action: 'handled' }; }
+      }
+      return { action: 'continue' };
+    }
     if (remote) {
       try {
         if (event.images?.length) throw new Error('Connected windows currently accept text only; provide a file path for the agent to read.');
@@ -435,7 +465,8 @@ export default function optchat(pi: ExtensionAPI) {
   });
   pi.on('agent_start', (_event, ctx) => { working = true; showTitle(ctx); });
   // Every run starts here, reports sent while Pi is idle too (Pi 1.2+).
-  pi.on('before_agent_start', (event, ctx) => {
+  pi.on('before_agent_start', async (event, ctx) => {
+    if (rpcWindow) { await rpcWindow.beforeRun(event); return; }
     if (!active) return; // Plain Pi run: leave Pi's own prompt untouched.
     const a = active;
     flush(); run = []; logged = 0; keep = 0; view = undefined; runStarted = true; wake = event.messageType === 'custom';
@@ -487,6 +518,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (bounded !== event.message) return { message: bounded };
   });
   pi.on('context_with_system', async (event, ctx) => {
+    if (rpcWindow) return { messages: rpcWindow.context(event.messages) };
     try {
       if (!active) return; // Plain Pi run: pass context through unmodified.
       const a = required();
@@ -532,6 +564,7 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
   pi.on('cache_warming_decision', () => ({ action: 'stop' }));
   pi.on('session_before_compact', (_event, ctx) => {
+    if (rpcWindow) return; // Its conversation isn't in memory: Pi's compaction keeps it in bounds.
     ctx.ui.notify('OptChat manages history between turns. Pi compaction is disabled; an exceptionally long single run may require stopping and continuing in a new turn.', 'info');
     return { cancel: true };
   });
@@ -556,9 +589,10 @@ export default function optchat(pi: ExtensionAPI) {
   });
   registerConnectedRenderer(pi);
   registerReportRenderer(pi);
-  const [zoom, date] = memoryTools(() => required().memory, id => required().children.transcript(id));
+  const memory = () => rpcWindow?.memory() ?? required().memory;
+  const [zoom, date] = memoryTools(memory, id => rpcWindow ? rpcWindow.transcript(id) : required().children.transcript(id));
   pi.registerTool(zoom); pi.registerTool(date);
-  pi.registerTool({ ...searchTool(() => required().memory), defaultActive: false });
+  pi.registerTool({ ...searchTool(memory), defaultActive: false });
   // The tool and its prompt line change together, once per toggle, so the cached prefix is otherwise stable.
   const syncSearch = ({ memorySearch }: ProfileConfig) => {
     const tools = pi.getActiveTools();
@@ -608,7 +642,7 @@ export default function optchat(pi: ExtensionAPI) {
   };
   pi.registerShortcut(shortcut, { description: 'Inspect OptChat agents, usage and background activity', handler: ctx => inspect(ctx, 'agents') });
   const command = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
-    if (remote && !remote.ended) { ctx.ui.notify('Manage this profile in its original window. Here use /tell-main or /complete.', 'info'); return; }
+    if (remote && !remote.ended || rpcWindow) { ctx.ui.notify('Manage this profile in its original window. Here use /tell-main or /complete.', 'info'); return; }
     if (importing) throw new Error('Close the import dialog before changing profile settings.');
     let action = args.trim();
     if (!action) {
@@ -663,7 +697,8 @@ export default function optchat(pi: ExtensionAPI) {
       const first = `Run /optchat profile ${named ?? '<name>'} as the first message of a new session, or start Pi with --optchat-profile <name>.`;
       if (!named || active || remote || joined || ctx.sessionManager.getEntries().some(e => e.type === 'message' || e.type === 'custom_message')) throw new Error(first);
       // As with a requested profile: one that fails to open blocks prompts instead of running without memory.
-      try { await openProfile(named, ctx); } catch (error) { fault = errorText(error); throw error; }
+      try { await openOrJoin(named, ctx); }
+      catch (error) { fault = errorText(error); throw error; }
       pi.appendEntry(binding, { name: named });
       return;
     }
@@ -696,13 +731,17 @@ export default function optchat(pi: ExtensionAPI) {
     }
     if (action) throw new Error('Use /optchat [profile|settings|model|agents|usage|activity|instructions|browse|import].');
   };
+  /** A connected window, whether its agent runs in the owner (`remote`) or here (`rpcWindow`). */
+  const window = (): { complete(ctx: ExtensionCommandContext): Promise<void>; tell(text: string): Promise<void> } | undefined => rpcWindow ?? remote;
   pi.registerCommand('complete', { description: 'End this connected conversation and hand off to the main agent', handler: async (_args, ctx) => {
-    if (!remote) { ctx.ui.notify('/complete is for connected subagent windows.', 'info'); return; }
-    try { await remote.complete(); } catch (error) { ctx.ui.notify(errorText(error), 'error'); }
+    const open = window();
+    if (!open) { ctx.ui.notify('/complete is for connected subagent windows.', 'info'); return; }
+    try { await open.complete(ctx); } catch (error) { ctx.ui.notify(errorText(error), 'error'); }
   } });
   pi.registerCommand('tell-main', { description: 'Send a message to the main agent from this connected window', handler: async (args, ctx) => {
-    if (!remote) { ctx.ui.notify('/tell-main is for connected subagent windows.', 'info'); return; }
-    try { await remote.tell(args); } catch (error) { ctx.ui.notify(errorText(error), 'error'); }
+    const open = window();
+    if (!open) { ctx.ui.notify('/tell-main is for connected subagent windows.', 'info'); return; }
+    try { await open.tell(args); } catch (error) { ctx.ui.notify(errorText(error), 'error'); }
   } });
   pi.registerCommand('optchat', { description: 'OptChat profiles, settings, models, agents, instructions, memory browser, and imports',
     getArgumentCompletions: prefix => ['profile', 'settings', 'model', 'agents', 'agents model', 'usage', 'activity', 'instructions', 'browse', 'import'].filter(s => s.startsWith(prefix)).map(value => ({ value, label: value })),
