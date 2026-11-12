@@ -36,7 +36,8 @@ const COMPLETED_TYPE = 'optchat-window-completed';
 export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, profile: string, { requireOwner = false } = {}) {
   const dir = profilePath(profile), id = randomUUID().slice(0, 8);
   // A session that goes on after /complete, now or resumed later, is a new conversation: what came before is not this window's.
-  const ended = ctx.sessionManager.getEntries().findLast(entry => entry.type === 'custom' && entry.customType === COMPLETED_TYPE);
+  // Its branch only: a marker on a branch the user left behind ends nothing here.
+  const ended = ctx.sessionManager.getBranch().findLast(entry => entry.type === 'custom' && entry.customType === COMPLETED_TYPE);
   const after = ended ? Date.parse(ended.timestamp) : undefined;
   if (!existsSync(dir)) throw new Error(`Profile ${profile} does not exist.`);
   /** `read`: the files' fingerprint when `memory` was read, taken before it, so a change meanwhile is read next time. */

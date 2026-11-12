@@ -158,6 +158,13 @@ test('a completed window\'s session resumed in a new process starts a new conver
     assert.ok(role?.role === 'window' && !role.completed);
     assert.equal(await window.ask('Second topic.'), 'Reply: Second topic.');
     assert.equal(window.sent.at(-1)!.messages.length, 1, 'the completed conversation stays out of its context');
+    // Back on a branch from before /complete (Pi's tree navigation), that conversation is this window's again.
+    const first = window.session.sessionManager.getEntries().find(e => e.type === 'message' && e.message.role === 'assistant');
+    window.session.sessionManager.branch(first!.id);
+    await window.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+    await window.session.extensionRunner.emit({ type: 'session_start', reason: 'resume' });
+    await window.ask('Back again.');
+    assert.equal(window.sent.at(-1)!.messages.length, 3, 'its request, the reply, then the new one');
   } finally { await window.close(); await owner.close(); }
 });
 
