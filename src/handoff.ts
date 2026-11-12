@@ -1,7 +1,8 @@
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { isRetryableAssistantError, type AssistantMessage } from '@earendil-works/pi-ai';
-import { reasoningFor, type ModelChoice } from './compactor.ts';
+import { reasoningFor } from './compactor.ts';
+import type { ModelChoice } from './profiles.ts';
 import { retryTransient } from './core/compactor.ts';
 import { HANDOFF } from './prompts.ts';
 import { undelivered, type RunInfo } from './runs.ts';

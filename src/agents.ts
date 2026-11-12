@@ -12,7 +12,7 @@ import { memoryTools } from './tools.ts';
 import { searchTool } from './core/tools.ts';
 import { VIEW } from './core/memory.ts';
 import type { Memory } from './memory.ts';
-import type { ModelChoice } from './compactor.ts';
+import type { ModelChoice } from './profiles.ts';
 import { cachePayload } from './core/cache.ts';
 import { childInput } from './core/messages.ts';
 import { CUT_OFF, reportHead, RunHistory, isRunning, transition, sessionMessages, savedSession, undelivered, sentText, type Guidance, type RunInfo, type RunState, type FinishReason } from './runs.ts';

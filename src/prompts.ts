@@ -1,4 +1,4 @@
-import type { ModelChoice } from './compactor.ts';
+import type { ModelChoice } from './profiles.ts';
 import type { FinishReason } from './runs.ts';
 
 // Prompts from Victor Taelin's OptChat recipe, lightly adapted; docs/recipe-differences.md lists the changes.

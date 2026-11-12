@@ -21,12 +21,14 @@ Memory reaches disk through one seam, `Store` in `src/core/store.ts` (Pi's `File
 
 ## Reading profiles from another app
 
-`pi-optchat/files` lets another app on the same machine, such as a GUI, read profiles while Pi runs them. It writes nothing and needs Node but not Pi; like `./core`, it ships compiled.
+`pi-optchat/files` lets another app on the same machine, such as a GUI, read profiles while Pi runs them. It writes nothing and loads only Node at runtime. Like `./core`, it ships compiled; its declarations name pi-ai's types, so without pi-ai installed, use `skipLibCheck`.
 
 - `dataHome()`, `listProfiles(home?)`, `profilePath(name, home?)`: the data directory (`OPTCHAT_HOME` or `~/.optchat`), its profiles, and one's directory. `home` defaults to `dataHome()`.
 - `memoryDirectory(profileDir)`: the generation `active-memory.json` points at, or the profile itself.
-- `readMemory(memoryDir)`: a closed `Memory` with history, view, zoom, search and images as the files are now. It creates no directory, builds no summary and takes no lock. A line Pi is still writing is skipped; read again for later messages.
-- `profileOwner(profileDir)`: who holds the profile (Pi's `<profile> · PID <pid> · <host> · <cwd>`), or `undefined`. It asks the lock and never takes it; it rejects if the holder doesn't answer in 1.5 s.
+- `readMemory(memoryDir)`: a closed `Memory` with history, view, zoom, search and images as the files are now. It creates no directory, builds no summary and takes no lock. A directory that doesn't exist reads as an empty memory. A line Pi is still writing is skipped; read again for later messages.
+- `readImage(memoryDir, name)`: one kept image, `{ mimeType, data }`, without reading the memory.
+- `fingerprint(memoryDir)`: a string that changes whenever the memory does, so an app knows when to read it again.
+- `profileOwner(profileDir)`: the Pi holding the profile, `{ profile, pid, host, cwd }`, or `undefined`. It asks the lock and never takes it. It rejects only when a holder is there but doesn't answer in 1.5 s, or describes itself another way: either way the profile is busy.
 
 ## Windows differences
 

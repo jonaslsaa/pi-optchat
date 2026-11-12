@@ -121,3 +121,11 @@ export class FileReader extends FileStore {
   override saveView(): undefined {}
   override putImage(): undefined {}
 }
+/** The image kept under `name` in the memory in `directory`, read without opening the memory. */
+export const readImage = (directory: string, name: string) => new FileReader(directory, () => {}).image(name);
+/** Changes whenever the memory in `directory` does: its logs only grow and its view is replaced. */
+export function fingerprint(directory: string) {
+  const sizes = ['main', 'tree'].flatMap(sub => logs(join(directory, sub)).map(name => `${sub}/${name}:${statSync(join(directory, sub, name)).size}`));
+  const view = statSync(join(directory, 'view.json'), { throwIfNoEntry: false });
+  return [...sizes, `view:${view?.ino}:${view?.mtimeMs}`].join('|');
+}

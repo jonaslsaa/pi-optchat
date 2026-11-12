@@ -5,7 +5,7 @@ import { Memory } from '../memory.ts';
 import { isEntry, type Entry, type Compressor } from '../core/memory.ts';
 import { deduplicate as dedupe, planImport, runImport as build, type ImportMode } from '../core/import.ts';
 import { atomicWrite } from '../store.ts';
-import { generationPath, memoryDirectory } from '../profiles.ts';
+import { ACTIVE_MEMORY, generationPath, memoryDirectory } from '../profiles.ts';
 import { record } from '../core/cache.ts';
 import { copyKey, type ImportedEntry } from './sources.ts';
 import { DEFAULT_SETTINGS } from '../settings.ts';
@@ -74,7 +74,7 @@ export async function runImport(dir: string, compress: Compressor, signal: Abort
   try {
     await build({ entry: i => plan[i], total: job.total, open: async () => { memory = await Memory.open(path, compress, { warn: () => {}, jobs }); report(); return memory; }, activate: () => {
       atomicWrite(join(dir, 'imports', `${job.id}.json`), JSON.stringify({ ...job, completed: new Date().toISOString() }, null, 2));
-      atomicWrite(join(dir, 'active-memory.json'), JSON.stringify(job.target));
+      atomicWrite(join(dir, ACTIVE_MEMORY), JSON.stringify(job.target));
     } }, signal);
     finish(); report(); return job;
   } finally { clearInterval(timer); await memory?.close(); } // Also when `open` fails after opening: a throwing progress callback.

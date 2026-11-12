@@ -315,7 +315,7 @@ function unquote(value: string): string {
   if (/^'.*'$/.test(value)) return value.slice(1, -1).replaceAll("''", "'");
   return value;
 }
-async function readMemory(c: Conversation, signal?: AbortSignal): Promise<{ entries: ImportedEntry[]; warnings: string[] }> {
+async function readClaudeMemory(c: Conversation, signal?: AbortSignal): Promise<{ entries: ImportedEntry[]; warnings: string[] }> {
   let content: string, modified: Date;
   try { [content, { mtime: modified }] = await Promise.all([readFile(c.file, { encoding: 'utf8', signal }), stat(c.file)]); } catch (error) {
     signal?.throwIfAborted();
@@ -353,7 +353,7 @@ async function rewound(file: string, signal?: AbortSignal): Promise<Set<string>>
 }
 export async function readConversation(c: Conversation, signal?: AbortSignal): Promise<{ entries: ImportedEntry[]; warnings: string[] }> {
   signal?.throwIfAborted();
-  if (c.source === 'claude-memory') return readMemory(c, signal);
+  if (c.source === 'claude-memory') return readClaudeMemory(c, signal);
   const entries: ImportedEntry[] = [], warnings: string[] = [];
   const add = (id: string, kind: Kind, value: string, date: string, identity = value) => { const entry = imported(c, id, kind, value, date, identity); if (entry) entries.push(entry); };
   if (c.source === 'chatgpt') {

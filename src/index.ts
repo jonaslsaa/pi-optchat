@@ -8,8 +8,8 @@ import { parseArgs, parseSessionEntries, parseSkillBlock, type ExtensionAPI, typ
 import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
-import { createCompressor, type ModelChoice } from './compactor.ts';
-import { createProfile, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, memoryDirectory, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
+import { createCompressor } from './compactor.ts';
+import { createProfile, describeOwner, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, memoryDirectory, profilePath, type ModelChoice, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC } from './core/prompts.ts';
 import { MASTER, modelsHint } from './prompts.ts';
 import { cachePayload, record } from './core/cache.ts';
@@ -257,7 +257,7 @@ export default function optchat(pi: ExtensionAPI) {
     // so session_start can arrive again for the session this profile already serves. Taking the lock again would meet our own socket.
     // Only the same session is kept: another session without a session_shutdown still fails loudly below.
     if (active?.name === name && active.session === ctx.sessionManager.getSessionId()) { await restoreMain(ctx, active); status(ctx); return; }
-    const unlock = await holdProfile(storeFor(dir), dir, name, `${name} · PID ${process.pid} · ${hostname()} · ${ctx.cwd}`, warning => ctx.ui.notify(warning, 'warning'));
+    const unlock = await holdProfile(storeFor(dir), dir, name, describeOwner({ profile: name, pid: process.pid, host: hostname(), cwd: ctx.cwd }), warning => ctx.ui.notify(warning, 'warning'));
     let openingMemory: Memory | undefined;
     try {
       const config = loadConfig(dir);

@@ -2,8 +2,8 @@ import { clampThinkingLevel, isRetryableAssistantError, type Api, type Model } f
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { createCompressor as compressor, type CompressorOptions } from './core/compactor.ts';
+import type { ModelChoice } from './profiles.ts';
 
-export interface ModelChoice { provider: string; model: string; thinking: ThinkingLevel }
 /** A level the model can't take would be sent as no level, which Sonnet 5.5 runs at high effort; Pi's own sessions clamp the same way. */
 export const reasoningFor = (model: Model<Api>, level: ThinkingLevel) => {
   const thinking = clampThinkingLevel(model, level);

@@ -3,7 +3,6 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 import { createConnection, createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import type { ModelChoice } from './compactor.ts';
 import { record } from './core/cache.ts';
 import { atomicWrite } from './store.ts';
 import type { Store } from './core/store.ts';
@@ -12,6 +11,8 @@ import { DEFAULT_SETTINGS, readSettings, type Settings } from './settings.ts';
 export const isWindows = process.platform === 'win32';
 const PIPE_PREFIX = '\\\\.\\pipe\\';
 
+export const THINKING = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export interface ModelChoice { provider: string; model: string; thinking: typeof THINKING[number] }
 export const dataHome = () => resolve(process.env.OPTCHAT_HOME ?? join(homedir(), '.optchat'));
 /** `main` is the last model and thinking level picked in Pi while this profile was open, recorded on the first open too. */
 export interface ProfileConfig extends Settings { compactor: ModelChoice; subagent: ModelChoice; main?: ModelChoice }
@@ -20,7 +21,6 @@ export const defaults: ProfileConfig = {
   subagent: { provider: 'anthropic', model: 'claude-opus-5-5', thinking: 'high' },
   ...DEFAULT_SETTINGS,
 };
-export const THINKING = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 const PROFILE_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 /** `home` is OptChat's data directory, `dataHome()` unless a host passes its own. */
 export function profilePath(name: string, home = dataHome()) {
@@ -31,6 +31,8 @@ export function listProfiles(home = dataHome()) {
   const root = join(home, 'profiles');
   return existsSync(root) ? readdirSync(root, { withFileTypes: true }).filter(f => f.isDirectory() && PROFILE_NAME.test(f.name)).map(f => f.name).sort() : [];
 }
+/** The file in a profile that names its active memory generation. */
+export const ACTIVE_MEMORY = 'active-memory.json';
 /** A memory generation's directory in profile `dir`: `.` is the profile itself, the others are imports' `memories/<id>`. */
 export function generationPath(dir: string, name: string) {
   if (name !== '.' && !/^memories\/[a-f0-9-]{36}$/.test(name)) throw new Error('Invalid memory generation path.');
@@ -38,7 +40,7 @@ export function generationPath(dir: string, name: string) {
 }
 /** The generation `active-memory.json` points at, which holds the profile's `main/` and `tree/`; without a pointer, the profile itself. */
 export function memoryDirectory(dir: string): string {
-  const file = join(dir, 'active-memory.json');
+  const file = join(dir, ACTIVE_MEMORY);
   if (!existsSync(file)) return dir;
   const name: unknown = JSON.parse(readFileSync(file, 'utf8'));
   if (typeof name !== 'string') throw new Error('Invalid active memory pointer.');
@@ -109,22 +111,32 @@ function existingSocket(path: string): { stat: Stats; removable: true } | { remo
 /** Removes a dead socket left by a previous owner. */
 export function removeStaleSocket(path: string) { if (existingSocket(path)?.removable) unlinkSync(path); }
 
-/** Asks the current owner who holds the socket; nothing answering means the entry is stale. A Windows pipe that has disappeared reports ENOENT instead of ECONNREFUSED. */
+/** Asks the current owner who holds the socket; nothing answering means the entry is stale, and a socket or pipe that is gone (ENOENT) means nobody holds it. */
 function readOwner(path: string) {
   return new Promise<string | undefined>((resolve, reject) => {
     const socket = createConnection(path); let message = '';
     socket.setTimeout(1500, () => { socket.destroy(); reject(new Error('Profile lock did not respond; refusing to steal it.')); });
     socket.on('data', data => { message += data.toString(); });
     socket.on('end', () => resolve(message || 'another Pi instance'));
-    socket.on('error', e => { if ('code' in e && (e.code === 'ECONNREFUSED' || isWindows && e.code === 'ENOENT')) resolve(undefined); else reject(e); });
+    socket.on('error', e => { if ('code' in e && (e.code === 'ECONNREFUSED' || e.code === 'ENOENT')) resolve(undefined); else reject(e); });
   });
 }
 
-/** Who holds the profile in `dir`, as its holder described itself (Pi: `<profile> · PID <pid> · <host> · <cwd>`), without taking
- * it; undefined when nobody does. Rejects when the holder doesn't answer within 1.5 seconds, so a hung Pi still counts as busy. */
-export async function profileOwner(dir: string) {
-  const path = profileSocket(dir);
-  return isWindows || existsSync(path) ? readOwner(path) : undefined;
+/** The Pi holding a profile. */
+export interface Owner { profile: string; pid: number; host: string; cwd: string }
+/** How Pi describes itself on the lock, which "Profile already running: …" shows. A profile name and a host name can't contain
+ * " · ", so `OWNER` reads it back even when the cwd does. */
+export const describeOwner = ({ profile, pid, host, cwd }: Owner) => `${profile} · PID ${pid} · ${host} · ${cwd}`;
+const OWNER = /^([a-z0-9_-]+) · PID (\d+) · (.*?) · ([\s\S]*)$/;
+/** Who holds the profile in `dir`, without taking it; undefined when nobody does. Rejects when the holder doesn't answer within
+ * 1.5 seconds or describes itself some other way, so either still counts as busy. */
+export async function profileOwner(dir: string): Promise<Owner | undefined> {
+  const description = await readOwner(profileSocket(dir));
+  if (description === undefined) return undefined;
+  const match = OWNER.exec(description);
+  if (!match) throw new Error(`Profile is held by ${description}.`);
+  const [, profile, pid, host, cwd] = match;
+  return { profile, pid: Number(pid), host, cwd };
 }
 
 /** OS-owned socket lifetime, no timeout-based stealing of a busy profile. */

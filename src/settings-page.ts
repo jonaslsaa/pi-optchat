@@ -1,8 +1,7 @@
 import { Container, fuzzyFilter, getKeybindings, Input, SelectList, SettingsList, Spacer, Text, type Component, type SelectItem, type SettingItem } from '@earendil-works/pi-tui';
 import { DynamicBorder, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
-import { defaults, THINKING, type ProfileConfig } from './profiles.ts';
+import { defaults, THINKING, type ModelChoice, type ProfileConfig } from './profiles.ts';
 import { invalid, isNumberKey, percent, SETTING_KEYS, SETTINGS, type NumberKey, type SettingKey } from './settings.ts';
-import type { ModelChoice } from './compactor.ts';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 
 type Role = 'compactor' | 'subagent';

@@ -1,6 +1,6 @@
 import { Box, SelectList, Spacer, Text } from '@earendil-works/pi-tui';
 import type { ExtensionContext, Theme } from '@earendil-works/pi-coding-agent';
-import type { ModelChoice } from './compactor.ts';
+import type { ModelChoice } from './profiles.ts';
 import { count, oneLine } from './inspector.ts';
 import { frame, showModel } from './settings-page.ts';
 

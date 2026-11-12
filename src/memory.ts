@@ -20,7 +20,8 @@ export class Memory extends CoreMemory {
 }
 
 /** The memory in `directory` as its files are now, for a process that must not change them, such as a connected window or another
- * app: it creates nothing, writes nothing, summarizes nothing and takes no lock, so the owning Pi may keep writing meanwhile. */
+ * app: it creates nothing, writes nothing, summarizes nothing and takes no lock, so the owning Pi may keep writing meanwhile. A
+ * directory that doesn't exist reads as an empty memory. */
 export async function readMemory(directory: string) {
   const store = new FileReader(directory, () => {});
   const memory = new Memory({ directory, store, saved: store.load() }, () => Promise.reject(new Error('This memory is read-only.')), () => {});
