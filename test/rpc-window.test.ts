@@ -41,7 +41,7 @@ async function rpc(name: string, connect?: string, mode: 'rpc' | 'json' = 'rpc',
   const sent: Sent[] = [], notes: string[] = [], errors: string[] = [], roles: Role[] = [];
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
   runtime.registerProvider('fixture', fixtureProvider(sent));
-  const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+  const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 1 }, cacheWarming: 'off', retry: { enabled: false } });
   const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
     noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
   await loader.reload();
@@ -158,6 +158,19 @@ test('a completed window\'s session resumed in a new process starts a new conver
     assert.ok(role?.role === 'window' && !role.completed);
     assert.equal(await window.ask('Second topic.'), 'Reply: Second topic.');
     assert.equal(window.sent.at(-1)!.messages.length, 1, 'the completed conversation stays out of its context');
+  } finally { await window.close(); await owner.close(); }
+});
+
+test('Pi\'s own compaction in a window keeps its conversation going with the view on the newest request', async () => {
+  const name = profile(), owner = await rpc(name), window = await rpc(name);
+  try {
+    await owner.ask('The colour is teal.');
+    await window.ask('One.'); await window.ask('Two.'); await window.ask('Three.');
+    await window.session.compact();
+    assert.equal(await window.ask('Four?'), 'Reply: Four?');
+    const request = window.sent.at(-1)!.messages, at = request.findIndex(m => m.includes('<chat>'));
+    assert.ok(request.length < 7, 'compacted');
+    assert.ok(at >= 0 && request[at].includes('Four?') && request[at].includes('The colour is teal.'), 'the view, on the newest request');
   } finally { await window.close(); await owner.close(); }
 });
 

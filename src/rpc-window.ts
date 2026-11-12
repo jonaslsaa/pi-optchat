@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { BeforeAgentStartEvent, ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { readMemory, type Memory } from './memory.ts';
+import { fingerprint } from './store.ts';
 import { instructions, loadConfig, memoryDirectory, profilePath } from './profiles.ts';
 import { allowSearch, IMPORT_GUIDANCE, SEARCH_DOC, VIEW_DOC } from './core/prompts.ts';
 import { WINDOW, WINDOW_STEERABLE, windowHandoff } from './prompts.ts';
@@ -38,7 +39,12 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
   const ended = ctx.sessionManager.getEntries().findLast(entry => entry.type === 'custom' && entry.customType === COMPLETED_TYPE);
   const after = ended ? Date.parse(ended.timestamp) : undefined;
   if (!existsSync(dir)) throw new Error(`Profile ${profile} does not exist.`);
-  let memory = await readMemory(memoryDirectory(dir));
+  /** `read`: the files' fingerprint when `memory` was read, taken before it, so a change meanwhile is read next time. */
+  let read = fingerprint(memoryDirectory(dir)), memory = await readMemory(memoryDirectory(dir));
+  const refresh = async () => {
+    const directory = memoryDirectory(dir), now = fingerprint(directory);
+    if (now !== read) { memory = await readMemory(directory); read = now; }
+  };
   type Connection = Awaited<ReturnType<typeof connectWindow>>;
   let connection: Connection | undefined, registered = false, queued = false, completed = false, closed = false;
   /** The first request, once there is one: until then there is nothing to register or hand off. */
@@ -130,8 +136,9 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
       const config = loadConfig(dir);
       task ??= event.messageType === 'user' ? event.prompt : textContent(event.message.content);
       if (!handingOff) {
-        // Read while the owner may be writing: a record it hasn't finished can fail the read, and the last snapshot stays.
-        try { memory = await readMemory(memoryDirectory(dir)); } catch {}
+        // Read again only when the files changed. Read while the owner may be writing: a record it hasn't finished can fail the
+        // read, and the last snapshot stays.
+        try { await refresh(); } catch {}
         const fresh = memory.render();
         if (fresh !== view || anchor === undefined) { view = fresh; anchoring = true; }
       }

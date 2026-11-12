@@ -183,6 +183,8 @@ export class AgentView implements Component, Focusable {
   private overflow = 0;
   private drawn = { lines: 0, width: 0 }; // Last frame, so new output doesn't move what you're reading while scrolled up.
   private saved?: AgentMessage[];
+  /** The transcript `saved` was read from: a window in its own process gets one only when it ends (`Children.keepTranscript`). */
+  private savedFile?: string;
   private wasLive = false;
   private confirmStop = false;
   private notice = '';
@@ -253,7 +255,8 @@ export class AgentView implements Component, Focusable {
   private messages(run: RunInfo) {
     const { children } = this.options, live = children.live(run.id);
     // Saved transcripts are read once; live ones come from memory each frame, plus one final read when the run ends.
-    if (live || this.wasLive || !this.saved) {
+    if (live || this.wasLive || !this.saved || this.savedFile !== run.sessionFile) {
+      this.savedFile = run.sessionFile;
       try { this.saved = children.messages(run.id); }
       catch (error) { this.notice = `Transcript unavailable: ${String(error)}`; this.saved = []; }
     }
