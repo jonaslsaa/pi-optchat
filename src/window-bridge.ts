@@ -1,5 +1,5 @@
 import { chmodSync } from 'node:fs';
-import { createConnection, createServer, type Socket } from 'node:net';
+import { createServer, type Socket } from 'node:net';
 import { INTERRUPTED, type Children } from './agents.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './core/cache.ts';
@@ -7,54 +7,12 @@ import { checkSocketPath, isWindows, profileSocket, removeStaleSocket } from './
 import { textContent } from './transcript.ts';
 import { isActiveRun, isRemoteWindow, type RunInfo } from './runs.ts';
 import { HANDOFF_REQUEST } from './prompts.ts';
+import { connectWindow, wire, type Action, type AttachableAgent, type LiveState, type WindowMessage } from './window-client.ts';
+import type { AssistantMessage, UserMessage } from '@earendil-works/pi-ai';
 
-/** `register` and `handoff` are a window whose agent runs in its own process (an RPC host's): it registers once it has a request,
- * and `handoff` ends it with the handoff it wrote. A window that drops its connection without one ended without /complete. */
-const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'withdraw', 'complete', 'register', 'handoff'] as const;
+const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 /** What a registered window may still ask: its agent and conversation are its own. */
 const REMOTE_ACTIONS: readonly Action[] = ['handoff', 'tell-main'];
-type Action = typeof ACTIONS[number];
-const isAction = (value: unknown): value is Action => ACTIONS.some(action => action === value);
-interface Request { kind: 'request'; id: number; action: Action; text?: string; cwd?: string; activeOnly?: boolean }
-interface Reply { kind: 'reply'; id: number; error?: string; text?: string }
-/** A tool the subagent is running right now, with its streamed output so far. */
-export interface LiveTool { id: string; name: string; args: unknown; output?: unknown; started: number }
-/** What the subagent is doing between finished messages: its streaming reply, running tools, and your messages it has not read yet. */
-export interface LiveState { state: string; model: string; streaming?: AgentMessage; tools: LiveTool[]; agents?: number; queued?: string[] }
-/**
- * `from` marks the conversation itself (your messages and the agent's replies); other messages have no `from`.
- * `message` carries the agent's own messages (replies with tool calls, tool results) so the window can draw them with Pi's components.
- */
-export interface WindowEvent {
-  kind: 'event'; name: 'started' | 'message' | 'status' | 'finished'; text: string; from?: 'user' | 'agent';
-  message?: AgentMessage; live?: LiveState;
-  /** On `started` in an attached window: the subagent's spawn title, if it has one. */
-  title?: string;
-}
-type Frame = Request | Reply | WindowEvent;
-const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
-const isMessage = (value: unknown): value is AgentMessage => record(value) && (value.role === 'assistant' || value.role === 'toolResult') && Array.isArray(value.content);
-const isLive = (value: unknown): value is LiveState => record(value) && typeof value.state === 'string' && typeof value.model === 'string'
-  && (value.streaming === undefined || isMessage(value.streaming))
-  && Array.isArray(value.tools) && value.tools.every(t => record(t) && typeof t.id === 'string' && typeof t.name === 'string' && typeof t.started === 'number')
-  && (value.agents === undefined || typeof value.agents === 'number')
-  && (value.queued === undefined || Array.isArray(value.queued) && value.queued.every(text => typeof text === 'string'));
-function parse(value: unknown): Frame {
-  if (!record(value)) throw new Error('Invalid window message');
-  const name = value.name, action = value.action, from = value.from;
-  if (value.kind === 'event' && (name === 'started' || name === 'message' || name === 'status' || name === 'finished') && typeof value.text === 'string')
-    return { kind: 'event', name, text: value.text, from: from === 'user' || from === 'agent' ? from : undefined,
-      message: isMessage(value.message) ? value.message : undefined, live: isLive(value.live) ? value.live : undefined,
-      title: typeof value.title === 'string' ? value.title : undefined };
-  if (typeof value.id !== 'number' || !Number.isSafeInteger(value.id)) throw new Error('Invalid request ID');
-  if (value.kind === 'reply' && (value.error === undefined || typeof value.error === 'string') && (value.text === undefined || typeof value.text === 'string'))
-    return { kind: 'reply', id: value.id, error: value.error, text: value.text };
-  if (value.kind === 'request' && isAction(action)
-    && (value.text === undefined || typeof value.text === 'string') && (value.cwd === undefined || typeof value.cwd === 'string')
-    && (value.activeOnly === undefined || typeof value.activeOnly === 'boolean'))
-    return { kind: 'request', id: value.id, action, text: value.text, cwd: value.cwd, activeOnly: value.activeOnly as boolean | undefined };
-  throw new Error('Invalid window message');
-}
 const SHORTENED = '\n[Display shortened; full text is saved in the transcript.]';
 /** Stays under the 4 MB frame bound even when JSON escapes some characters. */
 const ANSWER_LIMIT = 1_000_000;
@@ -65,7 +23,8 @@ function clipContent(content: unknown): unknown {
   return content.map(part => !record(part) ? part : part.type === 'text' && typeof part.text === 'string' ? { ...part, text: shorten(part.text, 50_000) }
     : part.type === 'image' ? { type: 'text', text: '[image]' } : part);
 }
-const clip = (message: AgentMessage) => ({ ...message, content: clipContent('content' in message ? message.content : []) }) as AgentMessage;
+const isAssistant = (message: AgentMessage | undefined): message is AssistantMessage => message?.role === 'assistant';
+const clip = <M extends WindowMessage>(message: M) => ({ ...message, content: clipContent(message.content) }) as M;
 const clipOutput = (output: unknown) => record(output) ? { ...output, content: clipContent(output.content) } : output;
 /**
  * Huge tool arguments (a large file write) would choke the socket; the window then falls back to text.
@@ -73,27 +32,6 @@ const clipOutput = (output: unknown) => record(output) ? { ...output, content: c
  * instead of throwing inside the status timer, which would take the owner's Pi down with it.
  */
 const fits = (value: unknown) => { try { return JSON.stringify(value).length < 1_000_000; } catch { return false; } };
-
-/** Local JSONL protocol, bounded before parsing. On POSIX the socket file is mode 0600, so only its OS user can connect; a Windows named pipe has no file permissions, so its hashed profile name is the only separation. */
-function wire(socket: Socket, receive: (frame: Frame) => void) {
-  let buffer = '';
-  socket.setEncoding('utf8');
-  socket.on('error', () => {});
-  socket.on('data', (text: string) => {
-    buffer += text;
-    if (buffer.length > 4_000_000) { socket.destroy(); return; }
-    let newline: number;
-    while ((newline = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
-      try { receive(parse(JSON.parse(line))); } catch { socket.destroy(); return; }
-    }
-  });
-  return (frame: Frame) => {
-    if (socket.destroyed) return;
-    if (socket.writableLength > 4_000_000) { socket.destroy(); return; }
-    socket.write(JSON.stringify(frame) + '\n');
-  };
-}
 
 /** Call only while holding the profile lock. The owner hosts every child session. */
 export async function serveWindows(directory: string, children: Children, available: () => boolean,
@@ -106,7 +44,7 @@ export async function serveWindows(directory: string, children: Children, availa
   const server = createServer(socket => {
     if (closing) { socket.destroy(); return; }
     connections.add(socket);
-    let child: string | undefined, attached = false, remote = false, cursor = 0, firstUser = true, lastStatus = '', ending = false;
+    let child: string | undefined, attached = false, remote = false, cursor = 0, firstUser = true, lastStatus = '', ending = false, finished = false;
     let finalMessages: AgentMessage[] | undefined;
     const controller = new AbortController();
     let queue = Promise.resolve();
@@ -115,7 +53,8 @@ export async function serveWindows(directory: string, children: Children, availa
       if (frame.kind !== 'request') { socket.destroy(); return; }
       queue = queue.then(async () => {
         try {
-          if (socket.destroyed || ending) throw new Error('Conversation is closing');
+          // An attached agent that finished can still be resumed, by the app's client only: Pi's terminal attach just reads it.
+          if (socket.destroyed || ending && !(finished && frame.action === 'resume')) throw new Error('Conversation is closing');
           if (frame.action === 'list-agents') {
             const agents: AttachableAgent[] = available() ? children.history.list()
               .filter(info => !info.connected && !!children.live(info.id)
@@ -178,6 +117,21 @@ export async function serveWindows(directory: string, children: Children, availa
               track(interrupting.then(() => {}));
               send({ kind: 'reply', id: frame.id, text: await Promise.race([interrupting, undefined]) }); return;
             }
+            // The Agents page's stop: the agent and its own agents end, and its report says the user stopped it. Replies once
+            // started, as interrupt does.
+            if (frame.action === 'stop') {
+              const stopping = children.stop(child);
+              track(stopping);
+              await Promise.race([stopping, undefined]);
+              send({ kind: 'reply', id: frame.id }); return;
+            }
+            if (frame.action === 'resume') {
+              if (!attached || children.live(child)) throw new Error(`Only a finished agent you attached to resumes; ${child} is still running, so say reaches it`);
+              if (!frame.text?.trim()) throw new Error('Message is empty');
+              await children.resumeByUser(child, frame.text);
+              ending = finished = false; finalMessages = undefined; // Follow it again, from where the view left off.
+              send({ kind: 'reply', id: frame.id }); return;
+            }
             if (frame.action === 'withdraw') { send({ kind: 'reply', id: frame.id, text: children.withdraw(child) }); return; }
             if (frame.action === 'complete') {
               const live = children.live(child);
@@ -201,7 +155,7 @@ export async function serveWindows(directory: string, children: Children, availa
     const drainMessages = (messages: AgentMessage[], info: RunInfo) => {
       // The window's handoff, written once the conversation ended, is for the main agent: the window shows the conversation only.
       const end = info.handoff ? messages.findIndex(message => message.role === 'user' && textContent(message.content).startsWith(HANDOFF_REQUEST)) : -1;
-      const displayable = (end < 0 ? messages : messages.slice(0, end)).filter(message => message.role === 'user' || message.role === 'assistant' || message.role === 'toolResult');
+      const displayable = (end < 0 ? messages : messages.slice(0, end)).filter((message): message is UserMessage | WindowMessage => message.role === 'user' || message.role === 'assistant' || message.role === 'toolResult');
       // An attachment may replay hours of tool output. Pace the history instead of overflowing the bounded wire
       // or starving the owner's event loop. The next status tick continues from the same cursor, which stays valid because
       // retained messages are only ever appended (unlike Pi's projection, which compaction and retries replace).
@@ -243,7 +197,7 @@ export async function serveWindows(directory: string, children: Children, availa
       const preview = working?.streaming && 'content' in working.streaming ? textContent(working.streaming.content).slice(-2000) : '';
       const text = `${info.state === 'waiting' ? 'Awaiting user or child reports' : info.state} · ${info.model}\n${working ? [...working.tools.values()].map(t => t.name).join(', ') : ''}\n${preview}`;
       let state: LiveState = { state: info.state, model: info.model,
-        streaming: working?.streaming?.role === 'assistant' ? clip(working.streaming) : undefined,
+        streaming: isAssistant(working?.streaming) ? clip(working.streaming) : undefined,
         tools: working ? [...working.tools].map(([id, t]) => ({ id, name: t.name, args: t.args, output: clipOutput(t.output), started: t.started })) : [],
         // A finished child counts until its report has reached this agent, so the agent never looks idle in between.
         agents: [...children.history.records.values()].filter(run => run.parentId === child && (isActiveRun(run) || children.live(run.id))).length,
@@ -254,7 +208,7 @@ export async function serveWindows(directory: string, children: Children, availa
       if (!live && (attached && !isActiveRun(info) || info.handoff?.delivered)) {
         try { if (!drainMessages(finalMessages ??= children.retained(child), info)) return; }
         catch (error) { send({ kind: 'event', name: 'message', text: `Could not read the final transcript: ${errorText(error)}` }); }
-        ending = true;
+        ending = true; finished = attached;
         send({ kind: 'event', name: 'finished', text: attached ? `Agent ${child} is ${info.state}. Its report goes to its original parent; /complete closes only this view.` : info.handoff?.text ?? 'Conversation ended.' });
       }
     }, 150);
@@ -280,58 +234,6 @@ export async function serveWindows(directory: string, children: Children, availa
     // A socket's close handler adds its cleanup after this point, so drain the tracked work instead of snapshotting it.
     while (work.size) await Promise.allSettled([...work]);
   };
-}
-
-export async function connectWindow(directory: string, event: (event: WindowEvent) => void, disconnected: () => void, connectTimeout = 5000) {
-  const socket = createConnection(profileSocket(directory, 'windows'));
-  let next = 0;
-  const pending = new Map<number, { resolve: (text?: string) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
-  const send = wire(socket, frame => {
-    if (frame.kind === 'event') { event(frame); return; }
-    if (frame.kind !== 'reply') { socket.destroy(); return; }
-    const request = pending.get(frame.id); if (!request) return;
-    clearTimeout(request.timer); pending.delete(frame.id);
-    if (frame.error) request.reject(new Error(frame.error)); else request.resolve(frame.text);
-  });
-  socket.on('close', () => {
-    for (const request of pending.values()) { clearTimeout(request.timer); request.reject(new Error('Connection to the original Pi window was lost')); }
-    pending.clear(); disconnected();
-  });
-  await new Promise<void>((resolve, reject) => {
-    socket.once('connect', resolve); socket.once('error', reject);
-    socket.setTimeout(connectTimeout, () => socket.destroy(new Error('Profile owner did not respond')));
-  }).catch((error: unknown) => {
-    const code = record(error) ? error.code : undefined;
-    throw code === 'ENOENT' || code === 'ECONNREFUSED'
-      ? new Error('No running OptChat session on this profile accepts connections. A headless run (pi -p) holding it does not accept connections; once it exits, open the profile instead.', { cause: error }) : error;
-  });
-  socket.setTimeout(0);
-  return {
-    async request(action: Action, text?: string, cwd?: string, options: { timeout?: number; activeOnly?: boolean } = {}) {
-      if (socket.destroyed) throw new Error('The original Pi window is disconnected');
-      if (text && text.length > 256_000) throw new Error('Connected-window messages are limited to 256,000 characters');
-      const id = next++;
-      return await new Promise<string | undefined>((resolve, reject) => {
-        const timer = setTimeout(() => { pending.delete(id); reject(new Error('Owner response timed out; closing this connection')); socket.destroy(); }, options.timeout ?? 120_000);
-        pending.set(id, { resolve, reject, timer }); send({ kind: 'request', id, action, text, cwd, activeOnly: options.activeOnly });
-      });
-    },
-    close() { socket.destroy(); },
-  };
-}
-
-export interface AttachableAgent { id: string; task: string; title?: string; state: string }
-/** Query the owner, not run metadata on disk: it knows which main/terminal views are actually open. */
-export async function listAttachableAgents(directory: string, timeout = 2000): Promise<AttachableAgent[]> {
-  const deadline = Date.now() + timeout;
-  const connection = await connectWindow(directory, () => {}, () => {}, timeout);
-  try {
-    const agents: unknown = JSON.parse(await connection.request('list-agents', undefined, undefined, { timeout: Math.max(1, deadline - Date.now()) }) ?? '[]');
-    if (!Array.isArray(agents) || !agents.every(agent => record(agent) && typeof agent.id === 'string'
-      && typeof agent.task === 'string' && (agent.title === undefined || typeof agent.title === 'string') && (agent.state === 'running' || agent.state === 'waiting' || agent.state === 'paused')))
-      throw new Error('Invalid background agent list from the profile owner');
-    return agents;
-  } finally { connection.close(); }
 }
 
 /**

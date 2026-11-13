@@ -8,7 +8,7 @@ import { instructions, loadConfig, memoryDirectory, profilePath } from './profil
 import { allowSearch, IMPORT_GUIDANCE, SEARCH_DOC, VIEW_DOC } from './core/prompts.ts';
 import { WINDOW, WINDOW_STEERABLE, windowHandoff } from './prompts.ts';
 import { placeView } from './core/messages.ts';
-import { connectWindow } from './window-bridge.ts';
+import { connectWindow } from './window-client.ts';
 import { HANDOFF_TIMEOUT, handoffText } from './handoff.ts';
 import { queueWindow, readRun, runMessages, unqueueWindow, type FinishReason, type RemoteWindow } from './runs.ts';
 import { textContent } from './transcript.ts';

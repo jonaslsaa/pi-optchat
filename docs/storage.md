@@ -21,7 +21,7 @@ Memory reaches disk through one seam, `Store` in `src/core/store.ts` (Pi's `File
 
 ## Reading profiles from another app
 
-`pi-optchat/files` lets another app on the same machine, such as a GUI, read profiles while Pi runs them. Apart from `createProfile`, it writes nothing, and it loads only Node at runtime. Like `./core`, it ships compiled; its declarations name pi-ai's types, so without pi-ai installed, use `skipLibCheck`.
+`pi-optchat/files` lets another app on the same machine, such as a GUI, read profiles while Pi runs them. Apart from `createProfile` and the agent controls below, it writes nothing, and it loads only Node at runtime. Like `./core`, it ships compiled; its declarations name pi-ai's types, so without pi-ai installed, use `skipLibCheck`.
 
 - `dataHome()`, `listProfiles(home?)`, `profilePath(name, home?)`: the data directory (`OPTCHAT_HOME` or `~/.optchat`), its profiles, and one's directory. `home` defaults to `dataHome()`.
 - `createProfile(name, home?)`: a new profile with the default config and AGENTS.md, as `/optchat profile` creates one. It throws if the profile exists or the name isn't valid.
@@ -31,6 +31,11 @@ Memory reaches disk through one seam, `Store` in `src/core/store.ts` (Pi's `File
 - `readImage(memoryDir, name)`: one kept image, `{ mimeType, data }`, without reading the memory.
 - `fingerprint(memoryDir)`: a string that changes whenever the memory does, so an app knows when to read it again.
 - `profileOwner(profileDir)`: the Pi holding the profile, `{ profile, pid, host, cwd }`, or `undefined`. It asks the lock and never takes it. It rejects only when a holder is there but doesn't answer in 1.5 s, or describes itself another way: either way the profile is busy.
+
+It can also reach a profile's subagents through the Pi that owns it, over that Pi's connected-window socket, as the user would from the Agents page:
+
+- `listAttachableAgents(profileDir)`: the live subagents (`AttachableAgent[]`: id, task, title, state); `[]` when no Pi answers within 2 s.
+- `attachAgent(profileDir, id, onEvent, onDisconnect?)`: opens any subagent by its exact ID (a finished one too, from `readRuns`), or throws. Its conversation so far, then live, arrives as `WindowEvent`s; a `status` event carries `LiveState` (state, model, the streaming reply, running tools, queued messages). The handle has `say(text)` (a message from the user to a live agent), `resume(text)` (the same to a finished one, which goes on in its earlier conversation as the main agent's `tell` would resume it; only the main agent's own subagents), `interrupt()`, `stop()` (it ends and its parent gets the usual "Stopped by the user" report) and `close()`, which detaches only. A finished agent sends a `finished` event, and another one after a resume.
 
 ## Windows differences
 

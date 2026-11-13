@@ -1,7 +1,7 @@
 import { getMarkdownTheme, keyText, UserMessageComponent, type ExtensionAPI, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
 import { Container, Editor, getKeybindings, Loader, Markdown, Spacer, TruncatedText, TuiAltScreen, TuiMainScreen, type Component, type TUI } from '@earendil-works/pi-tui';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { connectWindow, type LiveState, type WindowEvent } from './window-bridge.ts';
+import { connectWindow, type LiveState, type WindowEvent } from './window-client.ts';
 import { profilePath } from './profiles.ts';
 import { TranscriptView } from './agent-view.ts';
 import { isReport, reportBox } from './report-message.ts';

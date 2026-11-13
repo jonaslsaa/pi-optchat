@@ -568,6 +568,12 @@ export class Children {
     if (guidance.state === 'undelivered') throw new Error(`${id} finished before it read the message. Tell it again to resume it.`);
     return 'Message queued for the next tool boundary.';
   }
+  /** The user's message to a finished subagent from another app (pi-optchat/files' attachAgent): it resumes as a tell from the main agent would, but the message is the user's. */
+  async resumeByUser(id: string, message: string) {
+    if (this.deleting.has(id)) throw new Error(`${id} is being deleted by the user.`);
+    if (!this.history.records.has(id)) throw new Error(`No subagent ${id}.`);
+    return this.track(this.resume(id, message, undefined, 'user'));
+  }
   /**
    * The user's Ctrl+C, never destructive: aborts the current step. With guidance queued, the run continues at once with it;
    * with none, it pauses until the next message (from the user or a tell). Only stop() ends a run.
@@ -624,7 +630,7 @@ export class Children {
     return work;
   }
   /** Reopens a finished child from its saved transcript, same ID, parent and model, and gives it a new message. */
-  private async resume(id: string, message: string, caller: string | undefined) {
+  private async resume(id: string, message: string, caller: string | undefined, from: Guidance['from'] = 'manager') {
     const run = this.history.records.get(id)!, text = message.trim();
     if (!text) throw new Error('Message is empty.');
     if (run.connected) throw new Error(`${id} was a connected conversation with the user. It has ended and its handoff was delivered, so it cannot be resumed. Spawn a new subagent instead.`);
@@ -657,8 +663,9 @@ export class Children {
       const cut = [...this.history.records.values()].filter(r => r.parentId === id && r.cutOff).map(r => r.id);
       const prompt = cutOffChildren(text, cut);
       const info: RunInfo = { ...rest, state: 'running', started: Date.now(), parentSession: this.options.parentSession ?? run.parentSession,
-        guidance: [...run.guidance, { text: prompt, date: Date.now(), state: 'queued', from: 'manager' }] };
+        guidance: [...run.guidance, { text: prompt, date: Date.now(), state: 'queued', from }] };
       try { this.save(info); } catch (error) { this.history.records.set(id, run); await this.shutdown(session); this.dispose(session); throw error; }
+      if (from === 'user') this.memory.append('user', `Direct guidance to subagent [${id}]: ${text}`);
       const live: LiveRun = { session, info, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [], steering: Promise.resolve() };
       this.running.set(id, live);
       this.launching--; reserved = false;

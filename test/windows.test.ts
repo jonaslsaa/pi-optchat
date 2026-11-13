@@ -14,7 +14,9 @@ import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { emptyUsage, UsageLedger } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
-import { serveWindows, connectWindow, joinHeadless, listAttachableAgents, type WindowEvent } from '../src/window-bridge.ts';
+import { serveWindows, joinHeadless } from '../src/window-bridge.ts';
+import { connectWindow, listAttachableAgents, type WindowEvent } from '../src/window-client.ts';
+import { attachAgent } from '../src/files.ts';
 import { profileSocket, lockProfile, createProfile, profilePath } from '../src/profiles.ts';
 import { openConnectedWindow, registerConnectedRenderer } from '../src/connected-window.ts';
 import { createHandoffSummarizer } from '../src/handoff.ts';
@@ -1266,4 +1268,39 @@ test('a handoff deferred by /reload is written by the reopened window on the nex
       assert.equal(f.summaries.length, 0);
     } finally { await restored.close(); }
   } finally { await f.close(); }
+});
+
+test('another app attaches through pi-optchat/files and stops a running agent: it ends and its parent gets the usual report', async () => {
+  const f = await fixture();
+  const events: WindowEvent[] = [];
+  const close = await serveWindows(f.dir, f.children, () => true, async () => {});
+  const [id] = await f.children.spawn([{ task: 'hold work until stopped' }], f.dir);
+  await until(() => !!f.children.live(id)?.streaming);
+  const agent = await attachAgent(f.dir, id, e => events.push(e));
+  try {
+    await until(() => events.some(e => e.live?.state === 'running'));
+    await agent.stop();
+    await until(() => f.children.history.records.get(id)?.state === 'stopped' && f.reports.some(t => t.includes(`[${id}]`)));
+    assert.match(f.reports.find(t => t.includes(`[${id}]`))!, /Stopped by the user/);
+    await until(() => events.some(e => e.name === 'finished'));
+  } finally { agent.close(); await close(); await f.close(); }
+});
+
+test("another app resumes a finished agent it attached to: the message is the user's, and the new report reaches the parent", async () => {
+  const f = await fixture();
+  const events: WindowEvent[] = [];
+  const close = await serveWindows(f.dir, f.children, () => true, async () => {});
+  const [id] = await f.children.spawn([{ task: 'first result' }], f.dir);
+  await until(() => !f.children.live(id) && f.reports.some(t => t.includes(`[${id}]`)));
+  const agent = await attachAgent(f.dir, id, e => events.push(e));
+  try {
+    await until(() => events.some(e => e.name === 'finished'));
+    await agent.resume('second result');
+    await until(() => f.children.history.records.get(id)?.state === 'completed' && f.reports.filter(t => t.includes(`[${id}]`)).length === 2);
+    assert.match(f.reports.at(-1) ?? '', /Reply: second result/);
+    assert.deepEqual(f.children.history.records.get(id)?.guidance.map(g => [g.from, g.text]), [['user', 'second result']]);
+    assert.ok(f.memory.root.some(entry => entry.kind === 'user' && f.memory.text(entry.i) === `Direct guidance to subagent [${id}]: second result`));
+    await until(() => events.filter(e => e.name === 'finished').length === 2);
+    assert.ok(events.some(e => e.from === 'user' && e.text === 'second result') && events.some(e => e.from === 'agent' && e.text === 'Reply: second result'), 'the view follows the resumed turn');
+  } finally { agent.close(); await close(); await f.close(); }
 });
