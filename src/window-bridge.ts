@@ -45,7 +45,7 @@ export async function serveWindows(directory: string, children: Children, availa
     connections.add(socket);
     let child: string | undefined, attached = false, remote = false, cursor = 0, firstUser = true, lastStatus = '';
     // `finished`: an attached agent ended, and the view takes only `resume`, which the app's client sends (Pi's terminal attach
-    // just reads a finished agent). `closing`: the view takes nothing more.
+    // just reads a finished agent), until the agent is live again. `closing`: the view takes nothing more.
     let phase: 'open' | 'finished' | 'closing' = 'open';
     let finalMessages: AgentMessage[] | undefined;
     const controller = new AbortController();
@@ -116,12 +116,15 @@ export async function serveWindows(directory: string, children: Children, availa
             // Esc and Alt+Up in the window, as agent-view.ts does them in the main one.
             if (frame.action === 'interrupt') { send({ kind: 'reply', id: frame.id, text: await started(children.interrupt(child)) }); return; }
             // The Agents page's stop: the agent and its own agents end, and its report says the user stopped it.
-            if (frame.action === 'stop') { await started(children.stop(child)); send({ kind: 'reply', id: frame.id }); return; }
+            if (frame.action === 'stop') {
+              if (!attached) throw new Error('Only an agent you attached to stops from here; /complete ends this conversation');
+              await started(children.stop(child)); send({ kind: 'reply', id: frame.id }); return;
+            }
             if (frame.action === 'resume') {
               if (phase !== 'finished') throw new Error(`Only a finished agent you attached to resumes; ${child} has not finished, so say reaches it`);
               if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
               await children.resumeByUser(child, frame.text ?? '');
-              phase = 'open'; finalMessages = undefined; // Follow it again, from where the view left off.
+              phase = 'open'; finalMessages = undefined; // As the next tick would, so a say right after this one is taken.
               send({ kind: 'reply', id: frame.id }); return;
             }
             if (frame.action === 'withdraw') { send({ kind: 'reply', id: frame.id, text: children.withdraw(child) }); return; }
@@ -175,7 +178,9 @@ export async function serveWindows(directory: string, children: Children, availa
       return true;
     };
     const timer = setInterval(() => {
-      if (!child || remote || socket.destroyed || phase !== 'open') return;
+      if (!child || remote || socket.destroyed || phase === 'closing') return;
+      // Whoever resumed a finished agent (this view, another one, or the main agent's tell), the view follows it again from where it left off.
+      if (phase === 'finished') { if (!children.live(child)) return; phase = 'open'; finalMessages = undefined; }
       const live = children.live(child), info = children.history.records.get(child);
       if (!info) {
         // Deleted from the Agents page: end the window (and a headless join) instead of leaving it waiting forever.

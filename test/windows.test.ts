@@ -1332,3 +1332,47 @@ test('a resume refused during an import, or by a memory that cannot take the mes
     await until(() => f.children.history.records.get(id)?.state === 'completed' && finished.length === 2);
   } finally { agent.close(); await close(); await f.close(); }
 });
+
+test('a finished view follows its agent again when the main agent resumes it, and the app can then say to it', async () => {
+  const f = await fixture();
+  const events: WindowEvent[] = [];
+  const close = await serveWindows(f.dir, f.children, () => true, async () => {});
+  const [id] = await f.children.spawn([{ task: 'first result' }], f.dir);
+  await until(() => !f.children.live(id));
+  const agent = await attachAgent(f.dir, id, e => events.push(e));
+  try {
+    await until(() => events.some(e => e.name === 'finished'));
+    await f.children.tell(id, 'hold work resumed by main');
+    await until(() => events.some(e => e.live?.state === 'running'));
+    await assert.rejects(agent.resume('Not while it runs'), /has not finished, so say reaches it/);
+    await agent.say('from the app');
+    assert.ok(f.children.history.records.get(id)?.guidance.some(g => g.from === 'user' && g.text === 'from the app'));
+    await agent.stop();
+    await until(() => events.filter(e => e.name === 'finished').length === 2);
+    // Each message once, across the reopen and the second finish: the stopped reply too, which only the final transcript has.
+    assert.deepEqual(events.filter(e => e.name === 'message').map(e => [e.from, e.text]),
+      [['user', 'first result'], ['agent', 'Reply: first result'], [undefined, 'hold work resumed by main'], ['agent', 'Reply: hold work resumed by main']]);
+  } finally { agent.close(); await close(); await f.close(); }
+});
+
+test('two apps resume the same finished agent at once: one wins, and both views follow the resumed turn once', async () => {
+  const f = await fixture();
+  const close = await serveWindows(f.dir, f.children, () => true, async () => {});
+  const [id] = await f.children.spawn([{ task: 'first result' }], f.dir);
+  await until(() => !f.children.live(id));
+  const views = [[], []] as WindowEvent[][];
+  const agents = await Promise.all(views.map(events => attachAgent(f.dir, id, e => events.push(e))));
+  try {
+    await until(() => views.every(events => events.some(e => e.name === 'finished')));
+    const results = await Promise.allSettled(agents.map((agent, i) => agent.resume(`hold work ${i}`)));
+    assert.deepEqual(results.map(r => r.status).sort(), ['fulfilled', 'rejected']);
+    const winner = `hold work ${results.findIndex(r => r.status === 'fulfilled')}`;
+    await until(() => views.every(events => events.some(e => e.live?.state === 'running')));
+    await agents[0].stop();
+    await until(() => views.every(events => events.filter(e => e.name === 'finished').length === 2));
+    for (const events of views) {
+      assert.deepEqual(events.filter(e => e.name === 'message' && e.from === 'user').map(e => e.text), ['first result', winner]);
+      assert.equal(events.filter(e => e.text === 'Reply: first result').length, 1, 'no replay across the reopen');
+    }
+  } finally { for (const agent of agents) agent.close(); await close(); await f.close(); }
+});
