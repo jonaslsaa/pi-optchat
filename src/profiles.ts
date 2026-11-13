@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, type Stats } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Stats } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { createConnection, createServer } from 'node:net';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
 import { record } from './core/cache.ts';
 import { atomicWrite } from './store.ts';
 import type { Store } from './core/store.ts';
@@ -22,7 +22,8 @@ export const defaults: ProfileConfig = {
   subagent: { provider: 'anthropic', model: 'claude-opus-5-5', thinking: 'high' },
   ...DEFAULT_SETTINGS,
 };
-const PROFILE_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+/** What profilePath() accepts, listProfiles() returns and a picker row carries. */
+export const PROFILE_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 /** `home` is OptChat's data directory, `dataHome()` unless a host passes its own. */
 export function profilePath(name: string, home = dataHome()) {
   if (!PROFILE_NAME.test(name)) throw new Error('Profile names: 1–64 lowercase letters, digits, hyphens, or underscores.');
@@ -32,6 +33,53 @@ export function listProfiles(home = dataHome()) {
   const root = join(home, 'profiles');
   return existsSync(root) ? readdirSync(root, { withFileTypes: true }).filter(f => f.isDirectory() && PROFILE_NAME.test(f.name)).map(f => f.name).sort() : [];
 }
+/** How a caller takes a profile: the machine-local lock, or a host's store lease when its store enforces one. */
+export type TakeLock = (dir: string, description: string) => Promise<() => Promise<void>>;
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+/** How long a folder an abandoned delete left behind is kept, so no attempt that is still finishing can be swept. */
+const ABANDONED_AFTER_MS = 24 * 60 * 60 * 1000;
+/** A delete that fails between the rename and the removal leaves `.deleting-<name>-<time>` under `profiles/`, which no picker shows. The next delete reclaims ones old enough to be certain nothing is still working on them. */
+function sweepAbandoned(home: string) {
+  const root = join(home, 'profiles');
+  let entries: string[]; try { entries = readdirSync(root); } catch { return; }
+  for (const entry of entries) {
+    if (!entry.startsWith('.deleting-')) continue;
+    const path = join(root, entry);
+    try { if (Date.now() - statSync(path).mtimeMs > ABANDONED_AFTER_MS) rmSync(path, { recursive: true, force: true, maxRetries: 3 }); } catch { /* Another delete is removing it, or it is already gone. */ }
+  }
+}
+/** Windows refuses to rename a folder a program holds a file in (EPERM, EBUSY), and an indexer or a scan can hold one for a moment, so the move retries the way the removal below does. */
+async function moveAside(dir: string, reserved: string, name: string) {
+  for (let attempt = 1; ; attempt++) {
+    try { return renameSync(dir, reserved); } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const retry = code === 'EBUSY' || code === 'EPERM' || code === 'ENOTEMPTY' || code === 'EACCES';
+      if (!retry) throw error;
+      if (attempt === 10) throw new Error(`Could not move ${name} aside to delete it: close anything using its folder and try again (${code}).`, { cause: error });
+      await sleep(100);
+    }
+  }
+}
+/** Removes a profile's folder, and the saved last-profile pointer when it names it. The lock decides: a profile another Pi is using is open, so deleting it would leave that Pi writing into a folder that is gone. */
+export async function deleteProfile(name: string, home = dataHome(), take: TakeLock = lockProfile) {
+  const dir = profilePath(name, home);
+  if (!existsSync(dir)) throw new Error(`Profile ${name} does not exist.`);
+  sweepAbandoned(home);
+  const unlock = await take(dir, 'deleting');
+  try {
+    // Renamed to a hidden sibling before the rmSync: a delete that fails on Windows then cannot leave half a profile in the picker (listProfiles() hides dot names).
+    const reserved = join(home, 'profiles', `.deleting-${name}-${Date.now()}`);
+    await moveAside(dir, reserved, name);
+    // listProfiles() already hides a name with no folder, but without this a profile created again under the same name would inherit the stale pointer.
+    // Clear it immediately after the rename, before the recursive removal, so an rmSync failure cannot leave a stale pointer behind.
+    const last = join(home, 'last-profile');
+    try { if (readFileSync(last, 'utf8').trim() === name) unlinkSync(last); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    rmSync(reserved, { recursive: true, force: true, maxRetries: 3 });
+    return dir;
+  } finally { await unlock(); }
+}
+
 /** The file in a profile that names its active memory generation. */
 export const ACTIVE_MEMORY = 'active-memory.json';
 /** A memory generation's directory in profile `dir`: `.` is the profile itself, the others are imports' `memories/<id>`. */
@@ -119,12 +167,20 @@ export function rememberProfile(name: string) { atomicWrite(join(dataHome(), 'la
 export class ProfileBusyError extends Error {
   constructor(readonly owner: string) { super(`Profile already running: ${owner}`); }
 }
-/** POSIX keeps a socket file in the profile itself, so every Pi on the profile finds the same one whatever its TMPDIR, and Git skips it. Windows has no Unix sockets, so the profile path is hashed into a named pipe in the machine-wide pipe namespace. */
+/**
+ * The lock lives outside the profile directory so a deletion can rename the profile away without moving the socket.
+ * An old server's close therefore cannot unlink a replacement owner's socket at the same path.
+ * POSIX keeps one socket per profile beside the profiles it guards, named by the directory's real identity, so every Pi on
+ * the profile finds the same one whatever its TMPDIR, its home or its spelling of the path, and Git never sees it.
+ * Windows has no Unix sockets, so the same identity becomes a named pipe in the machine-wide pipe namespace.
+ */
 export function profileSocket(dir: string, purpose: 'lock' | 'windows' = 'lock') {
-  if (!isWindows) return join(dir, `${purpose}.sock`);
-  // Hash the directory's real identity, so another casing, a junction or a symlink to the same profile finds the same pipe.
+  if (!isWindows && purpose !== 'lock') return join(dir, `${purpose}.sock`);
+  // The directory's real identity, so another casing, a junction, a symlink or a host's own data home finds the same lock.
   let identity = resolve(dir); try { identity = realpathSync.native(identity); } catch {}
-  return `${PIPE_PREFIX}optchat-${createHash('sha256').update(identity.toLowerCase()).digest('hex').slice(0, 16)}-${purpose}`;
+  const hash = createHash('sha256').update(isWindows ? identity.toLowerCase() : identity).digest('hex').slice(0, 16);
+  // The socket's own directory follows the resolved path too, so two spellings of one home reach one socket as well.
+  return isWindows ? `${PIPE_PREFIX}optchat-${hash}-${purpose}` : join(dirname(identity), '.locks', `${hash}.sock`);
 }
 
 // sun_path is 104 bytes on macOS and 108 elsewhere, both including the NUL; a Windows named pipe path is capped at 259 characters, which for the ASCII names OptChat generates is also its byte length. Node 22 binds a truncated socket instead of failing, so the length is checked before listen.
@@ -138,21 +194,34 @@ export function checkSocketPath(path: string) {
 function existingSocket(path: string): { stat: Stats; removable: true } | { removable: false } | undefined {
   if (isWindows) return { removable: false };
   let stat; try { stat = lstatSync(path); } catch { return undefined; }
-  if (!stat.isSocket()) throw new Error(`${path} is not an OptChat socket. Move it out of the profile and try again.`);
+  if (!stat.isSocket()) throw new Error(`${path} is not an OptChat socket. Move it out of the way and try again.`);
   return { stat, removable: true };
 }
 /** Removes a dead socket left by a previous owner. */
 export function removeStaleSocket(path: string) { if (existingSocket(path)?.removable) unlinkSync(path); }
 
-/** Asks the current owner who holds the socket; nothing answering means the entry is stale, and a socket or pipe that is gone (ENOENT) means nobody holds it. */
-function readOwner(path: string) {
+/** Asks the current owner who holds the socket; nothing answering means the entry is stale, and a socket or pipe that is gone (ENOENT) means nobody holds it. `lenient` also treats a file that is not a socket at all as nobody: a leftover, not a holder. */
+function readOwner(path: string, lenient = false) {
   return new Promise<string | undefined>((resolve, reject) => {
     const socket = createConnection(path); let message = '';
     socket.setTimeout(1500, () => { socket.destroy(); reject(new Error('Profile lock did not respond; refusing to steal it.')); });
     socket.on('data', data => { message += data.toString(); });
     socket.on('end', () => resolve(message || 'another Pi instance'));
-    socket.on('error', e => { if ('code' in e && (e.code === 'ECONNREFUSED' || e.code === 'ENOENT')) resolve(undefined); else reject(e); });
+    socket.on('error', e => { if (lenient || 'code' in e && (e.code === 'ECONNREFUSED' || e.code === 'ENOENT')) resolve(undefined); else reject(e); });
   });
+}
+
+/** The socket name a build from before the lock moved out of the profile folder listened on. */
+const LOCK_FILE = 'lock.sock';
+/** Who holds a profile's lock through a build that kept it inside the profile folder; undefined when nobody does or when there is no such socket. */
+async function legacyOwner(dir: string) {
+  if (isWindows) return undefined; // The pipe name has not changed, so there is no older address to ask.
+  const path = join(dir, LOCK_FILE);
+  if (!existsSync(path)) return undefined;
+  const owner = await readOwner(path, true);
+  // Nothing answered, so the file is a leftover a crashed owner left in the profile and would only be mistaken for a holder later: it goes. A regular file that merely shares the name is left alone.
+  if (owner === undefined) { try { if (lstatSync(path).isSocket()) unlinkSync(path); } catch { /* Someone else removed it. */ } }
+  return owner;
 }
 
 /** The Pi holding a profile. */
@@ -175,6 +244,7 @@ export async function profileOwner(dir: string): Promise<Owner | undefined> {
 /** OS-owned socket lifetime, no timeout-based stealing of a busy profile. */
 export async function lockProfile(dir: string, description: string) {
   const socketPath = profileSocket(dir); checkSocketPath(socketPath);
+  if (!isWindows) mkdirSync(dirname(socketPath), { recursive: true });
   const server = createServer(socket => { socket.on('error', () => socket.destroy()); socket.end(description); });
   const listen = () => new Promise<void>((resolve, reject) => {
     const failed = (error: Error) => { server.off('listening', ready); reject(error); };
@@ -197,6 +267,11 @@ export async function lockProfile(dir: string, description: string) {
   }
   const unlock = () => new Promise<void>(resolve => server.close(() => resolve()));
   if (!isWindows) { try { chmodSync(socketPath, 0o600); } catch (error) { await unlock(); throw error; } }
+  // A build from before the lock moved out of the profile still answers on its own socket, and two Pis on one profile is what the lock exists to stop.
+  let legacy: string | undefined;
+  try { legacy = await legacyOwner(dir); }
+  catch (error) { await unlock(); throw error; }
+  if (legacy !== undefined) { await unlock(); throw new ProfileBusyError(legacy); }
   return unlock;
 }
 
