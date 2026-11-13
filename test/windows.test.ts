@@ -1286,21 +1286,35 @@ test('another app attaches through pi-optchat/files and stops a running agent: i
   } finally { agent.close(); await close(); await f.close(); }
 });
 
-test("another app resumes a finished agent it attached to: the message is the user's, and the new report reaches the parent", async () => {
+test("another app resumes a finished agent it attached to: the message is the user's, also as a skill, and the new report reaches the parent", async () => {
   const f = await fixture();
+  mkdirSync(join(f.dir, '.pi', 'skills', 'review'), { recursive: true });
+  writeFileSync(join(f.dir, '.pi', 'skills', 'review', 'SKILL.md'), '---\nname: review\ndescription: Reviews code.\n---\nREVIEW_SKILL_BODY\n');
   const events: WindowEvent[] = [];
-  const close = await serveWindows(f.dir, f.children, () => true, async () => {});
+  let available = true;
+  const close = await serveWindows(f.dir, f.children, () => available, async () => {});
   const [id] = await f.children.spawn([{ task: 'first result' }], f.dir);
   await until(() => !f.children.live(id) && f.reports.some(t => t.includes(`[${id}]`)));
   const agent = await attachAgent(f.dir, id, e => events.push(e));
   try {
     await until(() => events.some(e => e.name === 'finished'));
-    await agent.resume('second result');
+    available = false;
+    await assert.rejects(agent.resume('Not during an import'), /importing/);
+    available = true;
+    // A memory that can't take the message leaves the run finished and resumable, not stuck running.
+    const append = f.memory.append;
+    f.memory.append = () => { throw new Error('Memory is closed'); };
+    await assert.rejects(agent.resume('Not without memory'), /Memory is closed/);
+    f.memory.append = append;
+    assert.equal(f.children.history.records.get(id)?.state, 'completed');
+    await agent.resume('/skill:review second result');
     await until(() => f.children.history.records.get(id)?.state === 'completed' && f.reports.filter(t => t.includes(`[${id}]`)).length === 2);
-    assert.match(f.reports.at(-1) ?? '', /Reply: second result/);
-    assert.deepEqual(f.children.history.records.get(id)?.guidance.map(g => [g.from, g.text]), [['user', 'second result']]);
-    assert.ok(f.memory.root.some(entry => entry.kind === 'user' && f.memory.text(entry.i) === `Direct guidance to subagent [${id}]: second result`));
+    assert.match(f.reports.at(-1) ?? '', /REVIEW_SKILL_BODY[\s\S]*second result/);
+    assert.deepEqual(f.children.history.records.get(id)?.guidance.map(g => [g.from, g.text, g.state]), [['user', '/skill:review second result', 'delivered']]);
+    assert.ok(f.memory.root.some(entry => entry.kind === 'user' && f.memory.text(entry.i) === `Direct guidance to subagent [${id}]: /skill:review second result`));
     await until(() => events.filter(e => e.name === 'finished').length === 2);
-    assert.ok(events.some(e => e.from === 'user' && e.text === 'second result') && events.some(e => e.from === 'agent' && e.text === 'Reply: second result'), 'the view follows the resumed turn');
+    // The finished view and the resumed one read the same session entries, so the cursor carries over: each message once.
+    assert.deepEqual(events.filter(e => e.name === 'message').map(e => [e.from, e.text.startsWith('Reply: ') ? 'Reply' : e.text]),
+      [['user', 'first result'], ['agent', 'Reply'], ['user', '/skill:review second result'], ['agent', 'Reply']]);
   } finally { agent.close(); await close(); await f.close(); }
 });

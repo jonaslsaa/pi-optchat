@@ -127,6 +127,7 @@ export async function serveWindows(directory: string, children: Children, availa
             }
             if (frame.action === 'resume') {
               if (!attached || children.live(child)) throw new Error(`Only a finished agent you attached to resumes; ${child} is still running, so say reaches it`);
+              if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
               if (!frame.text?.trim()) throw new Error('Message is empty');
               await children.resumeByUser(child, frame.text);
               ending = finished = false; finalMessages = undefined; // Follow it again, from where the view left off.

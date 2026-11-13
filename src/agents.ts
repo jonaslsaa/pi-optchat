@@ -411,7 +411,7 @@ export class Children {
       // A stop that lands before the first prompt has no turn to abort, so it is honoured here.
       const state: RunState = info.state; // a local, so the loop below still sees later state changes
       if (this.closing || info.handoff || state === 'stopping') throw new Error('Stopped before its first request.');
-      await session.prompt(prompt);
+      try { await session.prompt(prompt); } finally { live.prompting = undefined; }
       while (info.state !== 'stopping') {
         if (live.interruption) {
           // A message Pi took during the abort (a rebuild of its queue can still be landing) went into a request the abort
@@ -662,11 +662,14 @@ export class Children {
       const { ended: _ended, cutOff: _cutOff, ...rest } = run;
       const cut = [...this.history.records.values()].filter(r => r.parentId === id && r.cutOff).map(r => r.id);
       const prompt = cutOffChildren(text, cut);
-      const info: RunInfo = { ...rest, state: 'running', started: Date.now(), parentSession: this.options.parentSession ?? run.parentSession,
-        guidance: [...run.guidance, { text: prompt, date: Date.now(), state: 'queued', from }] };
-      try { this.save(info); } catch (error) { this.history.records.set(id, run); await this.shutdown(session); this.dispose(session); throw error; }
-      if (from === 'user') this.memory.append('user', `Direct guidance to subagent [${id}]: ${text}`);
-      const live: LiveRun = { session, info, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [], steering: Promise.resolve() };
+      const guidance: Guidance = { text: prompt, date: Date.now(), state: 'queued', from };
+      const info: RunInfo = { ...rest, state: 'running', started: Date.now(), parentSession: this.options.parentSession ?? run.parentSession, guidance: [...run.guidance, guidance] };
+      try {
+        if (from === 'user') this.memory.append('user', `Direct guidance to subagent [${id}]: ${text}`);
+        this.save(info);
+      } catch (error) { this.history.records.set(id, run); await this.shutdown(session); this.dispose(session); throw error; }
+      // The prompt is this guidance even when Pi expands it (a skill), so it is marked read and keeps its sender.
+      const live: LiveRun = { session, info, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [], steering: Promise.resolve(), prompting: guidance };
       this.running.set(id, live);
       this.launching--; reserved = false;
       session.subscribe(event => this.observe(live, event));

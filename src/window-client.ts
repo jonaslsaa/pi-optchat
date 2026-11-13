@@ -143,7 +143,11 @@ export async function attachAgent(profileDirectory: string, id: string, event: (
     /** What the interrupt did, as the owner words it. */
     interrupt: () => connection.request('interrupt'),
     async stop() { await connection.request('stop'); },
-    /** A finished agent goes on with `text` from the user, in its earlier conversation; its new report goes to its parent. A live one refuses: use `say`. */
+    /**
+     * A finished agent goes on with `text` from the user, in its earlier conversation; its new report goes to its parent. As with
+     * the main agent's tell, only the main agent's own subagents resume: a nested one throws "Only <parent> can resume it…", and a
+     * live one refuses (use `say`).
+     */
     async resume(text: string) { await connection.request('resume', text); },
     close: () => connection.close(),
   };
