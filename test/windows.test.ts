@@ -1318,7 +1318,7 @@ test('a resume refused during an import, or by a memory that cannot take the mes
   const finished: WindowEvent[] = [];
   const agent = await attachAgent(f.dir, id, e => { if (e.name === 'finished') finished.push(e); });
   try {
-    await until(() => finished.length > 0);
+    // Right after attaching, before the view has noticed the agent finished: the refusal is the import's.
     available = false;
     await assert.rejects(agent.resume('Not during an import'), /importing/);
     available = true;
@@ -1329,7 +1329,7 @@ test('a resume refused during an import, or by a memory that cannot take the mes
     assert.equal(f.children.history.records.get(id)?.state, 'completed');
     assert.equal(f.children.live(id), undefined);
     await agent.resume('second result');
-    await until(() => f.children.history.records.get(id)?.state === 'completed' && finished.length === 2);
+    await until(() => f.children.history.records.get(id)?.state === 'completed' && finished.length > 0);
   } finally { agent.close(); await close(); await f.close(); }
 });
 
@@ -1344,7 +1344,7 @@ test('a finished view follows its agent again when the main agent resumes it, an
     await until(() => events.some(e => e.name === 'finished'));
     await f.children.tell(id, 'hold work resumed by main');
     await until(() => events.some(e => e.live?.state === 'running'));
-    await assert.rejects(agent.resume('Not while it runs'), /has not finished, so say reaches it/);
+    await assert.rejects(agent.resume('Not while it runs'), /is running, so say reaches it/);
     await agent.say('from the app');
     assert.ok(f.children.history.records.get(id)?.guidance.some(g => g.from === 'user' && g.text === 'from the app'));
     await agent.stop();

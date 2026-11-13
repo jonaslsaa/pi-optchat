@@ -121,7 +121,8 @@ export async function serveWindows(directory: string, children: Children, availa
               await started(children.stop(child)); send({ kind: 'reply', id: frame.id }); return;
             }
             if (frame.action === 'resume') {
-              if (phase !== 'finished') throw new Error(`Only a finished agent you attached to resumes; ${child} has not finished, so say reaches it`);
+              // Checked against the agent, not the view, which notices a finish only at its next tick.
+              if (!attached || children.live(child)) throw new Error(`Only a finished agent you attached to resumes; ${child} is running, so say reaches it`);
               if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
               await children.resumeByUser(child, frame.text ?? '');
               phase = 'open'; finalMessages = undefined; // As the next tick would, so a say right after this one is taken.
