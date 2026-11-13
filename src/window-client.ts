@@ -170,7 +170,9 @@ export async function updateConfig(profileDirectory: string, patch: ConfigPatch)
     try { return patchConfigFile(profileDirectory, patch); }
     finally { await unlock(); }
   }
-  const connection = await connectWindow(profileDirectory, () => {}, () => {});
+  const connection = await connectWindow(profileDirectory, () => {}, () => {}).catch((error: unknown) => {
+    throw new Error('The profile is busy: its Pi is still starting, runs headless (pi -p, which takes no changes), or another change is being saved. Try again shortly.', { cause: error });
+  });
   try { await connection.request('configure', JSON.stringify(patch)); }
   finally { connection.close(); }
   return loadConfig(profileDirectory);

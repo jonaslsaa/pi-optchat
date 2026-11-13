@@ -1,6 +1,6 @@
 import { Container, fuzzyFilter, getKeybindings, Input, SelectList, SettingsList, Spacer, Text, type Component, type SelectItem, type SettingItem } from '@earendil-works/pi-tui';
 import { DynamicBorder, type ExtensionContext, type Theme } from '@earendil-works/pi-coding-agent';
-import { defaults, THINKING, type ModelChoice, type ProfileConfig } from './profiles.ts';
+import { applyConfig, defaults, THINKING, type ModelChoice, type ProfileConfig } from './profiles.ts';
 import { invalid, isNumberKey, percent, SETTING_KEYS, SETTINGS, type NumberKey, type SettingKey } from './settings.ts';
 import type { ThinkingLevel } from '@earendil-works/pi-agent-core';
 
@@ -23,8 +23,8 @@ interface Options {
   profile: string; config: ProfileConfig;
   /** Each model with the thinking levels Pi can send it (Sonnet 5.5 has no "off"). */
   models: { name: string; thinking: readonly ThinkingLevel[] }[];
-  /** Saves the whole profile config; throws if it can't be written. */
-  save: (config: ProfileConfig) => void;
+  /** The profile's directory, where a change is saved. */
+  dir: string;
 }
 
 /** A titled step inside the page: what it changes, the control, and its keys. */
@@ -113,10 +113,9 @@ class ModelStep extends Container {
 }
 
 /** Saves a change to the profile config and applies it in memory; returns the reason if it couldn't be written. */
-export function update(o: Pick<Options, 'config' | 'save'>, patch: Partial<ProfileConfig>) {
-  try { o.save({ ...o.config, ...patch }); }
+function update(o: Options, patch: Partial<ProfileConfig>) {
+  try { applyConfig(o.dir, o.config, patch); }
   catch (error) { return `Could not save: ${error instanceof Error ? error.message : String(error)}`; }
-  Object.assign(o.config, patch);
   return undefined;
 }
 /** Bordered, titled like Pi's own dialogs. */

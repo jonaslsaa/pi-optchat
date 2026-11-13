@@ -206,7 +206,7 @@ test('the settings page saves a valid number and explains an invalid one', () =>
   const dir = mkdtempSync(join(tmpdir(), 'optchat-page-'));
   try {
     const config: ProfileConfig = { ...defaults, compactor: { provider: 'anthropic', model: 'claude-haiku-4-5', thinking: 'low' } };
-    const page = settingsPage(plain, { profile: 'demo', config, models: [{ name: 'anthropic/claude-sonnet-5-5', thinking: ['low', 'medium'] }], save: next => saveConfig(dir, next) }, () => {});
+    const page = settingsPage(plain, { profile: 'demo', config, models: [{ name: 'anthropic/claude-sonnet-5-5', thinking: ['low', 'medium'] }], dir }, () => {});
     const type = (...keys: string[]) => { for (const key of keys) page.handleInput(key); };
     assert.match(page.render(100).join('\n'), /Subagent levels\s+1  default\n/);
     assert.match(page.render(100).join('\n'), /claude-haiku-4-5 · low  default claude-sonnet-5-5 · medium/, 'a changed model shows its default too');
@@ -319,7 +319,7 @@ test('the thinking step offers only levels the model takes, so Sonnet 5.5 has no
   const dir = mkdtempSync(join(tmpdir(), 'optchat-page-'));
   try {
     const config: ProfileConfig = { ...defaults };
-    const page = settingsPage(plain, { profile: 'demo', config, save: next => saveConfig(dir, next),
+    const page = settingsPage(plain, { profile: 'demo', config, dir,
       models: [{ name: 'anthropic/claude-sonnet-5-5', thinking: ['low', 'medium', 'high'] }] }, () => {});
     page.handleInput('\r'); // open Compactor model
     page.handleInput('\r'); // pick the only model

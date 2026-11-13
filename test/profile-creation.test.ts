@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createProfile, defaults, instructions, listProfiles, loadConfig, profilePath } from '../src/profiles.ts';
+import { createProfile, defaults, listProfiles, loadConfig, profilePath, readInstructions } from '../src/profiles.ts';
 import { removeDir } from './support.ts';
 
 function sandbox() {
@@ -33,7 +33,7 @@ for (const file of ['config.json', 'AGENTS.md']) {
       rename.mock.restore(); syncBuiltinESMExports();
       createProfile('retry');
       assert.deepEqual(loadConfig(profilePath('retry')), defaults);
-      assert.match(instructions(profilePath('retry')), /This is the retry profile/);
+      assert.match(readInstructions(profilePath('retry')), /This is the retry profile/);
       assert.deepEqual(fs.readdirSync(profilePath('retry')).sort(), ['AGENTS.md', 'config.json']);
     } finally { cleanup(); }
   });

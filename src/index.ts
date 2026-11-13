@@ -9,7 +9,7 @@ import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
 import { createCompressor } from './compactor.ts';
-import { createProfile, describeOwner, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, memoryDirectory, profilePath, type ModelChoice, rememberProfile, saveConfig, saveInstructions, ProfileBusyError, type ConfigPatch, type ProfileConfig } from './profiles.ts';
+import { applyConfig, createProfile, describeOwner, holdProfile, isWindows, lastProfile, listProfiles, loadConfig, memoryDirectory, profilePath, readInstructions, type ModelChoice, rememberProfile, saveInstructions, ProfileBusyError, type ConfigPatch, type ProfileConfig } from './profiles.ts';
 import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC } from './core/prompts.ts';
 import { MASTER, modelsHint } from './prompts.ts';
 import { cachePayload, record } from './core/cache.ts';
@@ -36,7 +36,7 @@ import { openConnectedWindow, registerConnectedRenderer } from './connected-wind
 import { openRemoteWindow, ROLE_STATUS, type Role } from './rpc-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
-import { showModelPicker, showSettings, update } from './settings-page.ts';
+import { showModelPicker, showSettings } from './settings-page.ts';
 import { showMenu } from './menu.ts';
 
 const binding = 'optchat.profile';
@@ -139,7 +139,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (restoring || !a || !main || sameChoice(restored, main)) return;
     restored = undefined;
     if (sameChoice(a.config.main, main)) return;
-    try { saveConfig(a.dir, { ...a.config, main }); a.config.main = main; }
+    try { applyConfig(a.dir, a.config, { main }); }
     catch (error) { ctx.ui.notify(`Could not save the main model to ${a.name}: ${errorText(error)}`, 'error'); }
   };
   pi.on('model_select', (_event, ctx) => rememberMain(ctx));
@@ -285,7 +285,7 @@ export default function optchat(pi: ExtensionAPI) {
       const inbox = new Inbox(dir);
       const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
       if (recovered) ctx.ui.notify(`Recovered ${recovered} unanswered inputs into ${name}'s memory. Ask to continue them when ready.`, 'info');
-      const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => `${instructions(dir)}\n\n${IMPORT_GUIDANCE}`,
+      const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => `${readInstructions(dir)}\n\n${IMPORT_GUIDANCE}`,
         deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, builtins: () => loadedBuiltins(pi), settings: () => config, hold: holdReports,
           summarizeHandoff: createHandoffSummarizer(ctx.modelRegistry, () => config.compactor, message => usage.compression(message, 'compactor', sessionId)) });
       const loggedReports = new Set(memory.root.map(e => e.receipt));
@@ -476,7 +476,7 @@ export default function optchat(pi: ExtensionAPI) {
     // Pi's own prompt sections (AGENTS.md files, skills, cwd) stay; the profile's instructions go last.
     syncSearch(a.config);
     event.systemPromptOptions.customPrompt = allowSearch(`${MASTER}\n\n${modelsHint(a.config.subagent)}\n\n${VIEW_DOC}${a.config.previousExchange ? CONTINUITY : ''}${a.config.memorySearch ? SEARCH_DOC : ''}`, a.config.memorySearch);
-    event.systemPromptOptions.sections.instructions = `${instructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
+    event.systemPromptOptions.sections.instructions = `${readInstructions(a.dir)}\n\n${IMPORT_GUIDANCE}`;
     refreshContextFiles(event.systemPromptOptions);
     prompt = event.systemPrompt;
   });
@@ -616,17 +616,17 @@ export default function optchat(pi: ExtensionAPI) {
   /** The settings page's options: every model Pi is logged in to, with the thinking levels it takes, sorted so each provider's models sit together. */
   const settingsOptions = (ctx: ExtensionContext, a: Active) => ({ profile: a.name, config: a.config,
     models: ctx.modelRegistry.getAvailable().map(m => ({ name: `${m.provider}/${m.id}`, thinking: getSupportedThinkingLevels(m) })).sort((x, y) => x.name.localeCompare(y.name)),
-    save: (config: ProfileConfig) => saveConfig(a.dir, config) });
+    dir: a.dir });
   /** Another app's settings change, through the profile socket: what the settings page offers and does, without the page. */
   const configure = (ctx: ExtensionContext, patch: ConfigPatch) => {
-    const o = settingsOptions(ctx, required());
+    const a = required();
     for (const role of ['compactor', 'subagent'] as const) {
       const choice = patch[role];
-      if (choice && !o.models.some(m => m.name === `${choice.provider}/${choice.model}` && m.thinking.includes(choice.thinking)))
+      // The models the settings page lists, matched by provider and ID apart: a model ID may contain a slash.
+      if (choice && !ctx.modelRegistry.getAvailable().some(m => m.provider === choice.provider && m.id === choice.model && getSupportedThinkingLevels(m).includes(choice.thinking)))
         throw new Error(`${role}: ${choice.provider}/${choice.model} with thinking ${choice.thinking} is not offered by this Pi; it lists the models it is logged in to.`);
     }
-    const problem = update(o, patch);
-    if (problem) throw new Error(problem);
+    applyConfig(a.dir, a.config, patch);
   };
   const pickModel = async (ctx: ExtensionContext, role: 'compactor' | 'subagent') => {
     const a = required();
@@ -731,7 +731,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (action === 'agents' || action === 'usage' || action === 'activity') return inspect(ctx, action);
     if (action === 'instructions') {
       const a = required();
-      const edited = await ctx.ui.editor(`${a.name} · AGENTS.md`, instructions(a.dir));
+      const edited = await ctx.ui.editor(`${a.name} · AGENTS.md`, readInstructions(a.dir));
       if (edited !== undefined) { saveInstructions(a.dir, edited); ctx.ui.notify('Saved. Applies to the next turn and newly spawned agents.', 'info'); }
       return;
     }

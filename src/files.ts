@@ -2,7 +2,7 @@
  * each, create a profile, change its settings and instructions, and talk to its subagents through the Pi that owns it. Node only,
  * and nothing from Pi at runtime. Only the holder of a profile's lock writes it, except AGENTS.md, which Pi reads fresh each turn. */
 export { createProfile, dataHome, listProfiles, memoryDirectory, profileOwner, profilePath, type Owner } from './profiles.ts';
-export { defaults, loadConfig, instructions as readInstructions, saveInstructions, type ConfigPatch, type ModelChoice, type ProfileConfig } from './profiles.ts';
+export { defaults, loadConfig, readInstructions, saveInstructions, type ConfigPatch, type ModelChoice, type ProfileConfig } from './profiles.ts';
 export { SETTINGS } from './settings.ts';
 export { fingerprint, readImage } from './store.ts';
 export { readMemory, type Memory } from './memory.ts';

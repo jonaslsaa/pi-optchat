@@ -16,6 +16,7 @@ export interface ModelChoice { provider: string; model: string; thinking: typeof
 export const dataHome = () => resolve(process.env.OPTCHAT_HOME ?? join(homedir(), '.optchat'));
 /** `main` is the last model and thinking level picked in Pi while this profile was open, recorded on the first open too. */
 export interface ProfileConfig extends Settings { compactor: ModelChoice; subagent: ModelChoice; main?: ModelChoice }
+/** A new profile's config. One shared object: copy it, don't change it. */
 export const defaults: ProfileConfig = {
   compactor: { provider: 'anthropic', model: 'claude-sonnet-5-5', thinking: 'medium' },
   subagent: { provider: 'anthropic', model: 'claude-opus-5-5', thinking: 'high' },
@@ -65,6 +66,11 @@ export function createProfile(name: string, home = dataHome()) {
   }
 }
 export function saveConfig(dir: string, config: ProfileConfig) { atomicWrite(join(dir, 'config.json'), JSON.stringify(config, null, 2) + '\n'); }
+/** Saves a change and applies it to `config`, the object a running Pi reads its settings from; throws if it can't be written. */
+export function applyConfig(dir: string, config: ProfileConfig, patch: Partial<ProfileConfig>) {
+  saveConfig(dir, { ...config, ...patch });
+  Object.assign(config, patch);
+}
 function modelChoice(value: unknown): value is ModelChoice {
   return record(value) && typeof value.provider === 'string' && typeof value.model === 'string'
     && THINKING.some(level => level === value.thinking);
@@ -101,7 +107,7 @@ export function patchConfigFile(dir: string, patch: ConfigPatch) {
   atomicWrite(join(dir, 'config.json'), JSON.stringify(next, null, 2) + '\n');
   return config;
 }
-export function instructions(dir: string) { return readFileSync(join(dir, 'AGENTS.md'), 'utf8'); }
+export function readInstructions(dir: string) { return readFileSync(join(dir, 'AGENTS.md'), 'utf8'); }
 /** The profile's instructions, read again each turn, so a save applies from the next one. */
 export function saveInstructions(dir: string, text: string) { atomicWrite(join(dir, 'AGENTS.md'), text); }
 export function lastProfile() {
