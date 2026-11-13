@@ -5,4 +5,4 @@ export { createProfile, dataHome, listProfiles, memoryDirectory, profileOwner, p
 export { fingerprint, readImage } from './store.ts';
 export { readMemory, type Memory } from './memory.ts';
 export { readRuns, type RunInfo, type RunState } from './run-record.ts';
-export { attachAgent, listAttachableAgents, type AttachableAgent, type AttachedAgent, type LiveState, type LiveTool, type WindowEvent, type WindowMessage } from './window-client.ts';
+export { attachAgent, type AttachedAgent, type LiveState, type LiveTool, type WindowEvent, type WindowMessage } from './window-client.ts';

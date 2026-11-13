@@ -31,7 +31,7 @@ export interface WindowEvent {
 export type WindowMessage = AssistantMessage | ToolResultMessage;
 type Frame = Request | Reply | WindowEvent;
 const isMessage = (value: unknown): value is WindowMessage => record(value) && (value.role === 'assistant' || value.role === 'toolResult') && Array.isArray(value.content);
-const isAssistant = (value: unknown): value is AssistantMessage => isMessage(value) && value.role === 'assistant';
+export const isAssistant = (value: unknown): value is AssistantMessage => isMessage(value) && value.role === 'assistant';
 const isLive = (value: unknown): value is LiveState => record(value) && typeof value.state === 'string' && typeof value.model === 'string'
   && (value.streaming === undefined || isAssistant(value.streaming))
   && Array.isArray(value.tools) && value.tools.every(t => record(t) && typeof t.id === 'string' && typeof t.name === 'string' && typeof t.started === 'number')

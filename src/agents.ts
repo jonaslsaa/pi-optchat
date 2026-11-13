@@ -550,7 +550,7 @@ export class Children {
     if (this.deleting.has(id)) throw new Error(`${id} is being deleted by the user.`);
     const live = this.running.get(id), run = this.history.records.get(id);
     if (!live && run && runsElsewhere(run)) throw new Error(`${id} is a connected window running in its own Pi process, which tell can't reach. Its handoff arrives when it ends.`);
-    if (!live && source === 'manager' && run) return this.track(this.resume(id, message, caller));
+    if (!live && source === 'manager' && run) return this.track(this.resume(id, message, { caller }));
     if (live && !['running', 'waiting', 'paused'].includes(live.info.state)) throw new Error(`${id} is finishing. Its report will arrive on its own${live.info.connected || source === 'user' ? '' : '; tell it again after that to resume it'}.`);
     if (!live) throw new Error(`No running subagent ${id}.`);
     const text = live.info.connected && source === 'manager' ? `[Main agent guidance]\n${message.trim()}` : message.trim(); if (!message.trim()) throw new Error('Message is empty.');
@@ -569,11 +569,7 @@ export class Children {
     return 'Message queued for the next tool boundary.';
   }
   /** The user's message to a finished subagent from another app (pi-optchat/files' attachAgent): it resumes as a tell from the main agent would, but the message is the user's. */
-  async resumeByUser(id: string, message: string) {
-    if (this.deleting.has(id)) throw new Error(`${id} is being deleted by the user.`);
-    if (!this.history.records.has(id)) throw new Error(`No subagent ${id}.`);
-    return this.track(this.resume(id, message, undefined, 'user'));
-  }
+  resumeByUser(id: string, message: string) { return this.track(this.resume(id, message, { from: 'user' })); }
   /**
    * The user's Ctrl+C, never destructive: aborts the current step. With guidance queued, the run continues at once with it;
    * with none, it pauses until the next message (from the user or a tell). Only stop() ends a run.
@@ -630,8 +626,10 @@ export class Children {
     return work;
   }
   /** Reopens a finished child from its saved transcript, same ID, parent and model, and gives it a new message. */
-  private async resume(id: string, message: string, caller: string | undefined, from: Guidance['from'] = 'manager') {
-    const run = this.history.records.get(id)!, text = message.trim();
+  private async resume(id: string, message: string, { caller, from = 'manager' }: { caller?: string; from?: Guidance['from'] } = {}) {
+    if (this.deleting.has(id)) throw new Error(`${id} is being deleted by the user.`);
+    const run = this.history.records.get(id), text = message.trim();
+    if (!run) throw new Error(`No subagent ${id}.`);
     if (!text) throw new Error('Message is empty.');
     if (run.connected) throw new Error(`${id} was a connected conversation with the user. It has ended and its handoff was delivered, so it cannot be resumed. Spawn a new subagent instead.`);
     if (!['completed', 'failed', 'stopped', 'interrupted'].includes(run.state) || this.resuming.has(id)) throw new Error(`${id} is still finishing. Its report will arrive on its own.`);
@@ -699,7 +697,7 @@ export class Children {
         if (!this.history.records.get(run.parentId)?.cutOff && !this.running.has(run.parentId)) { orphans.push(`${run.id} (under ${run.parentId})`); drop(run); }
         continue;
       }
-      try { await this.track(this.resume(id, RESTARTED, undefined)); resumed.push(id); }
+      try { await this.track(this.resume(id, RESTARTED)); resumed.push(id); }
       catch (error) {
         const still = current(id);
         if (!still) continue; // Resumed by someone else meanwhile.

@@ -7,7 +7,7 @@ import { checkSocketPath, isWindows, profileSocket, removeStaleSocket } from './
 import { textContent } from './transcript.ts';
 import { isActiveRun, isRemoteWindow, type RunInfo } from './runs.ts';
 import { HANDOFF_REQUEST } from './prompts.ts';
-import { connectWindow, wire, type Action, type AttachableAgent, type LiveState, type WindowMessage } from './window-client.ts';
+import { connectWindow, isAssistant, wire, type Action, type AttachableAgent, type LiveState, type WindowMessage } from './window-client.ts';
 import type { AssistantMessage, UserMessage } from '@earendil-works/pi-ai';
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -23,7 +23,6 @@ function clipContent(content: unknown): unknown {
   return content.map(part => !record(part) ? part : part.type === 'text' && typeof part.text === 'string' ? { ...part, text: shorten(part.text, 50_000) }
     : part.type === 'image' ? { type: 'text', text: '[image]' } : part);
 }
-const isAssistant = (message: AgentMessage | undefined): message is AssistantMessage => message?.role === 'assistant';
 const clip = <M extends WindowMessage>(message: M) => ({ ...message, content: clipContent(message.content) }) as M;
 const clipOutput = (output: unknown) => record(output) ? { ...output, content: clipContent(output.content) } : output;
 /**
@@ -44,17 +43,22 @@ export async function serveWindows(directory: string, children: Children, availa
   const server = createServer(socket => {
     if (closing) { socket.destroy(); return; }
     connections.add(socket);
-    let child: string | undefined, attached = false, remote = false, cursor = 0, firstUser = true, lastStatus = '', ending = false, finished = false;
+    let child: string | undefined, attached = false, remote = false, cursor = 0, firstUser = true, lastStatus = '';
+    // `finished`: an attached agent ended, and the view takes only `resume`, which the app's client sends (Pi's terminal attach
+    // just reads a finished agent). `closing`: the view takes nothing more.
+    let phase: 'open' | 'finished' | 'closing' = 'open';
     let finalMessages: AgentMessage[] | undefined;
     const controller = new AbortController();
     let queue = Promise.resolve();
     const track = (promise: Promise<void>) => { work.add(promise); void promise.finally(() => work.delete(promise)).catch(() => {}); };
+    // Esc, Alt+Up and stop reply once the abort has started, not when it ends, so a tool that ignores it can't hold up this window.
+    // A refusal is thrown before the abort starts, so it is already settled and wins the race.
+    const started = <T>(action: Promise<T>) => { track(action.then(() => {})); return Promise.race([action, undefined]); };
     const send = wire(socket, frame => {
       if (frame.kind !== 'request') { socket.destroy(); return; }
       queue = queue.then(async () => {
         try {
-          // An attached agent that finished can still be resumed, by the app's client only: Pi's terminal attach just reads it.
-          if (socket.destroyed || ending && !(finished && frame.action === 'resume')) throw new Error('Conversation is closing');
+          if (socket.destroyed || phase === 'closing' || phase === 'finished' && frame.action !== 'resume') throw new Error('Conversation is closing');
           if (frame.action === 'list-agents') {
             const agents: AttachableAgent[] = available() ? children.history.list()
               .filter(info => !info.connected && !!children.live(info.id)
@@ -98,7 +102,7 @@ export async function serveWindows(directory: string, children: Children, availa
             if (remote && !REMOTE_ACTIONS.includes(frame.action)) throw new Error('This window runs its own agent');
             if (!remote && frame.action === 'handoff') throw new Error('Only a window running its own agent hands off');
             if (frame.action === 'handoff') {
-              ending = true;
+              phase = 'closing';
               // Delivered (or saved for the next start) before the reply, so the window queues it if this owner fails it.
               await children.endRemote(child, 'complete', frame.text?.trim() || undefined);
               send({ kind: 'reply', id: frame.id }); return;
@@ -110,34 +114,21 @@ export async function serveWindows(directory: string, children: Children, availa
               send({ kind: 'reply', id: frame.id, text }); return;
             }
             // Esc and Alt+Up in the window, as agent-view.ts does them in the main one.
-            if (frame.action === 'interrupt') {
-              // Reply once the abort has started, not when it ends, so a tool that ignores it can't hold up this window.
-              // interrupt() throws before it starts the abort, so a refusal is already settled and wins the race.
-              const interrupting = children.interrupt(child);
-              track(interrupting.then(() => {}));
-              send({ kind: 'reply', id: frame.id, text: await Promise.race([interrupting, undefined]) }); return;
-            }
-            // The Agents page's stop: the agent and its own agents end, and its report says the user stopped it. Replies once
-            // started, as interrupt does.
-            if (frame.action === 'stop') {
-              const stopping = children.stop(child);
-              track(stopping);
-              await Promise.race([stopping, undefined]);
-              send({ kind: 'reply', id: frame.id }); return;
-            }
+            if (frame.action === 'interrupt') { send({ kind: 'reply', id: frame.id, text: await started(children.interrupt(child)) }); return; }
+            // The Agents page's stop: the agent and its own agents end, and its report says the user stopped it.
+            if (frame.action === 'stop') { await started(children.stop(child)); send({ kind: 'reply', id: frame.id }); return; }
             if (frame.action === 'resume') {
-              if (!attached || children.live(child)) throw new Error(`Only a finished agent you attached to resumes; ${child} is still running, so say reaches it`);
+              if (phase !== 'finished') throw new Error(`Only a finished agent you attached to resumes; ${child} has not finished, so say reaches it`);
               if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
-              if (!frame.text?.trim()) throw new Error('Message is empty');
-              await children.resumeByUser(child, frame.text);
-              ending = finished = false; finalMessages = undefined; // Follow it again, from where the view left off.
+              await children.resumeByUser(child, frame.text ?? '');
+              phase = 'open'; finalMessages = undefined; // Follow it again, from where the view left off.
               send({ kind: 'reply', id: frame.id }); return;
             }
             if (frame.action === 'withdraw') { send({ kind: 'reply', id: frame.id, text: children.withdraw(child) }); return; }
             if (frame.action === 'complete') {
               const live = children.live(child);
               if (live) drainMessages(children.retained(child), live.info);
-              ending = true;
+              phase = 'closing';
               if (!attached) track(children.finish(child, 'complete').then(() => {}));
               send({ kind: 'event', name: 'finished', text: attached ? 'Detached. The background agent remains with its original parent.'
                 : 'Conversation ended by you. The original window is stopping remaining work and preparing the handoff.' });
@@ -184,11 +175,11 @@ export async function serveWindows(directory: string, children: Children, availa
       return true;
     };
     const timer = setInterval(() => {
-      if (!child || remote || socket.destroyed || ending) return;
+      if (!child || remote || socket.destroyed || phase !== 'open') return;
       const live = children.live(child), info = children.history.records.get(child);
       if (!info) {
         // Deleted from the Agents page: end the window (and a headless join) instead of leaving it waiting forever.
-        ending = true;
+        phase = 'closing';
         send({ kind: 'event', name: 'finished', text: 'This conversation was deleted from the Agents page.' });
         return;
       }
@@ -209,7 +200,7 @@ export async function serveWindows(directory: string, children: Children, availa
       if (!live && (attached && !isActiveRun(info) || info.handoff?.delivered)) {
         try { if (!drainMessages(finalMessages ??= children.retained(child), info)) return; }
         catch (error) { send({ kind: 'event', name: 'message', text: `Could not read the final transcript: ${errorText(error)}` }); }
-        ending = true; finished = attached;
+        phase = attached ? 'finished' : 'closing';
         send({ kind: 'event', name: 'finished', text: attached ? `Agent ${child} is ${info.state}. Its report goes to its original parent; /complete closes only this view.` : info.handoff?.text ?? 'Conversation ended.' });
       }
     }, 150);

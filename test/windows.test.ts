@@ -1291,22 +1291,12 @@ test("another app resumes a finished agent it attached to: the message is the us
   mkdirSync(join(f.dir, '.pi', 'skills', 'review'), { recursive: true });
   writeFileSync(join(f.dir, '.pi', 'skills', 'review', 'SKILL.md'), '---\nname: review\ndescription: Reviews code.\n---\nREVIEW_SKILL_BODY\n');
   const events: WindowEvent[] = [];
-  let available = true;
-  const close = await serveWindows(f.dir, f.children, () => available, async () => {});
+  const close = await serveWindows(f.dir, f.children, () => true, async () => {});
   const [id] = await f.children.spawn([{ task: 'first result' }], f.dir);
   await until(() => !f.children.live(id) && f.reports.some(t => t.includes(`[${id}]`)));
   const agent = await attachAgent(f.dir, id, e => events.push(e));
   try {
     await until(() => events.some(e => e.name === 'finished'));
-    available = false;
-    await assert.rejects(agent.resume('Not during an import'), /importing/);
-    available = true;
-    // A memory that can't take the message leaves the run finished and resumable, not stuck running.
-    const append = f.memory.append;
-    f.memory.append = () => { throw new Error('Memory is closed'); };
-    await assert.rejects(agent.resume('Not without memory'), /Memory is closed/);
-    f.memory.append = append;
-    assert.equal(f.children.history.records.get(id)?.state, 'completed');
     await agent.resume('/skill:review second result');
     await until(() => f.children.history.records.get(id)?.state === 'completed' && f.reports.filter(t => t.includes(`[${id}]`)).length === 2);
     assert.match(f.reports.at(-1) ?? '', /REVIEW_SKILL_BODY[\s\S]*second result/);
@@ -1316,5 +1306,29 @@ test("another app resumes a finished agent it attached to: the message is the us
     // The finished view and the resumed one read the same session entries, so the cursor carries over: each message once.
     assert.deepEqual(events.filter(e => e.name === 'message').map(e => [e.from, e.text.startsWith('Reply: ') ? 'Reply' : e.text]),
       [['user', 'first result'], ['agent', 'Reply'], ['user', '/skill:review second result'], ['agent', 'Reply']]);
+  } finally { agent.close(); await close(); await f.close(); }
+});
+
+test('a resume refused during an import, or by a memory that cannot take the message, leaves the agent finished and resumable', async () => {
+  const f = await fixture();
+  let available = true;
+  const close = await serveWindows(f.dir, f.children, () => available, async () => {});
+  const [id] = await f.children.spawn([{ task: 'first result' }], f.dir);
+  await until(() => !f.children.live(id));
+  const finished: WindowEvent[] = [];
+  const agent = await attachAgent(f.dir, id, e => { if (e.name === 'finished') finished.push(e); });
+  try {
+    await until(() => finished.length > 0);
+    available = false;
+    await assert.rejects(agent.resume('Not during an import'), /importing/);
+    available = true;
+    const append = f.memory.append;
+    f.memory.append = () => { throw new Error('Memory is closed'); };
+    await assert.rejects(agent.resume('Not without memory'), /Memory is closed/);
+    f.memory.append = append;
+    assert.equal(f.children.history.records.get(id)?.state, 'completed');
+    assert.equal(f.children.live(id), undefined);
+    await agent.resume('second result');
+    await until(() => f.children.history.records.get(id)?.state === 'completed' && finished.length === 2);
   } finally { agent.close(); await close(); await f.close(); }
 });
