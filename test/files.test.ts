@@ -4,10 +4,10 @@ import fs, { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createProfile, fingerprint, listProfiles, memoryDirectory, profileOwner, profilePath, readImage, readMemory, readRuns } from '../src/files.ts';
+import { createProfile, fingerprint, listProfiles, loadConfig, memoryDirectory, profileOwner, profilePath, readImage, readMemory, readRuns, updateConfig } from '../src/files.ts';
 import { Memory } from '../src/memory.ts';
 import { localDay } from '../src/store.ts';
-import { describeOwner, lockProfile, ProfileBusyError } from '../src/profiles.ts';
+import { checkPatch, describeOwner, lockProfile, ProfileBusyError } from '../src/profiles.ts';
 import { removeDir } from './support.ts';
 
 const temp = () => mkdtempSync(join(tmpdir(), 'optchat-files-'));
@@ -121,5 +121,31 @@ test('readRuns lists a profile\'s saved runs and leaves out one it can\'t read',
     writeFileSync(join(runs, 'a1.optchat.json'), JSON.stringify(run));
     writeFileSync(join(runs, 'b2.optchat.json'), '{"id":"b2"');
     assert.deepEqual(readRuns(dir), [run]);
+  } finally { removeDir(home); }
+});
+
+test('updateConfig with no Pi on the profile writes config.json under its lock, keeping keys this copy does not know, and refuses what the settings page would', async () => {
+  const home = temp();
+  try {
+    createProfile('work', home);
+    const dir = profilePath('work', home), file = join(dir, 'config.json');
+    // A setting from a newer OptChat that this copy doesn't know.
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), laterSetting: 'kept' }));
+    const subagent = { provider: 'p', model: 'm', thinking: 'low' } as const;
+    const config = await updateConfig(dir, { maxAgents: 3, memorySearch: true, subagent });
+    assert.deepEqual([config.maxAgents, config.memorySearch, config.subagent], [3, true, subagent]);
+    assert.deepEqual(loadConfig(dir), config);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).laterSetting, 'kept');
+    const before = readFileSync(file, 'utf8');
+    await assert.rejects(updateConfig(dir, { maxAgents: 0 }), /Max active agents must be a whole number of 1 or more/);
+    assert.equal(readFileSync(file, 'utf8'), before, 'a refused change writes nothing');
+    for (const [patch, reason] of [[{ groupReports: 'yes' }, /true or false/], [{ nope: 1 }, /Unknown setting: nope/], [{ main: subagent }, /main model follows Pi/],
+      [{ compactor: { provider: 'p', model: 'm', thinking: 'huge' } }, /compactor must be/], [[], /must be an object/]] as const)
+      assert.throws(() => checkPatch(patch), reason);
+    // Held by a Pi that takes no changes (pi -p serves no socket).
+    const unlock = await lockProfile(dir, describeOwner({ profile: 'work', pid: 1, host: 'h', cwd: '/' }));
+    try { await assert.rejects(updateConfig(dir, { maxAgents: 4 }), /pi -p/); }
+    finally { await unlock(); }
+    assert.equal(readFileSync(file, 'utf8'), before);
   } finally { removeDir(home); }
 });

@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { record } from './core/cache.ts';
 import { atomicWrite } from './store.ts';
 import type { Store } from './core/store.ts';
-import { DEFAULT_SETTINGS, readSettings, type Settings } from './settings.ts';
+import { DEFAULT_SETTINGS, invalid, readSettings, SETTING_KEYS, type Settings } from './settings.ts';
 
 export const isWindows = process.platform === 'win32';
 const PIPE_PREFIX = '\\\\.\\pipe\\';
@@ -69,14 +69,41 @@ function modelChoice(value: unknown): value is ModelChoice {
   return record(value) && typeof value.provider === 'string' && typeof value.model === 'string'
     && THINKING.some(level => level === value.thinking);
 }
-export function loadConfig(dir: string): ProfileConfig {
-  const value: unknown = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'));
+export const loadConfig = (dir: string) => parseConfig(dir, JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')));
+function parseConfig(dir: string, value: unknown): ProfileConfig {
   if (!record(value) || !modelChoice(value.compactor) || !modelChoice(value.subagent) || value.main !== undefined && !modelChoice(value.main)) throw new Error(`Invalid profile config: ${dir}/config.json`);
   const { compactor, subagent, main } = value;
   try { return { compactor, subagent, ...main && { main }, ...readSettings(value) }; }
   catch (error) { throw new Error(`Invalid profile config: ${dir}/config.json: ${error instanceof Error ? error.message : String(error)}`); }
 }
+/** What another app may change: any setting, and the compactor or subagent model. The main model follows Pi's own pick. */
+export type ConfigPatch = Partial<Omit<ProfileConfig, 'main'>>;
+/** Checks a change as the settings page would; throws the first reason it can't be used. */
+export function checkPatch(patch: unknown): asserts patch is ConfigPatch {
+  if (!record(patch)) throw new Error('A config change must be an object.');
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === 'main') throw new Error('The main model follows Pi: pick it there (RPC set_model), and Pi saves it to the profile.');
+    if (key === 'compactor' || key === 'subagent') {
+      if (!modelChoice(value)) throw new Error(`${key} must be { provider, model, thinking }, thinking one of ${THINKING.join(', ')}.`);
+      continue;
+    }
+    const setting = SETTING_KEYS.find(known => known === key);
+    if (!setting) throw new Error(`Unknown setting: ${key}.`);
+    const problem = invalid(setting, value);
+    if (problem) throw new Error(problem);
+  }
+}
+/** A change to config.json while no Pi holds the profile (call only under its lock). Keys this copy doesn't know stay as they are. */
+export function patchConfigFile(dir: string, patch: ConfigPatch) {
+  const raw: unknown = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'));
+  if (!record(raw)) throw new Error(`Invalid profile config: ${dir}/config.json`);
+  const next = { ...raw, ...patch }, config = parseConfig(dir, next);
+  atomicWrite(join(dir, 'config.json'), JSON.stringify(next, null, 2) + '\n');
+  return config;
+}
 export function instructions(dir: string) { return readFileSync(join(dir, 'AGENTS.md'), 'utf8'); }
+/** The profile's instructions, read again each turn, so a save applies from the next one. */
+export function saveInstructions(dir: string, text: string) { atomicWrite(join(dir, 'AGENTS.md'), text); }
 export function lastProfile() {
   try { const name = readFileSync(join(dataHome(), 'last-profile'), 'utf8').trim(); return listProfiles().includes(name) ? name : undefined; }
   catch { return undefined; }

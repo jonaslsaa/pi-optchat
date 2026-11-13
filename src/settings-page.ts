@@ -113,7 +113,7 @@ class ModelStep extends Container {
 }
 
 /** Saves a change to the profile config and applies it in memory; returns the reason if it couldn't be written. */
-function update(o: Options, patch: Partial<ProfileConfig>) {
+export function update(o: Pick<Options, 'config' | 'save'>, patch: Partial<ProfileConfig>) {
   try { o.save({ ...o.config, ...patch }); }
   catch (error) { return `Could not save: ${error instanceof Error ? error.message : String(error)}`; }
   Object.assign(o.config, patch);

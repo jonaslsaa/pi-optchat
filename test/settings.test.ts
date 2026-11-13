@@ -11,6 +11,7 @@ import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { createProfile, defaults, loadConfig, profilePath, saveConfig, type ProfileConfig } from '../src/profiles.ts';
 import { settingsPage } from '../src/settings-page.ts';
+import { updateConfig } from '../src/files.ts';
 import { COMPACT, SEARCH_DOC } from '../src/core/prompts.ts';
 import { REPORT_TYPE, textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
@@ -368,6 +369,50 @@ test('/optchat model and /optchat agents model pick from a searchable list that 
     assert.deepEqual(loadConfig(profilePath('fixture')).compactor, { provider: 'many', model: 'model-29', thinking: 'off' });
     await session.prompt('/optchat agents model');
     assert.deepEqual(loadConfig(profilePath('fixture')).subagent, { provider: 'many', model: 'model-29', thinking: 'off' });
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    removeDir(dir);
+  }
+});
+
+test('another app changes settings through the Pi that owns the profile: it applies to the next turn and is saved, and a model must be one Pi offers', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-configure-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  const turns: Context[] = [];
+  const { runtime } = await fixture(dir, context => {
+    if (context.messages.some(m => m.role === 'system' && m.content === COMPACT)) return 'summary';
+    turns.push(context);
+    return 'ok';
+  });
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    const profile = profilePath('fixture');
+    saveConfig(profile, { ...loadConfig(profile), compactor: model });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.inMemory(dir);
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'search'] })).session;
+    await session.bindExtensions({ uiContext: session.extensionRunner.getUIContext(), mode: 'tui' });
+    const searching = () => { const system = turns.at(-1)?.messages[0]; return system?.role === 'system' && !!system.toolsAdded?.some(t => t.name === 'search'); };
+    await session.prompt('Hello.');
+    assert.equal(searching(), false);
+
+    const config = await updateConfig(profile, { memorySearch: true, maxAgents: 3, subagent: model });
+    assert.deepEqual([config.memorySearch, config.maxAgents, config.subagent], [true, 3, model]);
+    assert.deepEqual(loadConfig(profile), config);
+    await session.prompt('Again.');
+    assert.equal(searching(), true, 'the owner applied it to its live config');
+
+    const before = readFileSync(join(profile, 'config.json'), 'utf8');
+    await assert.rejects(updateConfig(profile, { subagent: { ...model, thinking: 'high' } }), /fixture\/fixture with thinking high is not offered by this Pi/);
+    await assert.rejects(updateConfig(profile, { subagent: { provider: 'other', model: 'x', thinking: 'off' } }), /not offered by this Pi/);
+    assert.equal(readFileSync(join(profile, 'config.json'), 'utf8'), before);
   } finally {
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;

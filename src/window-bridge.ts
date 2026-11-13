@@ -3,7 +3,7 @@ import { createServer, type Socket } from 'node:net';
 import { INTERRUPTED, type Children } from './agents.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './core/cache.ts';
-import { checkSocketPath, isWindows, profileSocket, removeStaleSocket } from './profiles.ts';
+import { checkPatch, checkSocketPath, isWindows, profileSocket, removeStaleSocket, type ConfigPatch } from './profiles.ts';
 import { textContent } from './transcript.ts';
 import { isActiveRun, isRemoteWindow, type RunInfo } from './runs.ts';
 import { HANDOFF_REQUEST } from './prompts.ts';
@@ -34,7 +34,7 @@ const fits = (value: unknown) => { try { return JSON.stringify(value).length < 1
 
 /** Call only while holding the profile lock. The owner hosts every child session. */
 export async function serveWindows(directory: string, children: Children, available: () => boolean,
-  report: (text: string) => Promise<void>) {
+  report: (text: string) => Promise<void>, configure?: (patch: ConfigPatch) => void) {
   const path = profileSocket(directory, 'windows'); checkSocketPath(path);
   removeStaleSocket(path); // A previous owner can no longer hold the profile lock.
   const connections = new Set<Socket>();
@@ -65,6 +65,14 @@ export async function serveWindows(directory: string, children: Children, availa
                 && (info.state === 'running' || info.state === 'waiting' || info.state === 'paused'))
               .map(info => ({ id: info.id, task: info.task.slice(0, 200), title: info.title, state: info.state })) : [];
             send({ kind: 'reply', id: frame.id, text: JSON.stringify(agents) }); return;
+          } else if (frame.action === 'configure') {
+            // Another app's settings change (pi-optchat/files' updateConfig), checked again here and applied as the settings page does.
+            if (!configure) throw new Error('This Pi takes no settings changes');
+            if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
+            let patch: unknown;
+            try { patch = JSON.parse(frame.text ?? ''); } catch { patch = undefined; }
+            checkPatch(patch);
+            configure(patch);
           } else if (frame.action === 'attach') {
             if (child) throw new Error('This window already has a conversation');
             if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');

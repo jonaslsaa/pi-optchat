@@ -9,7 +9,7 @@ import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
 import { createCompressor } from './compactor.ts';
-import { createProfile, describeOwner, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, memoryDirectory, profilePath, type ModelChoice, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
+import { createProfile, describeOwner, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, memoryDirectory, profilePath, type ModelChoice, rememberProfile, saveConfig, saveInstructions, ProfileBusyError, type ConfigPatch, type ProfileConfig } from './profiles.ts';
 import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC } from './core/prompts.ts';
 import { MASTER, modelsHint } from './prompts.ts';
 import { cachePayload, record } from './core/cache.ts';
@@ -36,7 +36,7 @@ import { openConnectedWindow, registerConnectedRenderer } from './connected-wind
 import { openRemoteWindow, ROLE_STATUS, type Role } from './rpc-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
-import { showModelPicker, showSettings } from './settings-page.ts';
+import { showModelPicker, showSettings, update } from './settings-page.ts';
 import { showMenu } from './menu.ts';
 
 const binding = 'optchat.profile';
@@ -298,7 +298,7 @@ export default function optchat(pi: ExtensionAPI) {
       await restoreMain(ctx, active);
       if (ctx.mode === 'tui') unmountNavigation = mountNavigation(ctx, children, memory, shortcut, page => { void inspect(ctx, page); });
       // A one-shot run (`pi -p`, JSON) exits after its own prompt, which would end every conversation connected to it.
-      if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport);
+      if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport, patch => configure(ctx, patch));
       untitle = children.subscribe(() => showTitle(ctx)); showTitle(ctx);
       status(ctx);
       ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
@@ -617,9 +617,20 @@ export default function optchat(pi: ExtensionAPI) {
   const settingsOptions = (ctx: ExtensionContext, a: Active) => ({ profile: a.name, config: a.config,
     models: ctx.modelRegistry.getAvailable().map(m => ({ name: `${m.provider}/${m.id}`, thinking: getSupportedThinkingLevels(m) })).sort((x, y) => x.name.localeCompare(y.name)),
     save: (config: ProfileConfig) => saveConfig(a.dir, config) });
+  /** Another app's settings change, through the profile socket: what the settings page offers and does, without the page. */
+  const configure = (ctx: ExtensionContext, patch: ConfigPatch) => {
+    const o = settingsOptions(ctx, required());
+    for (const role of ['compactor', 'subagent'] as const) {
+      const choice = patch[role];
+      if (choice && !o.models.some(m => m.name === `${choice.provider}/${choice.model}` && m.thinking.includes(choice.thinking)))
+        throw new Error(`${role}: ${choice.provider}/${choice.model} with thinking ${choice.thinking} is not offered by this Pi; it lists the models it is logged in to.`);
+    }
+    const problem = update(o, patch);
+    if (problem) throw new Error(problem);
+  };
   const pickModel = async (ctx: ExtensionContext, role: 'compactor' | 'subagent') => {
     const a = required();
-    if (ctx.mode !== 'tui') throw new Error('Choosing a model requires interactive Pi. Edit config.json in the profile directory instead.');
+    if (ctx.mode !== 'tui') throw new Error('Choosing a model requires interactive Pi or optchat-app.');
     const choice = await showModelPicker(ctx, role, settingsOptions(ctx, a));
     if (choice) ctx.ui.notify(`${role}: ${choice.provider}/${choice.model} (${choice.thinking}); applies to new calls.`, 'info');
   };
@@ -712,7 +723,7 @@ export default function optchat(pi: ExtensionAPI) {
     }
     if (action === 'settings') {
       const a = required();
-      if (ctx.mode !== 'tui') throw new Error('/optchat settings requires interactive Pi. Edit config.json in the profile directory instead.');
+      if (ctx.mode !== 'tui') throw new Error('/optchat settings requires interactive Pi or optchat-app.');
       return showSettings(ctx, settingsOptions(ctx, a));
     }
     if (action === 'model') return pickModel(ctx, 'compactor');
@@ -721,7 +732,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (action === 'instructions') {
       const a = required();
       const edited = await ctx.ui.editor(`${a.name} · AGENTS.md`, instructions(a.dir));
-      if (edited !== undefined) { atomicWrite(join(a.dir, 'AGENTS.md'), edited); ctx.ui.notify('Saved. Applies to the next turn and newly spawned agents.', 'info'); }
+      if (edited !== undefined) { saveInstructions(a.dir, edited); ctx.ui.notify('Saved. Applies to the next turn and newly spawned agents.', 'info'); }
       return;
     }
     if (action === 'browse') {

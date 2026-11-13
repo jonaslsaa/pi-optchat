@@ -1,14 +1,14 @@
 import { createConnection, type Socket } from 'node:net';
 import type { AssistantMessage, ToolResultMessage } from '@earendil-works/pi-ai';
 import { record } from './core/cache.ts';
-import { profileSocket } from './profiles.ts';
+import { checkPatch, loadConfig, lockProfile, patchConfigFile, ProfileBusyError, profileSocket, type ConfigPatch, type ProfileConfig } from './profiles.ts';
 
 // The connected-window protocol and its client, without Pi: Pi's windows use it, and so can another app through pi-optchat/files.
 // The server is serveWindows in window-bridge.ts, in the Pi that owns the profile.
 
 /** `register` and `handoff` are a window whose agent runs in its own process (an RPC host's): it registers once it has a request,
  * and `handoff` ends it with the handoff it wrote. A window that drops its connection without one ended without /complete. */
-const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'stop', 'resume', 'withdraw', 'complete', 'register', 'handoff'] as const;
+const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'stop', 'resume', 'withdraw', 'complete', 'register', 'handoff', 'configure'] as const;
 export type Action = typeof ACTIONS[number];
 const isAction = (value: unknown): value is Action => ACTIONS.some(action => action === value);
 interface Request { kind: 'request'; id: number; action: Action; text?: string; cwd?: string; activeOnly?: boolean }
@@ -153,3 +153,25 @@ export async function attachAgent(profileDirectory: string, id: string, event: (
   };
 }
 export type AttachedAgent = Awaited<ReturnType<typeof attachAgent>>;
+
+/**
+ * Changes a profile's settings or its compactor or subagent model, as /optchat settings does, and returns the config as it now is.
+ * While a Pi owns the profile, that Pi applies the change at once (a model must be one it is logged in to); otherwise config.json
+ * changes under the profile's lock, keeping keys this copy doesn't know. Throws the reason a change can't be made.
+ */
+export async function updateConfig(profileDirectory: string, patch: ConfigPatch): Promise<ProfileConfig> {
+  checkPatch(patch);
+  // Only the lock holder writes the profile: taking the lock is also how this finds out no Pi owns it.
+  const unlock = await lockProfile(profileDirectory, 'pi-optchat/files, changing config.json').catch((error: unknown) => {
+    if (error instanceof ProfileBusyError) return undefined;
+    throw error;
+  });
+  if (unlock) {
+    try { return patchConfigFile(profileDirectory, patch); }
+    finally { await unlock(); }
+  }
+  const connection = await connectWindow(profileDirectory, () => {}, () => {});
+  try { await connection.request('configure', JSON.stringify(patch)); }
+  finally { connection.close(); }
+  return loadConfig(profileDirectory);
+}
