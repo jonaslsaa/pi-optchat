@@ -18,6 +18,8 @@ export interface RunInfo {
   parentId?: string; depth: number;
   state: RunState; report?: string;
   connected?: boolean;
+  /** `none`: spawned without the memory view, so it has no view, zoom or date; a resume keeps that. Unset: it got the view. */
+  memory?: 'none';
   /** A connected window whose agent runs in its own Pi process (an RPC host's second session on a busy profile): `pid` is that
    * process, `session` its Pi session file, read when the window ends. The record is all this process has of it. `after`: a window
    * that went on after /complete shares that session with the conversations before it, so only its messages from then on are its. */
@@ -39,6 +41,7 @@ function isRun(value: unknown): value is RunInfo {
     && (value.sessionFile === undefined || typeof value.sessionFile === 'string')
     && (value.report === undefined || typeof value.report === 'string')
     && (value.connected === undefined || typeof value.connected === 'boolean')
+    && (value.memory === undefined || value.memory === 'none')
     && (value.cutOff === undefined || typeof value.cutOff === 'boolean')
     && (value.window === undefined || record(value.window) && typeof value.window.pid === 'number' && (value.window.session === undefined || typeof value.window.session === 'string')
       && (value.window.after === undefined || typeof value.window.after === 'number'))

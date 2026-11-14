@@ -46,6 +46,10 @@ test('agent view shows the child conversation like the main chat, fills the scre
     assert.equal(lines.length, 30, 'fills the screen so the main chat is hidden');
     assert.ok(lines.every(line => visibleWidth(line) <= 100));
     assert.match(lines[0], /child-1 {2}Count the files .*completed · 1m 0s · claude-test/);
+    const record = children.history.records.get('child-1')!;
+    record.memory = 'none';
+    assert.match(view.render(100)[0], /completed · 1m 0s · claude-test · no view/, 'a child spawned without the view says so');
+    delete record.memory;
     assert.match(text, /\$ ls \| wc -l/, "bash calls use Pi's own renderer");
     assert.match(text, /TOOL_OUTPUT_42/);
     assert.match(text, /There are 42 files\./);

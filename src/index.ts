@@ -600,7 +600,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (tools.includes('search') !== memorySearch) pi.setActiveTools(memorySearch ? [...tools, 'search'] : tools.filter(name => name !== 'search'));
   };
   pi.registerTool({ name: 'spawn', label: 'Spawn background agents',
-    description: 'Start background subagents, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Leave a task\'s model unset for the profile\'s default; name one only when the user asks, with an id from models(). Each receives the current memory view and read-only zoom/date. Whether children may delegate further, and how many agents may run at once, is set per profile. Completion reports arrive automatically; never poll or sleep waiting for them.',
+    description: 'Start background subagents, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Leave a task\'s model unset for the profile\'s default; name one only when the user asks, with an id from models(). Each receives the current memory view and read-only zoom/date, unless its memory is \'none\': then it gets only its task, for self-contained or blind work. Whether children may delegate further, and how many agents may run at once, is set per profile. Completion reports arrive automatically; never poll or sleep waiting for them.',
     parameters: Type.Object({ tasks: TASKS }),
     async execute(_id, args, signal, _update, ctx) {
       const text = await required().children.start(args.tasks, ctx.cwd, signal); status(ctx);

@@ -7,7 +7,7 @@ import * as sdk from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { StringEnum, type Api, type Model } from '@earendil-works/pi-ai';
 import { allowSearch, SEARCH_DOC, VIEW_DOC } from './core/prompts.ts';
-import { windowHandoff, CONNECTED, cutOffChildren, delegation, NO_DELEGATION, NOT_CONNECTED, RESTARTED, STEERABLE, SUBAGENT } from './prompts.ts';
+import { windowHandoff, CONNECTED, cutOffChildren, delegation, NO_DELEGATION, NOT_CONNECTED, RESTARTED, STEERABLE, SUBAGENT, SUBAGENT_NO_VIEW } from './prompts.ts';
 import { memoryTools } from './tools.ts';
 import { searchTool } from './core/tools.ts';
 import { VIEW } from './core/memory.ts';
@@ -82,7 +82,8 @@ const CWD_DOC = 'Project directory the subagent works in (~ allowed); its AGENTS
 /** The spawn tools' tasks. What a task leaves out of model and thinking is the profile's subagent choice. */
 export const TASKS = Type.Array(Type.Object({ task: Type.String(), title: Type.Optional(Type.String({ description: TITLE_DOC })), cwd: Type.Optional(Type.String({ description: CWD_DOC })),
   model: Type.Optional(Type.String({ description: 'Leave unset for the profile\'s subagent model (named in your instructions). Set only when the user asks for a model, as provider/id from models().' })),
-  thinking: Type.Optional(StringEnum(THINKING, { description: 'Leave unset for the profile\'s subagent level. Set only when the user asks for one.' })) }), { minItems: 1 });
+  thinking: Type.Optional(StringEnum(THINKING, { description: 'Leave unset for the profile\'s subagent level. Set only when the user asks for one.' })),
+  memory: Type.Optional(StringEnum(['view', 'none'], { description: 'Leave unset for the memory view. \'none\' starts the child with only its task: no view, no zoom/date. Use for self-contained or blind tasks.' })) }), { minItems: 1 });
 export type Task = Static<typeof TASKS>[number];
 /** The tool beside spawn that lists what a task's `model` may be. */
 export const modelsTool = (children: () => Children) => ({ name: 'models', label: 'List models',
@@ -243,11 +244,13 @@ export class Children {
   private async launch(tasks: Task[], cwd: string, signal: AbortSignal | undefined, parentId: string | undefined, connected = false) {
     for (const directory of tasks.map(t => taskDirectory(cwd, t.cwd))) if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error(`No such directory: ${directory}`);
     const profile = this.choice();
+    // A child without the view can't hand it on: its own children get none either.
+    const viewless = parentId !== undefined && this.running.get(parentId)?.info.memory === 'none';
     const runs = tasks.map(task => {
       const name = task.model ?? `${profile.provider}/${profile.model}`, model = this.find(name);
       // Like Pi's own setModel: a named model needs auth, so a guess at a provider the user isn't logged in to fails here, not in the child.
       if (!model || task.model && !this.registry.hasConfiguredAuth(model)) throw new Error(`Subagent model unavailable: ${name}. Models you can use: ${this.registry.getAvailable().map(m => `${m.provider}/${m.id}`).join(', ') || 'none'}.`);
-      return { ...task, model, thinking: task.thinking ?? profile.thinking };
+      return { ...task, model, thinking: task.thinking ?? profile.thinking, memory: viewless ? 'none' as const : task.memory };
     });
     if (this.closing) throw new Error('Profile is closing.');
     this.settling++;
@@ -264,14 +267,14 @@ export class Children {
     const launched = await this.track(this.launchBatch({ tasks: runs, cwd, depth, parentId, connected, signal, cancelled }));
     // Grouped, the last child of this spawn to finish delivers every report; otherwise each reports on its own.
     const batch = groupReports && !connected ? { ids: launched.map(c => c.info.id), reports: new Map<string, string>() } : undefined;
-    // Siblings on one model and directory send the same system prompt, tools and view. Anthropic can't read a cache entry
+    // Siblings on one model, directory and memory choice send the same system prompt, tools and view. Anthropic can't read a cache entry
     // still being written, so their first requests wait until the first sibling starts answering and read its entry instead.
     const [first] = launched, answered = launched.length > 1 && first.session.model?.api === 'anthropic-messages' ? answering(first.session) : undefined;
     for (const live of launched) {
       live.batch = batch;
-      const work = this.execute(live, childInput({ view, task: live.info.task })).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
+      const work = this.execute(live, live.info.memory === 'none' ? live.info.task : childInput({ view, task: live.info.task })).catch(error => this.warn(`Subagent completion failed: ${String(error)}`))
         .finally(() => { this.completions.delete(work); this.changed(); });
-      if (live === first && answered) for (const sibling of launched.slice(1)) if ((['model', 'thinking', 'cwd'] as const).every(k => sibling.info[k] === first.info[k])) sibling.primed = Promise.race([answered, work]);
+      if (live === first && answered) for (const sibling of launched.slice(1)) if ((['model', 'thinking', 'cwd', 'memory'] as const).every(k => sibling.info[k] === first.info[k])) sibling.primed = Promise.race([answered, work]);
       this.completions.add(work);
       live.completion = work;
     }
@@ -295,12 +298,12 @@ export class Children {
         signal?.throwIfAborted();
         if (cancelled()) throw new Error('Parent or profile is stopping.');
         const id = randomUUID().slice(0, 8), directory = taskDirectory(cwd, task.cwd);
-        const session = await this.open({ id, directory, depth, parentId, connected, model: task.model, thinking: task.thinking,
+        const session = await this.open({ id, directory, depth, parentId, connected, model: task.model, thinking: task.thinking, memory: task.memory,
           sessionManager: SessionManager.create(directory, join(this.profileDirectory, 'runs')) });
         // One short line without brackets, so the `[id · title]` head of its reports stays parseable and small.
         const title = oneLine(task.title ?? '').replace(/[[\]]/g, '').trim().slice(0, 128).trimEnd();
         const info: RunInfo = { id, task: task.task, ...(title ? { title } : {}), cwd: directory, model: `${task.model.provider}/${task.model.id}`, thinking: session.thinkingLevel,
-          parentSession: this.options.parentSession ?? '', parentId, depth, sessionFile: session.sessionFile, started: Date.now(), state: 'running', guidance: [], ...(connected ? { connected: true } : {}) };
+          parentSession: this.options.parentSession ?? '', parentId, depth, sessionFile: session.sessionFile, started: Date.now(), state: 'running', guidance: [], ...(connected ? { connected: true } : {}), ...(task.memory === 'none' ? { memory: 'none' as const } : {}) };
         const live: LiveRun = { session, info, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [], steering: Promise.resolve() };
         launched.push(live); this.save(info); this.running.set(id, live);
         this.launching--; reserved--;
@@ -323,8 +326,8 @@ export class Children {
   }
   /** Builds a child session with the same prompt, tools and extensions whether it is new or resumed. */
   private async open(o: { id: string; directory: string; depth: number; parentId?: string; connected: boolean; model: Model<Api>;
-    thinking?: ModelChoice['thinking']; sessionManager: SessionManager }) {
-    const { id, directory, depth, parentId, connected } = o;
+    thinking?: ModelChoice['thinking']; memory?: Task['memory']; sessionManager: SessionManager }) {
+    const { id, directory, depth, parentId, connected } = o, viewless = o.memory === 'none';
     const { subagentLevels, maxAgents, memorySearch } = this.settings, delegates = depth < subagentLevels;
     // The user's settings list their installed packages; a copy in memory keeps the child from writing them back.
     const settingsManager = SettingsManager.inMemory({ ...SettingsManager.create(directory, getAgentDir()).getSettings(),
@@ -338,7 +341,8 @@ export class Children {
         // Same prompt as the main agent (AGENTS.md files, skills, cwd); only the OptChat preamble differs.
         // Read every run, so edits reach a live child's next run (after a pause, or a connected window's next message); Pi sends only the changed sections.
         pi.on('before_agent_start', event => {
-          event.systemPromptOptions.customPrompt = allowSearch(`${SUBAGENT}\n\n${VIEW_DOC}${memorySearch ? SEARCH_DOC : ''}`, memorySearch);
+          // Without the view, the preamble says the first message is the task alone, and nothing describes the view, zoom or search.
+          event.systemPromptOptions.customPrompt = viewless ? SUBAGENT_NO_VIEW : allowSearch(`${SUBAGENT}\n\n${VIEW_DOC}${memorySearch ? SEARCH_DOC : ''}`, memorySearch);
           event.systemPromptOptions.sections.instructions = [this.instructions(), delegates ? delegation(maxAgents, this.choice()) : NO_DELEGATION, STEERABLE, connected ? CONNECTED : NOT_CONNECTED].filter(Boolean).join('\n\n');
           refreshContextFiles(event.systemPromptOptions);
         });
@@ -353,7 +357,7 @@ export class Children {
     await loader.reload();
     const { session } = await (this.options.createSession ?? createAgentSession)({ cwd: directory, resourceLoader: loader, settingsManager,
       model: o.model, thinkingLevel: o.thinking, sessionManager: o.sessionManager,
-      customTools: [...memoryTools(() => this.memory, run => this.transcript(run, id)), ...(memorySearch ? [searchTool(() => this.memory)] : []), ...(delegates ? [...this.delegationTools(id, directory, subagentLevels, maxAgents), modelsTool(() => this)] : []), this.parentTool(id, parentId, connected)],
+      customTools: [...viewless ? [] : [...memoryTools(() => this.memory, run => this.transcript(run, id)), ...(memorySearch ? [searchTool(() => this.memory)] : [])], ...(delegates ? [...this.delegationTools(id, directory, subagentLevels, maxAgents), modelsTool(() => this)] : []), this.parentTool(id, parentId, connected)],
       excludeTools: delegates ? [] : ['spawn', 'tell', 'models'],
     });
     // Callers track the session only after this returns: clean up here if its extensions fail to start.
@@ -515,7 +519,9 @@ export class Children {
     // A metadata failure must not suppress delivery of the actual result.
     try { this.save(info); } catch (error) { this.warn(`Could not save run metadata: ${String(error)}`); }
     // A deleted run's transcript is gone.
-    await this.deliver(info, live.batch, `${reportHead(info)} ${info.report}${this.deleting.has(info.id) ? '' : `\n\n${fullChat(info.id)}`}`);
+    // A parent spawned without the view has no zoom tool, so it cannot follow the pointer to the full chat.
+    const pointer = info.parentId && this.history.records.get(info.parentId)?.memory === 'none' ? '' : `\n\n${fullChat(info.id)}`;
+    await this.deliver(info, live.batch, `${reportHead(info)} ${info.report}${this.deleting.has(info.id) ? '' : pointer}`);
   }
   /** Sends a run's report to its parent; in a grouped spawn, only once every child of the spawn has one. */
   private async deliver(info: RunInfo, batch: LiveRun['batch'], text: string) {
@@ -650,7 +656,7 @@ export class Children {
     let reserved = true;
     try {
       // No thinking level: the session restores the one it ran with.
-      const session = await this.open({ id, directory: run.cwd, depth: run.depth, parentId: run.parentId, connected: false, model, sessionManager: manager });
+      const session = await this.open({ id, directory: run.cwd, depth: run.depth, parentId: run.parentId, connected: false, model, memory: run.memory, sessionManager: manager });
       // stop() cannot see this child until it is registered, so a parent stopped meanwhile must cancel it here.
       const parent = run.parentId ? this.running.get(run.parentId) : undefined;
       if (this.closing || run.parentId && (!parent || !['running', 'waiting', 'paused'].includes(parent.info.state))) {

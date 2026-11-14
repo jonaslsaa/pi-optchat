@@ -193,7 +193,7 @@ export class Inspector implements Component, Focusable {
       const rows = list.slice(this.top, this.top + this.height).map(run => {
         const live = children.live(run.id), tools = live ? [...live.tools.values()].map(t => t.name).join(', ') : '';
         const status = live ? `${run.state === 'stopping' ? 'stopping' : run.state === 'waiting' ? 'waiting for children' : run.state === 'paused' ? 'interrupted · waiting for you' : tools || (live.streaming ? 'responding' : 'working')} · ${elapsed(Date.now() - live.updated)} ago` : isHandingOff(run) ? 'handing off' : run.state;
-        return { run, task: `${'  '.repeat(run.depth - 1)}${run.parentId ? '↳ ' : ''}${agentLabel(run)}`, status, time: elapsed((run.ended ?? Date.now()) - run.started) };
+        return { run, task: `${'  '.repeat(run.depth - 1)}${run.parentId ? '↳ ' : ''}${agentLabel(run)}`, status: run.memory === 'none' ? `${status} · no view` : status, time: elapsed((run.ended ?? Date.now()) - run.started) };
       });
       // Columns: task (flexible) · status · duration (right-aligned); status yields first on narrow screens.
       const timeWidth = Math.max(0, ...rows.map(r => r.time.length));
