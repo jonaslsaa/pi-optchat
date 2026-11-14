@@ -268,7 +268,7 @@ export class AgentView implements Component, Focusable {
     if (!run) return color('error', ` ${id} · run not found`);
     const live = children.live(run.id);
     const dot = live ? color('accent', '●') : run.state === 'completed' ? color('success', '✓') : run.state === 'failed' ? color('error', '✗') : color('muted', '■');
-    const right = `${statusOf(run, children)} · ${elapsed((run.ended ?? Date.now()) - run.started)} · ${run.model.slice(run.model.indexOf('/') + 1)}`;
+    const right = `${statusOf(run, children)} · ${elapsed((run.ended ?? Date.now()) - run.started)} · ${run.model.slice(run.model.indexOf('/') + 1)}${run.memory === 'none' ? ' · no view' : ''}`;
     const left = ` ${dot} ${color('accent', run.id)}  `;
     const room = width - visibleWidth(left) - visibleWidth(right) - 3;
     if (room < 8) return truncateToWidth(`${left}${color('dim', right)}`, width);

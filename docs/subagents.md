@@ -5,6 +5,7 @@ The README covers the basics. This page has the rest.
 ## What a child gets
 
 - The profile's memory view (frozen at launch), its instructions, read-only `zoom`/`date`, and normal coding tools plus your installed extensions (except pi-optchat itself).
+- With `memory: 'none'` on its spawn task, no view: its first message is the task alone, its system prompt describes no view, and it has no `zoom`/`date` (nor `search`). Use it for self-contained or blind work, where the chat's notes would cost tokens or bias the result. Everything else is the same. The choice is saved with the run, so a resume (`tell` after it finished, `/reload`) keeps it; its own children get no view either. The Agents page and the agent view show `no view`, and such a child never waits on a view sibling's Anthropic cache entry, since they share no prefix.
 - The Pi built-in extensions the main session loaded: MCP, codemode and tool search.
 
 ### MCP servers
