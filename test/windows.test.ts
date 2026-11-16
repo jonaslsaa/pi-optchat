@@ -159,7 +159,7 @@ test('connected window keeps one real SDK conversation, communicates both ways, 
     assert.equal(f.summaries.length, 1);
     assert.match(f.summaries[0], /Correction: keep the existing API/);
     assert.match(f.summaries[0], /Main agent: proceed/);
-    assert.doesNotMatch(f.summaries[0], /<\/chat>/, 'the view is not in the transcript');
+    assert.doesNotMatch(f.summaries[0], /<chat>\n/, 'the view is not in the transcript');
     assert.equal(f.ledger.entries.filter(entry => entry.role === 'compactor').length, 1);
     await assert.rejects(client.request('say', 'Too late'), /closing/);
     await f.children.recoverHandoffs();
