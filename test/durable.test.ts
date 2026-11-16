@@ -594,7 +594,11 @@ function recording() {
     hold: (n = 0) => { left = n; gate = new Promise(resolve => { released = resolve; }); },
     release: () => { left = Infinity; released(); } };
 }
-const until = async (done: () => boolean | Promise<boolean>) => { while (!await done()) await new Promise(resolve => setImmediate(resolve)); };
+/** Waits for `done`, and fails after 30 s, so a regression fails the test instead of hanging it. */
+const until = async (done: () => boolean | Promise<boolean>) => {
+  const deadline = Date.now() + 30_000;
+  while (!await done()) { if (Date.now() > deadline) throw new Error('Timed out waiting'); await new Promise(resolve => setImmediate(resolve)); }
+};
 const generations = (agent: { sql: DatabaseSync }) => agent.sql.prepare('SELECT DISTINCT g FROM optchat_log ORDER BY g').all().map(row => row.g);
 
 test('a rebuild cut off by a restart resumes without summarizing anything twice, then switches to a log in date order', async () => {

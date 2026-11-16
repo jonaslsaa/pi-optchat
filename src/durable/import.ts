@@ -6,7 +6,7 @@ import { importTables, type Read } from './store.ts';
 
 export type { ImportJob } from './store.ts';
 /** How many new summaries the import builds between the progress it saves. Pi Durable ends a task that is cut off 5 times in a row
- * without saving progress (`settings.restartLimit`), which a long rebuild could otherwise be over a few deploys. */
+ * without saving progress (`settings.restartLimit`), which a long rebuild over a few deploys could otherwise hit. */
 const CHECKPOINT = 50;
 /** The task that builds a generation. Pi Durable lists only live tasks, so this is how the one it ended is found. */
 const ImportTask = defineDoc<{ generation: number | null; task: TaskId | null }>({
