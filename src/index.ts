@@ -38,6 +38,7 @@ import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
 import { showModelPicker, showSettings } from './settings-page.ts';
 import { showMenu } from './menu.ts';
+import { keepAwake } from './keep-awake.ts';
 
 const binding = 'optchat.profile';
 /** The profile a session is bound to; the latest binding wins. */
@@ -65,7 +66,8 @@ export const version = ((): string | undefined => {
 })();
 const brand = version ? `OptChat v${version}` : 'OptChat';
 
-export default function optchat(pi: ExtensionAPI) {
+/** `awake` is replaceable for tests. */
+export default function optchat(pi: ExtensionAPI, { awake = keepAwake() } = {}) {
   let active: Active | undefined;
   let remote: Awaited<ReturnType<typeof openConnectedWindow>> | undefined;
   /** `pi -p` on a profile another Pi owns: the prompt goes to a subagent in that Pi (--optchat-connect). */
@@ -105,6 +107,14 @@ export default function optchat(pi: ExtensionAPI) {
   const showTitle = (ctx: ExtensionContext) => {
     const a = active;
     if (a) title.show(text => ctx.ui.setTitle(text), mainTitle(a.name, working, a.children.ids.length));
+  };
+  /** One hold per Pi process: subagents and terminal windows run in the owner, so its hold covers them; a window in its own process
+   * (RPC) holds its own for its own runs. An idle connected window waits, so only `running` runs count. */
+  const holdAwake = () => {
+    const a = active, window = rpcWindow;
+    let enabled = a?.config.keepAwake ?? false;
+    if (window) try { enabled = loadConfig(profilePath(window.profile)).keepAwake; } catch { enabled = false; }
+    awake.update(working || !!a?.children.working.some(run => run.state === 'running'), enabled);
   };
   /** Journals written before batches held plain strings. */
   const isPendingReport = (s: unknown): s is string | { text: string; count?: number; quiet?: boolean } =>
@@ -214,6 +224,7 @@ export default function optchat(pi: ExtensionAPI) {
     saveReports();
   };
   const stop = async () => {
+    awake.release();
     remote?.close(); remote = undefined; joined?.close(); joined = undefined;
     const window = rpcWindow; rpcWindow = undefined; await window?.close();
     inspectorController?.abort(); unmountNavigation?.(); unmountNavigation = undefined;
@@ -303,7 +314,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (ctx.mode === 'tui') unmountNavigation = mountNavigation(ctx, children, memory, shortcut, page => { void inspect(ctx, page); });
       // A one-shot run (`pi -p`, JSON) exits after its own prompt, which would end every conversation connected to it.
       if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport, patch => configure(ctx, patch));
-      untitle = children.subscribe(() => showTitle(ctx)); showTitle(ctx);
+      untitle = children.subscribe(() => { showTitle(ctx); holdAwake(); }); showTitle(ctx);
       status(ctx);
       // An RPC host (the OptChat app) shows the profile itself; the banner would sit over its first prompt every start.
       if (ctx.mode !== 'rpc') ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
@@ -471,7 +482,7 @@ export default function optchat(pi: ExtensionAPI) {
     }
     return { action: 'continue' };
   });
-  pi.on('agent_start', (_event, ctx) => { working = true; showTitle(ctx); });
+  pi.on('agent_start', (_event, ctx) => { working = true; showTitle(ctx); holdAwake(); });
   // Every run starts here, reports sent while Pi is idle too (Pi 1.2+).
   pi.on('before_agent_start', async (event, ctx) => {
     if (rpcWindow) { await rpcWindow.beforeRun(event); return; }
@@ -593,7 +604,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (active && !fault && !stopping) for (const r of reports) if (r.steered && !r.batch) sendReport(r);
     if (runStarted) pi.appendEntry(RUN_BOUNDARY, { state: 'end' });
     runStarted = false; status(ctx);
-    working = false; showTitle(ctx);
+    working = false; showTitle(ctx); holdAwake();
     if (active) {
       const dir = active.dir;
       checkpoints = checkpoints.then(() => checkpoint(dir)).catch(error => ctx.ui.notify(`Local checkpoint failed: ${errorText(error)}`, 'error'));
@@ -628,7 +639,7 @@ export default function optchat(pi: ExtensionAPI) {
   /** The settings page's options: every model Pi is logged in to, with the thinking levels it takes, sorted so each provider's models sit together. */
   const settingsOptions = (ctx: ExtensionContext, a: Active) => ({ profile: a.name, config: a.config,
     models: ctx.modelRegistry.getAvailable().map(m => ({ name: `${m.provider}/${m.id}`, thinking: getSupportedThinkingLevels(m) })).sort((x, y) => x.name.localeCompare(y.name)),
-    dir: a.dir });
+    dir: a.dir, changed: holdAwake });
   /** Another app's settings change, through the profile socket: what the settings page offers and does, without the page. */
   const configure = (ctx: ExtensionContext, patch: ConfigPatch) => {
     const a = required();
@@ -638,7 +649,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (choice && !ctx.modelRegistry.getAvailable().some(m => m.provider === choice.provider && m.id === choice.model && getSupportedThinkingLevels(m).includes(choice.thinking)))
         throw new Error(`${role}: ${choice.provider}/${choice.model} with thinking ${choice.thinking} is not offered by this Pi; it lists the models it is logged in to.`);
     }
-    applyConfig(a.dir, a.config, patch);
+    applyConfig(a.dir, a.config, patch); holdAwake();
   };
   const pickModel = async (ctx: ExtensionContext, role: 'compactor' | 'subagent') => {
     const a = required();

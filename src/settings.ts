@@ -30,6 +30,9 @@ export const SETTINGS = {
   refreshAt: { kind: 'percent', label: 'Turn refresh threshold', default: 0.3, min: 0, max: 0.9,
     description: 'When a turn fills this share of the context window, it moves into memory and continues in a fresh window. 0%: off (Victor\'s recipe). OPTCHAT_REFRESH_AT overrides it.',
     applies: 'Applies from the next call and to new or resumed subagents.' },
+  keepAwake: { kind: 'toggle', label: 'Keep awake', default: true,
+    description: 'macOS only: the Mac doesn\'t idle-sleep while the main agent, a subagent or a connected window works, nor for a minute after. The display may still sleep.',
+    applies: 'Applies at once.' },
 } as const;
 
 export type SettingKey = keyof typeof SETTINGS;

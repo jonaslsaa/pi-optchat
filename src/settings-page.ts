@@ -25,6 +25,8 @@ interface Options {
   models: { name: string; thinking: readonly ThinkingLevel[] }[];
   /** The profile's directory, where a change is saved. */
   dir: string;
+  /** Called after a change is saved, for what applies at once. */
+  changed?: () => void;
 }
 
 /** A titled step inside the page: what it changes, the control, and its keys. */
@@ -116,6 +118,7 @@ class ModelStep extends Container {
 function update(o: Options, patch: Partial<ProfileConfig>) {
   try { applyConfig(o.dir, o.config, patch); }
   catch (error) { return `Could not save: ${error instanceof Error ? error.message : String(error)}`; }
+  o.changed?.();
   return undefined;
 }
 /** Bordered, titled like Pi's own dialogs. */
