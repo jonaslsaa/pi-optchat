@@ -207,6 +207,10 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
     // Images go back in last, into only what is sent: a refresh drops older steps' refs unread.
     return system.length < request.messages.length ? { messages: withView(await restore(memory.store, [...system, ...previous, ...run]), view) } : undefined;
   };
+  /** OptChat's cache marks on every Anthropic request body, a child's too: in blocks of 4 lines, so a view that grows at its end is
+   * read from the cache (pi-ai's own marks miss it). A request without a view keeps pi-ai's marks. */
+  const beforeProviderRequest: GenerationHooks['beforeProviderRequest'] = ({ model, payload }) =>
+    model.api === 'anthropic-messages' ? { payload: cachePayload(payload) } : undefined;
 
   const Remember = defineTask<Record<string, never>, { phase: 'remember' }, null>({
     name: 'optchat.remember', version: 1,
@@ -260,7 +264,7 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
       name: 'optchat',
       tools,
       sections: [section('optchat', ({ conversationId }) => conversationId === id ? text : childPrompt, { tag: false })],
-      hooks: [hook(GenerationTask, { beforeRequest }), hook(ToolTask, { afterTool }), hook(CompactionTask, { beforeCompact: (_compaction, api) => api.conversationId === id ? { decline: true } : undefined })],
+      hooks: [hook(GenerationTask, { beforeRequest, beforeProviderRequest }), hook(ToolTask, { afterTool }), hook(CompactionTask, { beforeCompact: (_compaction, api) => api.conversationId === id ? { decline: true } : undefined })],
       tasks: [Remember],
     }),
     /** The first input of a child conversation that sees OptChat's memory as the conversation's next request would: the view (with
@@ -295,19 +299,4 @@ export function attachment(name: string) {
     clear: () => { at = undefined; },
     get: () => { if (!at) throw new Error(`${name} is not attached to a Harness yet.`); return at; },
   };
-}
-
-/** Pi Durable's `Models` with OptChat's cache marks on Anthropic requests that carry a view: in blocks of 4 lines, so a view that
- * grows at its end is read from the cache (pi-ai's own marks miss it). A request that sets its own `onPayload` is left alone, as
- * the compactor's are. A Proxy, since `createModels()` returns a class instance whose methods a spread would lose. */
-export function withCacheMarks<M extends Models>(models: M): M {
-  return new Proxy(models, {
-    get(target, key) {
-      const value: unknown = Reflect.get(target, key, target);
-      if (key !== 'streamSimple') return typeof value === 'function' ? value.bind(target) : value;
-      const stream: Models['streamSimple'] = (model, request, options) => target.streamSimple(model, request,
-        options?.onPayload || model.api !== 'anthropic-messages' ? options : { ...options, onPayload: payload => cachePayload(payload) });
-      return stream;
-    },
-  });
 }

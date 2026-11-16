@@ -10,7 +10,7 @@ import { DurableObjectSqliteDatabase } from '@earendil-works/pi-durable/storage/
 import { PiHarness } from 'agents/harness/pi';
 import { Lifecycle } from 'agents/lifecycle';
 import { createCompressor, isMime, openMemory, type ImageStore, type ImportedEntry, type ImportMode, type Kind, type Memory } from 'pi-optchat/core';
-import { optchat, optchatImport, SqliteStore, withCacheMarks, type Read, type SqliteStoreOptions } from 'pi-optchat/durable';
+import { optchat, optchatImport, SqliteStore, type Read, type SqliteStoreOptions } from 'pi-optchat/durable';
 
 type PiContext = Parameters<Harness['inspect']>[0];
 interface Env { AGENT: DurableObjectNamespace<Agent>; IMAGES: R2Bucket; ANTHROPIC_OAUTH_TOKEN: string; MODEL: string; COMPACTOR: string; BUDGET: string }
@@ -72,7 +72,7 @@ export class Agent extends DurableObject<Env> {
         }));
       }
       const pi = await Harness.open(storage, {
-        models: withCacheMarks(this.models), registry: this.registry, onWake,
+        models: this.models, registry: this.registry, onWake,
         settings: { compaction: { enabled: false } },
         onReport: ({ kind, error }) => { this.stats.warnings.push(`${kind}: ${error instanceof Error ? error.message : String(error)}`); },
       }, context);

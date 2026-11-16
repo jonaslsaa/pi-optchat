@@ -11,9 +11,10 @@ import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { NodeSqliteDatabase } from '@earendil-works/chord/sqlite/node';
 import { createModels } from '@earendil-works/pi-ai/models';
+import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, type FauxResponseStep } from '@earendil-works/pi-ai/providers/faux';
 import { CHILD, cachePayload, isImage, openMemory, refName, textContent, type Compressor, type ImageStore, type ImportedEntry, type Mime } from '../src/core/index.ts';
-import { optchat, optchatImport, SqliteStore, withCacheMarks, type OptChatOptions, type Read, type SqliteStoreOptions } from '../src/durable/index.ts';
+import { optchat, optchatImport, SqliteStore, type OptChatOptions, type Read, type SqliteStoreOptions } from '../src/durable/index.ts';
 import { importTables } from '../src/durable/store.ts';
 import { imageRef } from '../src/images.ts';
 import { removeDir } from './support.ts';
@@ -23,13 +24,23 @@ const text = (content: unknown) => typeof content === 'string' ? content
   : (content as { type: string; text?: string }[]).map(block => block.text ?? `[${block.type}]`).join('');
 
 /** One OptChat agent on Pi Durable, over one SQLite database as in a Durable Object: Pi's tables `pi_*`, memory's `optchat_*`. */
-/** `importing` builds an import's summaries (`compress` by default). */
+/** `importing` builds an import's summaries (`compress` by default). With `fetch`, the agent talks to pi-ai's real Anthropic provider,
+ * which builds each request body as for Anthropic and sends it through `fetch` (`replies` go unused). */
 async function open(file: string, replies: FauxResponseStep[], compress: Compressor = async ({ part }) => `line ${part.l}/${part.i}`,
-  { contextWindow, images, importing = compress, afterView, search, extensions = () => [] }:
-    { contextWindow?: number; importing?: Compressor; extensions?: (chat: ReturnType<typeof optchat>) => Extension[] } & SqliteStoreOptions & Pick<OptChatOptions, 'afterView' | 'search'> = {}) {
+  { contextWindow, images, importing = compress, afterView, search, extensions = () => [], fetch }:
+    { contextWindow?: number; importing?: Compressor; extensions?: (chat: ReturnType<typeof optchat>) => Extension[]; fetch?: typeof globalThis.fetch }
+    & SqliteStoreOptions & Pick<OptChatOptions, 'afterView' | 'search'> = {}) {
   const sync = new DatabaseSync(file), db = new NodeSqliteDatabase(sync);
-  const faux = fauxProvider(contextWindow ? { models: [{ id: 'small', contextWindow }] } : {}), models = createModels();
+  const faux = fauxProvider(contextWindow ? { models: [{ id: 'small', contextWindow }] } : {});
+  const models = createModels({ authContext: { env: async name => name === 'ANTHROPIC_API_KEY' ? 'test' : undefined, fileExists: async () => false } });
   models.setProvider(faux.provider);
+  let model = { provider: faux.provider.id, modelId: faux.getModel().id };
+  if (fetch) {
+    models.setProvider(anthropicProvider());
+    const stream = models.streamSimple.bind(models);
+    models.streamSimple = (model, request, options) => stream(model, request, { ...options, fetch });
+    model = { provider: 'anthropic', modelId: 'claude-sonnet-5-5' };
+  }
   const sent: Sent[] = [];
   faux.setResponses(replies.map(reply => (request, ...rest) => {
     sent.push(request.messages.map(m => ({ role: m.role, content: 'content' in m ? m.content : undefined })));
@@ -54,9 +65,9 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
   registry.install(importer.extension);
   for (const extension of extensions(memoryExtension)) registry.install(extension);
   const harness = await Harness.open(await SqliteStorage.open(db, { prefix: 'pi_' }),
-    { models: withCacheMarks(models), registry, settings: { compaction: { enabled: false }, afterFailedRun: 'continue' },
+    { models, registry, settings: { compaction: { enabled: false }, afterFailedRun: 'continue' },
       onReport: report => { if (report.kind === 'task_faulted') fault(report.error); } }, context);
-  const root = await harness.root(context, { agent: { model: { provider: faux.provider.id, modelId: faux.getModel().id } } });
+  const root = await harness.root(context, { agent: { model } });
   memoryExtension.attach(harness, context);
   importer.attach(harness, context);
   // A reopened Harness runs owed tasks once resumed, as PiHarness does when it opens.
@@ -381,22 +392,29 @@ test('a step a refresh dropped has its image read once more, for its summary, no
   } finally { await agent.close(); }
 });
 
-test('cache marks go on an Anthropic request that carries the view; a request with its own onPayload is left alone', async () => {
-  const faux = fauxProvider({ api: 'anthropic-messages' }), models = createModels();
-  models.setProvider(faux.provider);
-  const model = faux.getModel(), request = { messages: [{ role: 'user' as const, content: 'hi', timestamp: 0 }] };
-  // pi-ai's Models is a class instance: its other methods must still reach it through the wrapper.
-  assert.equal(withCacheMarks(models).getModel(model.provider, model.id), model);
-  let given: Parameters<typeof models.streamSimple>[2];
-  const spy = withCacheMarks(Object.assign(Object.create(models), {
-    streamSimple: (_model: unknown, _request: unknown, options: typeof given) => { given = options; return { result: async () => undefined }; },
-  }) as typeof models);
-  spy.streamSimple(model, request);
-  const payload = { messages: [{ role: 'user', content: [{ type: 'text', text: `<chat>\n${'0+1|user: x\n'.repeat(12)}</chat>` }] }] };
-  assert.ok(JSON.stringify(await given?.onPayload?.(payload, model)).includes('cache_control'));
-  const own = { onPayload: (p: unknown) => p };
-  spy.streamSimple(model, request, own);
-  assert.equal(given, own);
+test('an Anthropic request carries the cache marks on the view', async () => {
+  type Block = { text?: string; cache_control?: unknown };
+  const bodies: { messages: { content: string | Block[] }[] }[] = [];
+  // A one-word Anthropic reply, as server-sent events.
+  const events = [
+    { type: 'message_start', message: { id: 'msg', type: 'message', role: 'assistant', model: 'claude-sonnet-5-5', content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } },
+    { type: 'message_stop' },
+  ].map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
+  const agent = await open(file(), [], undefined, { fetch: async (_url, init) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(events, { headers: { 'content-type': 'text/event-stream' } });
+  } });
+  try {
+    // The third request's view holds the first two runs: its first block of 4 lines, `<chat>` and 3 of them, is marked.
+    for (const n of [1, 2, 3]) await agent.ask(`hello ${n}`);
+    const blocks = bodies.at(-1)!.messages.flatMap(m => typeof m.content === 'string' ? [] : m.content);
+    const view = blocks.find(block => block.text?.startsWith('<chat>\n'));
+    assert.deepEqual(view, { type: 'text', text: '<chat>\n0+1|user: hello 1\n1+1|talk: ok\n2+1|user: hello 2\n', cache_control: { type: 'ephemeral' } });
+  } finally { await agent.close(); }
 });
 
 test('a run past the refresh share of the window moves its steps into memory and goes on with the task and its last step', async () => {
