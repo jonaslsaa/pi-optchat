@@ -4,10 +4,11 @@ import fs, { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createProfile, fingerprint, listProfiles, loadConfig, memoryDirectory, profileOwner, profilePath, readImage, readMemory, readRuns, updateConfig } from '../src/files.ts';
+import { createProfile, fingerprint, listProfiles, loadConfig, memoryDirectory, profileOwner, profilePath, readImage, readMemory, readRuns, readUsage, selectUsage, summarizeUsage, updateConfig } from '../src/files.ts';
 import { Memory } from '../src/memory.ts';
 import { localDay } from '../src/store.ts';
 import { checkPatch, describeOwner, lockProfile, ProfileBusyError } from '../src/profiles.ts';
+import { emptyUsage, UsageLedger } from '../src/usage.ts';
 import { removeDir } from './support.ts';
 
 const temp = () => mkdtempSync(join(tmpdir(), 'optchat-files-'));
@@ -122,6 +123,33 @@ test('readRuns lists a profile\'s saved runs and leaves out one it can\'t read',
     writeFileSync(join(runs, 'b2.optchat.json'), '{"id":"b2"');
     assert.deepEqual(readRuns(dir), [run]);
   } finally { removeDir(home); }
+});
+
+test('readUsage reads the ledger beside the Pi that writes it: nothing is written, a record half written is left out, and it sums to what /optchat usage sums', () => {
+  const dir = temp();
+  try {
+    const now = new Date(2026, 10, 16, 12).getTime(), file = join(dir, 'usage.jsonl');
+    assert.deepEqual(readUsage(dir), { entries: [], warnings: [] }, 'no ledger yet');
+    assert.deepEqual(readdirSync(dir), []);
+    const owner = new UsageLedger(dir), spent = (total: number) => ({ ...emptyUsage(), input: 10, cacheRead: 90, output: 5, totalTokens: 105, cost: { ...emptyUsage().cost, total } });
+    owner.add({ id: 'a', date: new Date(now - 60_000).toISOString(), role: 'main', model: 'opus', usage: spent(1) });
+    owner.add({ id: 'b', date: new Date(now - 120_000).toISOString(), role: 'subagent', model: 'opus', runId: 'r1', usage: spent(2) });
+    owner.add({ id: 'c', date: new Date(now - 30 * 3600_000).toISOString(), role: 'compactor', model: 'sonnet', usage: spent(4) });
+    // A line that was cut short long ago, and the record the owner is writing now.
+    const next = JSON.stringify({ id: 'd', date: new Date(now - 1000).toISOString(), role: 'main', model: 'opus', usage: spent(8) });
+    appendFileSync(file, `{"date":\n${next.slice(0, 40)}`);
+    const before = snapshot(dir);
+
+    const { entries, warnings } = readUsage(dir);
+    assert.deepEqual(entries.map(entry => entry.id), ['a', 'b', 'c']);
+    assert.deepEqual(warnings, ['1 unreadable usage records excluded; totals may be incomplete.'], 'the line being written is not one of them');
+    assert.deepEqual(snapshot(dir), before, 'the ledger is as it was: its owner would have ended the last line');
+    for (const range of ['Last hour', 'Today', 'Last 7 days', 'All time'] as const)
+      assert.deepEqual(summarizeUsage(selectUsage(entries, range, now)), summarizeUsage(owner.select(range, 'any', now)), range);
+    assert.equal(summarizeUsage(selectUsage(entries, 'Today', now)).total.cost.total, 3);
+    appendFileSync(file, `${next.slice(40)}\n`);
+    assert.equal(summarizeUsage(selectUsage(readUsage(dir).entries, 'Today', now)).total.cost.total, 11, 'the record counts once it is whole');
+  } finally { removeDir(dir); }
 });
 
 test('updateConfig with no Pi on the profile writes config.json under its lock, keeping keys this copy does not know, and refuses what the settings page would', async () => {

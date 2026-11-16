@@ -1,60 +1,25 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import type { AssistantMessage, Usage } from '@earendil-works/pi-ai';
+import { appendFileSync } from 'node:fs';
+import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
-import { record } from './core/cache.ts';
 import { appendJson } from './store.ts';
-
-export type UsageRole = 'main' | 'subagent' | 'compactor' | 'import';
-export const ranges = ['This session', 'Last hour', 'Today', 'Last 7 days', 'All time'] as const;
-export type UsageRange = typeof ranges[number];
-export interface UsageEntry {
-  id?: string; date: string; role: UsageRole; model: string; provider?: string;
-  session?: string; runId?: string; usage: Usage;
-}
-const nonnegative = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0;
-function validUsage(value: unknown): value is Usage {
-  if (!record(value) || !record(value.cost)) return false;
-  const cost = value.cost;
-  return ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens'].every(k => nonnegative(value[k]))
-    && ['input', 'output', 'cacheRead', 'cacheWrite', 'total'].every(k => nonnegative(cost[k]));
-}
-function validEntry(value: unknown): value is UsageEntry {
-  return record(value) && typeof value.date === 'string' && Number.isFinite(Date.parse(value.date))
-    && ['main', 'subagent', 'compactor', 'import'].includes(String(value.role)) && typeof value.model === 'string'
-    && ['id', 'provider', 'session', 'runId'].every(k => value[k] === undefined || typeof value[k] === 'string') && validUsage(value.usage);
-}
-export function emptyUsage(): Usage {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-}
-export function addUsage(total: Usage, usage: Usage) {
-  for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens'] as const) total[key] += usage[key];
-  for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'total'] as const) total.cost[key] += usage.cost[key];
-}
+import { loadUsage, selectUsage, usageFile, usageWarnings, validEntry, type UsageEntry, type UsageRange } from './usage-record.ts';
+export { emptyUsage, ranges, summarizeUsage, type UsageEntry, type UsageRange, type UsageRole } from './usage-record.ts';
 
 /** One profile's ledger. Stable message IDs make resume/backfill idempotent. */
 export class UsageLedger {
-  readonly entries: UsageEntry[] = [];
-  private invalid = 0;
-  private readonly ids = new Set<string>();
+  readonly entries: UsageEntry[];
+  private invalid: number;
+  private readonly ids: Set<string>;
   private readonly cursors = new Map<string, number>();
   private readonly file: string;
   constructor(directory: string) {
-    this.file = join(directory, 'usage.jsonl');
-    const contents = existsSync(this.file) ? readFileSync(this.file, 'utf8') : '';
-    for (const line of contents.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        const entry: unknown = JSON.parse(line);
-        if (!validEntry(entry)) { this.invalid++; continue; }
-        if (entry.id && this.ids.has(entry.id)) continue;
-        this.entries.push(entry); if (entry.id) this.ids.add(entry.id);
-      } catch { this.invalid++; }
-    }
-    if (contents && !contents.endsWith('\n')) appendFileSync(this.file, '\n');
+    this.file = usageFile(directory);
+    const { entries, ids, invalid, torn } = loadUsage(directory, true);
+    this.entries = entries; this.ids = ids; this.invalid = invalid;
+    if (torn) appendFileSync(this.file, '\n');
   }
-  get warnings() { return this.invalid ? [`${this.invalid} unreadable usage records excluded; totals may be incomplete.`] : []; }
+  get warnings() { return usageWarnings(this.invalid); }
   add(entry: UsageEntry) {
     if (!validEntry(entry)) { this.invalid++; return; }
     if (entry.id && this.ids.has(entry.id)) return;
@@ -83,21 +48,5 @@ export class UsageLedger {
     }
     this.cursors.set(cursorKey, entries.length);
   }
-  select(range: UsageRange, session: string, now = Date.now()) {
-    const today = new Date(now); today.setHours(0, 0, 0, 0);
-    const since = range === 'Last hour' ? now - 3600_000 : range === 'Today' ? today.getTime() : range === 'Last 7 days' ? now - 7 * 86400_000 : 0;
-    return this.entries.filter(e => range === 'This session' ? e.session === session : range === 'All time' || (Date.parse(e.date) >= since && Date.parse(e.date) <= now));
-  }
-}
-
-export function summarizeUsage(entries: UsageEntry[]) {
-  const total = emptyUsage(), groups = new Map<string, { role: UsageRole; model: string; usage: Usage }>();
-  for (const entry of entries) {
-    // By model name alone: older compactor records lack a provider and must still land in the same row.
-    const key = `${entry.role}:${entry.model}`;
-    let group = groups.get(key);
-    if (!group) { group = { role: entry.role, model: entry.model, usage: emptyUsage() }; groups.set(key, group); }
-    addUsage(group.usage, entry.usage); addUsage(total, entry.usage);
-  }
-  return { total, groups: [...groups.values()] };
+  select(range: UsageRange, session: string, now = Date.now()) { return selectUsage(this.entries, range, now, session); }
 }
