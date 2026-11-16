@@ -208,10 +208,15 @@ test('a window that completes and then closes is handed off once', async () => {
 test('a completed window\'s session resumed in a new process starts a new conversation without the completed one', async () => {
   const name = profile(), owner = await rpc(name), window = await rpc(name);
   try {
+    // Later, as a host resumes a thread: once the owner has the closed conversation's handoff and is done with it. Before that its
+    // lock may answer the resumed window too late on a slow machine (they share this process), which then refuses to open.
+    const handedOff = () => { const role = window.role(), id = role?.role === 'window' ? role.id : '';
+      return until(() => logged(name).some(text => text.includes(`[${id}] Connected conversation`) && !text.startsWith('Reply:')) && !owner.session.isStreaming); };
     await window.ask('First topic.');
     await window.ask('/complete');
     // The host released the process and resumes the thread later: Pi closes the session, then starts it again from its file.
     await window.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+    await handedOff();
     await window.session.extensionRunner.emit({ type: 'session_start', reason: 'resume' });
     const role = window.role();
     assert.ok(role?.role === 'window' && !role.completed);
@@ -224,7 +229,9 @@ test('a completed window\'s session resumed in a new process starts a new conver
     const first = window.session.sessionManager.getEntries().find(e => e.type === 'message' && e.message.role === 'assistant');
     window.session.sessionManager.branch(first!.id);
     await window.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+    await handedOff();
     await window.session.extensionRunner.emit({ type: 'session_start', reason: 'resume' });
+    assert.deepEqual(window.errors, []);
     await window.ask('Back again.');
     assert.equal(window.sent.at(-1)!.messages.length, 3, 'its request, the reply, then the new one');
   } finally { await window.close(); await owner.close(); }
