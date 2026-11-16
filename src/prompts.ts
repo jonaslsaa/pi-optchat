@@ -85,7 +85,7 @@ export const HANDOFF_REQUEST = '[OptChat] This connected conversation has ended'
 /** Sent to an ended connected window's own session, so the window writes its handoff with its context still cached;
  * `undelivered` are messages queued for it that it never got, `unread` its subagents' reports it never read (it was paused), and
  * `stopped` its subagents that this ending stopped before they reported. */
-export const windowHandoff = (reason: FinishReason, { undelivered, unread, stopped }: Record<'undelivered' | 'unread' | 'stopped', string[]>) => `${HANDOFF_REQUEST}: ${ENDINGS[reason]}. Don't continue the work, but you can check things first if needed. Write the handoff the main agent gets in place of this conversation. Assume it remembers nothing of it. Use these headings, skipping empty ones:
+export const windowHandoff = (reason: FinishReason, { undelivered, unread, stopped }: Record<'undelivered' | 'unread' | 'stopped', string[]>) => `${HANDOFF_REQUEST}: ${ENDINGS[reason]}. Don't continue the work, but you can check things first if needed. Write the handoff the main agent gets in place of this conversation. Assume it remembers nothing of it. Cover only this conversation, what the user asked here and what you did: the view (<chat>) is the main chat, which the main agent already has, so leave it out. Use these headings, skipping empty ones:
 Goal: what the user wanted, their wishes and corrections, in their words where it matters.
 Constraints: rules you were given, by the user or the main agent.
 Decisions: what was decided, by whom, and why.
