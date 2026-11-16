@@ -156,16 +156,20 @@ test('an RPC session on a busy profile joins as a connected window: its own agen
 });
 
 test('a terminal window\'s first message, like an RPC window\'s, reaches the main agent on its next turn without one of its own', async () => {
-  const name = profile(), owner = await rpc(name), events: WindowEvent[] = [];
-  const client = await connectWindow(profilePath(name), event => events.push(event), () => {});
+  const name = profile(), owner = await rpc(name), events: WindowEvent[][] = [[], []];
+  const clients = await Promise.all(events.map(list => connectWindow(profilePath(name), event => list.push(event), () => {})));
   try {
-    await client.request('start', 'Count the files.', root);
-    await until(() => events.some(e => e.name === 'message' && e.from === 'agent'));
+    for (const [i, task] of ['Count the files.', 'List the tests.'].entries()) {
+      await clients[i].request('start', task, root);
+      await until(() => events[i].some(e => e.name === 'message' && e.from === 'agent'));
+    }
     await new Promise(resolve => setTimeout(resolve, 300));
     assert.ok(!owner.sent.some(s => s.messages.some(m => m.includes('User started'))), 'no main agent turn');
     await owner.ask('Anything new?');
     assert.match(owner.sent.at(-1)!.messages.join('\n'), /User started a connected conversation in/);
-  } finally { client.close(); await owner.close(); }
+    const starts = logged(name).filter(text => text.includes('User started')).map(text => text.match(/Initial message: (.*)/)?.[1]);
+    assert.deepEqual(starts, ['Count the files.', 'List the tests.'], 'after the user\'s message, in the order the windows started');
+  } finally { for (const client of clients) client.close(); await owner.close(); }
 });
 
 test('a window that starts and ends while the main agent works: its start still comes before its handoff', async () => {
@@ -333,6 +337,8 @@ test('a window registered with an owner that closed queues its /complete, and th
     const report = owner.sent.find(s => s.last.includes(`[${id}] Connected conversation`))!.last;
     assert.match(report, /completed by user/, 'the window\'s own ending, not the restart\'s');
     assert.match(report, /Handoff: the user asked about the colour/);
+    await until(() => !owner.session.isStreaming && logged(name).some(text => text.startsWith(`[${id}] Connected`)));
+    assert.deepEqual(logged(name).filter(text => text.startsWith(`[${id}]`)).map(text => text.split(' ')[1]), ['User', 'Connected'], 'the start the last owner saved, then the handoff');
   } finally { await owner.close(); }
 });
 

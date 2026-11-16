@@ -308,11 +308,13 @@ export default function optchat(pi: ExtensionAPI) {
       ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
       const queuedReports = [...reports];
       if (!pendingImport(dir)) {
+        // Queued before handoff recovery can start a turn, so a saved window start goes in ahead of that window's handoff.
+        for (const r of queuedReports) if (r.quiet) sendReport(r);
         const recover = (work: Promise<void>, what: string) => work.catch(error => ctx.ui.notify(`${what}: ${errorText(error)}`, 'error'));
         // Only an interactive Pi picks cut-off subagents up: a one-shot headless run would stop them again as it exits.
         recovery = Promise.all([recover(children.recoverHandoffs(), 'Handoff recovery'), ...ctx.mode === 'tui' ? [recover(children.resumeCutOff(), 'Resuming subagents')] : []]).then(() => {});
       }
-      setImmediate(() => { if (active?.memory === memory && !pendingImport(dir)) for (const r of queuedReports) sendReport(r); });
+      setImmediate(() => { if (active?.memory === memory && !pendingImport(dir)) for (const r of queuedReports) if (!r.quiet) sendReport(r); });
     } catch (error) {
       await closeWindows?.(); closeWindows = undefined;
       untitle?.(); untitle = undefined; title.clear();
@@ -508,8 +510,9 @@ export default function optchat(pi: ExtensionAPI) {
             return { message: { ...bounded, content: DUPLICATE_REPORT, display: false } };
           receipts.set(message, receipt);
           // Pi puts a quiet report it held (a window's start) after the report that starts the turn (its handoff): it goes first.
-          const at = run.findLastIndex(m => m.role === 'user');
-          if (logged === 0 && reports.some(r => r.quiet && r.text === text) && receipts.get(run[at])?.startsWith(REPORT_RECEIPT)) ahead = at;
+          const quiet = (text: string) => reports.some(r => r.quiet && r.text === text);
+          const at = run.findLastIndex(m => m.role === 'user' && !quiet(textContent(m.content)));
+          if (logged === 0 && quiet(text) && receipts.get(run[at])?.startsWith(REPORT_RECEIPT)) ahead = at;
         } else {
           // The inbox journaled the typed input: match without image references or Pi's image notes.
           const typed = typedText(message.content), skill = parseSkillBlock(typed.bare);
