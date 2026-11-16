@@ -4,7 +4,7 @@ import fs, { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createProfile, fingerprint, listProfiles, loadConfig, memoryDirectory, profileOwner, profilePath, readImage, readMemory, readRuns, readUsage, selectUsage, summarizeUsage, updateConfig } from '../src/files.ts';
+import { createProfile, fingerprint, listProfiles, loadConfig, memoryDirectory, profileOwner, profilePath, readImage, readMemory, readRuns, cacheShare, readUsage, selectUsage, summarizeUsage, updateConfig } from '../src/files.ts';
 import { Memory } from '../src/memory.ts';
 import { localDay } from '../src/store.ts';
 import { checkPatch, describeOwner, lockProfile, ProfileBusyError } from '../src/profiles.ts';
@@ -147,6 +147,8 @@ test('readUsage reads the ledger beside the Pi that writes it: nothing is writte
     for (const range of ['Last hour', 'Today', 'Last 7 days', 'All time'] as const)
       assert.deepEqual(summarizeUsage(selectUsage(entries, range, now)), summarizeUsage(owner.select(range, 'any', now)), range);
     assert.equal(summarizeUsage(selectUsage(entries, 'Today', now)).total.cost.total, 3);
+    assert.equal(cacheShare(summarizeUsage(entries).total), 90, '90 of every 100 tokens sent were read from the cache');
+    assert.equal(cacheShare(emptyUsage()), 0);
     assert.deepEqual(selectUsage(entries, 'This session', now), [], 'records without a session are no session\'s, and none was named');
     appendFileSync(file, `${next.slice(40)}\n`);
     assert.equal(summarizeUsage(selectUsage(readUsage(dir).entries, 'Today', now)).total.cost.total, 11, 'the record counts once it is whole');

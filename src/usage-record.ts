@@ -28,9 +28,14 @@ export function validEntry(value: unknown): value is UsageEntry {
     && ['main', 'subagent', 'compactor', 'import'].includes(String(value.role)) && typeof value.model === 'string'
     && ['id', 'provider', 'session', 'runId'].every(k => value[k] === undefined || typeof value[k] === 'string') && validUsage(value.usage);
 }
-export function addUsage(total: UsageTotals, usage: UsageTotals) {
+function addUsage(total: UsageTotals, usage: UsageTotals) {
   for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens'] as const) total[key] += usage[key];
   for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'total'] as const) total.cost[key] += usage.cost[key];
+}
+/** How much of what a model was sent it read from the cache, as a whole percent: the "cached" of `/optchat usage`. */
+export function cacheShare(usage: UsageTotals) {
+  const sent = usage.input + usage.cacheRead + usage.cacheWrite;
+  return sent ? Math.round(100 * usage.cacheRead / sent) : 0;
 }
 export const usageFile = (directory: string) => join(directory, 'usage.jsonl');
 

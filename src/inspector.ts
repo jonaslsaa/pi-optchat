@@ -4,7 +4,7 @@ import type { Children } from './agents.ts';
 import type { Memory } from './memory.ts';
 import { isActiveRun, isHandingOff, isRunning } from './runs.ts';
 import type { Usage } from '@earendil-works/pi-ai';
-import { ranges, summarizeUsage, type UsageLedger, type UsageRange, type UsageRole } from './usage.ts';
+import { cacheShare, ranges, summarizeUsage, type UsageLedger, type UsageRange, type UsageRole } from './usage.ts';
 
 export const clean = (text: string) => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '').replace(/\t/g, '  ');
 export const oneLine = (text: string) => clean(text).replace(/\n/g, ' ');
@@ -20,7 +20,7 @@ export const short = (n: number) => {
   return `${round(value)}${units[unit]}`;
 };
 const dollars = (n: number) => `$${n.toFixed(2)}`;
-const cached = (u: Usage) => { const input = u.input + u.cacheRead + u.cacheWrite; return `${input ? Math.round(100 * u.cacheRead / input) : 0}%`; };
+const cached = (u: Usage) => `${cacheShare(u)}%`;
 const roleNames: Record<UsageRole, string> = { main: 'main', subagent: 'subagents', compactor: 'compactor', import: 'import' };
 export const elapsed = (ms: number) => ms < 60_000 ? `${Math.max(0, Math.floor(ms / 1000))}s` : `${Math.floor(ms / 60_000)}m ${Math.floor(ms / 1000) % 60}s`;
 /** Shortens plain text with an ellipsis, preferring a word boundary. */

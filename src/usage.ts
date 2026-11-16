@@ -4,7 +4,7 @@ import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { appendJson } from './store.ts';
 import { loadUsage, selectUsage, usageFile, usageWarnings, validEntry, type UsageEntry, type UsageRange } from './usage-record.ts';
-export { emptyUsage, ranges, summarizeUsage, type UsageEntry, type UsageRange, type UsageRole } from './usage-record.ts';
+export { cacheShare, emptyUsage, ranges, summarizeUsage, type UsageEntry, type UsageRange, type UsageRole } from './usage-record.ts';
 
 /** One profile's ledger. Stable message IDs make resume/backfill idempotent. */
 export class UsageLedger {
