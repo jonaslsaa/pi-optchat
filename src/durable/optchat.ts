@@ -300,3 +300,8 @@ export function attachment(name: string) {
     get: () => { if (!at) throw new Error(`${name} is not attached to a Harness yet.`); return at; },
   };
 }
+
+/** @deprecated The `optchat` extension adds OptChat's cache marks itself now; this returns `models` unchanged. It goes away in 0.13.0. */
+export function withCacheMarks<M extends Models>(models: M): M {
+  return models;
+}

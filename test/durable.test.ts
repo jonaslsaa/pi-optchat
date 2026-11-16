@@ -411,9 +411,14 @@ test('an Anthropic request carries the cache marks on the view', async () => {
   try {
     // The third request's view holds the first two runs: its first block of 4 lines, `<chat>` and 3 of them, is marked.
     for (const n of [1, 2, 3]) await agent.ask(`hello ${n}`);
-    const blocks = bodies.at(-1)!.messages.flatMap(m => typeof m.content === 'string' ? [] : m.content);
-    const view = blocks.find(block => block.text?.startsWith('<chat>\n'));
-    assert.deepEqual(view, { type: 'text', text: '<chat>\n0+1|user: hello 1\n1+1|talk: ok\n2+1|user: hello 2\n', cache_control: { type: 'ephemeral' } });
+    const view = () => bodies.at(-1)!.messages.flatMap(m => typeof m.content === 'string' ? [] : m.content).find(block => block.text?.startsWith('<chat>\n'));
+    const marked = { type: 'text', text: '<chat>\n0+1|user: hello 1\n1+1|talk: ok\n2+1|user: hello 2\n', cache_control: { type: 'ephemeral' } };
+    assert.deepEqual(view(), marked);
+    // A child started from a snapshot gets them on the view in its input.
+    const child = await agent.harness.createConversation({ ownership: { kind: 'ownerless' }, agent: { model: { provider: 'anthropic', modelId: 'claude-sonnet-5-5' } } }, context);
+    await (await child.submit({ type: 'input', content: await agent.chat.snapshot('check', context) }, context)).wait(context);
+    assert.equal(bodies.length, 4);
+    assert.deepEqual(view(), marked);
   } finally { await agent.close(); }
 });
 
