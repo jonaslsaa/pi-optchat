@@ -58,11 +58,12 @@ export function readUsage(directory: string) {
   const { entries, invalid } = loadUsage(directory, false);
   return { entries, warnings: usageWarnings(invalid) };
 }
-/** The records of `range` as of `now`: `Today` is since local midnight, and `This session` those of Pi session `session`. */
+/** The records of `range` as of `now`: `Today` is since local midnight, and `This session` those of Pi session `session`, which
+ * are none when no session is named: a record from before sessions were kept belongs to no session. */
 export function selectUsage(entries: UsageEntry[], range: UsageRange, now = Date.now(), session?: string) {
   const today = new Date(now); today.setHours(0, 0, 0, 0);
   const since = range === 'Last hour' ? now - 3600_000 : range === 'Today' ? today.getTime() : range === 'Last 7 days' ? now - 7 * 86400_000 : 0;
-  return entries.filter(e => range === 'This session' ? e.session === session : range === 'All time' || (Date.parse(e.date) >= since && Date.parse(e.date) <= now));
+  return entries.filter(e => range === 'This session' ? session !== undefined && e.session === session : range === 'All time' || (Date.parse(e.date) >= since && Date.parse(e.date) <= now));
 }
 export function summarizeUsage(entries: UsageEntry[]) {
   const total = emptyUsage(), groups = new Map<string, { role: UsageRole; model: string; usage: UsageTotals }>();

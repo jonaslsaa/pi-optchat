@@ -147,6 +147,7 @@ test('readUsage reads the ledger beside the Pi that writes it: nothing is writte
     for (const range of ['Last hour', 'Today', 'Last 7 days', 'All time'] as const)
       assert.deepEqual(summarizeUsage(selectUsage(entries, range, now)), summarizeUsage(owner.select(range, 'any', now)), range);
     assert.equal(summarizeUsage(selectUsage(entries, 'Today', now)).total.cost.total, 3);
+    assert.deepEqual(selectUsage(entries, 'This session', now), [], 'records without a session are no session\'s, and none was named');
     appendFileSync(file, `${next.slice(40)}\n`);
     assert.equal(summarizeUsage(selectUsage(readUsage(dir).entries, 'Today', now)).total.cost.total, 11, 'the record counts once it is whole');
   } finally { removeDir(dir); }
