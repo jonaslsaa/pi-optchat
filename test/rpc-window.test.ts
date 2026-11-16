@@ -81,6 +81,7 @@ test('an RPC session on a busy profile joins as a connected window: its own agen
   const window = await rpc(name);
   try {
     assert.deepEqual(owner.role(), { role: 'owner', profile: name });
+    assert.ok(!owner.notes.some(note => note.includes(' messages\nCompactor:')), 'no start banner for an RPC host, which shows the profile itself');
     await owner.ask('The colour is teal.');
     const id = window.role()?.role === 'window' ? window.role() : undefined;
     assert.deepEqual({ ...id, id: undefined }, { role: 'window', profile: name, id: undefined, connected: true, completed: false });

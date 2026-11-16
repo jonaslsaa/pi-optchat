@@ -305,7 +305,8 @@ export default function optchat(pi: ExtensionAPI) {
       if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport, patch => configure(ctx, patch));
       untitle = children.subscribe(() => showTitle(ctx)); showTitle(ctx);
       status(ctx);
-      ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
+      // An RPC host (the OptChat app) shows the profile itself; the banner would sit over its first prompt every start.
+      if (ctx.mode !== 'rpc') ctx.ui.notify(`${brand} · ${name} · ${memory.root.length} messages\nCompactor: ${config.compactor.provider}/${config.compactor.model} (${config.compactor.thinking})`, 'info');
       const queuedReports = [...reports];
       if (!pendingImport(dir)) {
         // Queued before handoff recovery can start a turn, so a saved window start goes in ahead of that window's handoff.
