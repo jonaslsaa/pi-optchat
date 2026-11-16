@@ -21,6 +21,11 @@ test('a checkpoint writes the ignore file whenever it is missing, and never repl
     writeFileSync(join(dir, '.gitignore'), '/mine/\n');
     await checkpoint(dir);
     assert.equal(readFileSync(join(dir, '.gitignore'), 'utf8'), '/mine/\n');
+    // The limits snapshot came after the ignore file, so it is left out another way, in a profile whose file is older or the user's too.
+    writeFileSync(join(dir, 'limits.json'), '{}'); writeFileSync(join(dir, 'main', 'a.jsonl'), '{}\n{}\n');
+    await checkpoint(dir); await checkpoint(dir);
+    assert.deepEqual(tracked(dir), ['.gitignore', 'main/a.jsonl', 'memory.html', 'usage.jsonl'], 'what the user\'s file no longer names is kept, the snapshot is not');
+    assert.equal(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8').match(/^\/limits\.json$/gm)?.length, 1, 'listed once');
   } finally { removeDir(dir); }
 });
 

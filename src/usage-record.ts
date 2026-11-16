@@ -56,7 +56,7 @@ export function loadUsage(directory: string, whole: boolean) {
   }
   return { entries, ids, invalid, torn: Boolean(torn) };
 }
-export const usageWarnings = (invalid: number) => invalid ? [`${invalid} unreadable usage records excluded; totals may be incomplete.`] : [];
+export const usageWarnings = (invalid: number) => invalid ? [`${invalid} unreadable usage ${invalid === 1 ? 'record' : 'records'} excluded; totals may be incomplete.`] : [];
 /** A profile's ledger for a reader that is not its owner, such as an app beside a running Pi: nothing is written, and a record
  * the owner is halfway through writing is left out without a warning. */
 export function readUsage(directory: string) {

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWrite } from './store.ts';
 const exec = promisify(execFile);
@@ -11,11 +11,16 @@ const LOOSE_LIMIT_KIB = 16_384;
 // killed Pi left running (a big `git add` or gc), so that checkpoint is skipped and the next one, after the next turn, looks again.
 const STALE_LOCK_MS = 10 * 60_000;
 const LOCKS = ['index.lock', 'HEAD.lock', 'refs/heads/main.lock'];
+// The subscription's limits as last counted (limits.ts): a new one with nearly every answer, and nothing to keep.
+const LOCAL = '/limits.json';
 
 export async function checkpoint(directory: string) {
   const git = (args: string[]) => exec('git', ['-C', directory, ...args], { maxBuffer: 1_000_000 });
   if (!existsSync(join(directory, '.git'))) await git(['init', '-q', '-b', 'main']);
   if (!existsSync(join(directory, '.gitignore'))) atomicWrite(join(directory, '.gitignore'), '/runs/\n/memory.html\n/usage.jsonl\n*.tmp\n');
+  // What is no memory and came after the ignore file, which is written once and may be the user's by now, is left out through git's own list.
+  const exclude = join(directory, '.git', 'info', 'exclude'), excluded = existsSync(exclude) ? readFileSync(exclude, 'utf8') : '';
+  if (!excluded.split('\n').includes(LOCAL)) atomicWrite(exclude, `${excluded}${excluded && !excluded.endsWith('\n') ? '\n' : ''}${LOCAL}\n`);
   const locks = LOCKS.flatMap(name => {
     const path = join(directory, '.git', name), stat = statSync(path, { throwIfNoEntry: false });
     return stat ? [{ path, age: Date.now() - stat.mtimeMs }] : [];

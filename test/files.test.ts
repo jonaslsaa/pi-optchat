@@ -142,7 +142,7 @@ test('readUsage reads the ledger beside the Pi that writes it: nothing is writte
 
     const { entries, warnings } = readUsage(dir);
     assert.deepEqual(entries.map(entry => entry.id), ['a', 'b', 'c']);
-    assert.deepEqual(warnings, ['1 unreadable usage records excluded; totals may be incomplete.'], 'the line being written is not one of them');
+    assert.deepEqual(warnings, ['1 unreadable usage record excluded; totals may be incomplete.'], 'the line being written is not one of them');
     assert.deepEqual(snapshot(dir), before, 'the ledger is as it was: its owner would have ended the last line');
     for (const range of ['Last hour', 'Today', 'Last 7 days', 'All time'] as const)
       assert.deepEqual(summarizeUsage(selectUsage(entries, range, now)), summarizeUsage(owner.select(range, 'any', now)), range);

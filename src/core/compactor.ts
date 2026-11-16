@@ -62,6 +62,8 @@ export interface CompressorOptions {
   model: () => CompactorModel;
   retryable: Retryable;
   onUsage?: (reply: AssistantMessage) => void;
+  /** The headers of each answer the provider starts, which is where it says how much of a subscription's limits is used. */
+  onHeaders?: (headers: Record<string, string>) => void;
   /** The longest line kept without a retry; ACCEPTED_BYTES unless the host has a setting for it. */
   accepted?: () => number;
   retryDelays?: readonly number[];
@@ -70,7 +72,7 @@ export interface CompressorOptions {
 }
 
 /** Builds summary lines with the model `model` resolves. The model is asked for 512 bytes. */
-export function createCompressor({ model: resolve, retryable, onUsage = () => {}, accepted = () => ACCEPTED_BYTES, retryDelays,
+export function createCompressor({ model: resolve, retryable, onUsage = () => {}, onHeaders, accepted = () => ACCEPTED_BYTES, retryDelays,
   system = COMPACT }: CompressorOptions): Compressor {
   const gate = primeFirst();
   return async (input, signal) => {
@@ -97,6 +99,7 @@ export function createCompressor({ model: resolve, retryable, onUsage = () => {}
           sessionId: 'optchat-compactor', transport: 'sse',
           reasoning: thinking, signal, cacheRetention: 'short',
           onPayload: payload => model.api === 'anthropic-messages' ? cachePayload(payload, { end: false }) : payload,
+          onResponse: response => onHeaders?.(response.headers),
         });
         // The cache entry is usable once the model starts answering.
         for await (const event of stream) if (event.type !== 'start') { warmed(event.type !== 'error'); break; }

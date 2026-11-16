@@ -52,6 +52,9 @@ const STOPPED: Record<StopCause, string> = {
 };
 const stoppedReport = (cause: StopCause, text = '') => `${STOPPED[cause]}${text ? `\n\nIts last message before the stop:\n${text}` : ''}`;
 interface Options { parentSession?: string; usage?: UsageLedger; createSession?: typeof createAgentSession;
+  /** The headers of each answer a provider starts for a child, and the error text of a child's answer that ended in one: where the subscription's limits are read from. */
+  onHeaders?: (headers: Record<string, string>) => void;
+  onError?: (error: string) => void;
   /** Names of the built-in extensions the main session loaded (see `loadedBuiltins`). */
   builtins?: () => Iterable<string>;
   /** Journals the reports a main-agent spawn has so far while its other children still run (none: the batch was delivered), so a crash cannot lose them. */
@@ -220,6 +223,7 @@ export class Children {
         live.streaming = undefined;
       }
       if (event.type === 'turn_end' || event.type === 'agent_settled') this.options.usage?.backfill(live.session.sessionManager.getEntries(), live.info.parentSession, 'subagent', live.info.id);
+      if (event.type === 'turn_end' && event.message.role === 'assistant' && event.message.errorMessage) this.options.onError?.(event.message.errorMessage);
       if (event.type === 'message_start' && event.message.role === 'user') {
         const text = textContent(event.message.content);
         const guidance = live.prompting ?? live.info.guidance.find(g => g.state === 'queued' && sentText(g) === text);
@@ -350,6 +354,7 @@ export class Children {
           if (live && primed) { live.primed = undefined; await abortable(primed, ctx.signal); }
           return ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload;
         });
+        pi.on('after_provider_response', event => this.options.onHeaders?.(event.headers));
       }],
     });
     await loader.reload();

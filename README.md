@@ -206,6 +206,7 @@ Profile data lives in `~/.optchat/profiles/<name>/` (override the root with `OPT
 | `pending-inputs.json`, `pending-reports.json` | Recovery journals |
 | `runs/` | Subagent sessions and run metadata |
 | `usage.jsonl` | Usage ledger |
+| `limits.json` | How much of a subscription's limits is used, as the provider last said (not in Git) |
 | `memory.html` | Snapshot from `/optchat browse` |
 
 - Each profile folder is a local Git repository, committed after each turn. It has no remote, so it is not a backup: copy the folder while Pi is closed.

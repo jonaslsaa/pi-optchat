@@ -26,6 +26,7 @@ import { Inbox } from './inbox.ts';
 import { checkpoint } from './checkpoint.ts';
 import { pendingImport, prepareImport, runImport, discardImport } from './import/job.ts';
 import { chooseImport, showProgress } from './import/ui.ts';
+import { noteLimits, noteRefusal } from './limits.ts';
 import { UsageLedger } from './usage.ts';
 import { agentLabel, oneLine, showInspector, type InspectorPage } from './inspector.ts';
 import { showAgentView } from './agent-view.ts';
@@ -283,14 +284,16 @@ export default function optchat(pi: ExtensionAPI) {
       if (!Array.isArray(saved) || !saved.every(isPendingReport)) throw new Error('Invalid pending report journal.');
       const memory = await Memory.open(memoryDirectory(dir), createCompressor(ctx.modelRegistry, () => config.compactor, { onUsage: message => {
         usage.compression(message, 'compactor', sessionId);
+        noteRefusal(dir, message.errorMessage);
         status(ctx);
-      }, accepted: () => config.summaryAcceptBytes }), { warn: warning => ctx.ui.notify(warning, 'error'), jobs: config.jobs });
+      }, onHeaders: headers => noteLimits(dir, headers), accepted: () => config.summaryAcceptBytes }), { warn: warning => ctx.ui.notify(warning, 'error'), jobs: config.jobs });
       openingMemory = memory;
       const inbox = new Inbox(dir);
       const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
       if (recovered) ctx.ui.notify(`Recovered ${recovered} unanswered inputs into ${name}'s memory. Ask to continue them when ready.`, 'info');
       const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => `${readInstructions(dir)}\n\n${IMPORT_GUIDANCE}`,
         deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, builtins: () => loadedBuiltins(pi), settings: () => config, hold: holdReports,
+          onHeaders: headers => noteLimits(dir, headers), onError: error => noteRefusal(dir, error),
           summarizeHandoff: createHandoffSummarizer(ctx.modelRegistry, () => config.compactor, message => usage.compression(message, 'compactor', sessionId)) });
       const loggedReports = new Set(memory.root.map(e => e.receipt));
       // Reports a crash held back with their unfinished siblings are delivered now, as they are.
@@ -585,7 +588,13 @@ export default function optchat(pi: ExtensionAPI) {
     try { active?.usage.backfill(ctx.sessionManager.getEntries(), ctx.sessionManager.getSessionId()); }
     catch (error) { ctx.ui.notify(`Could not save usage: ${errorText(error)}`, 'error'); }
   };
-  pi.on('turn_end', (_event, ctx) => collectUsage(ctx));
+  // How much of the subscription's limits is used, as each answer's headers say it: the main chat's here, its agents' and the
+  // compactor's where they are made. Kept for an app to show; only the Pi that holds the profile writes it.
+  pi.on('after_provider_response', event => { if (active) noteLimits(active.dir, event.headers); });
+  pi.on('turn_end', (event, ctx) => {
+    collectUsage(ctx);
+    if (active && event.message.role === 'assistant') noteRefusal(active.dir, event.message.errorMessage);
+  });
   pi.on('agent_settled', async (_event, ctx) => {
     collectUsage(ctx);
     try { flush(); active?.inbox.dropReturned(); } catch (error) { fault = errorText(error); ctx.ui.notify(fault, 'error'); }
@@ -702,7 +711,7 @@ export default function optchat(pi: ExtensionAPI) {
         if (!closed) { await a.memory.close(); closed = true; }
         const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, { onUsage: message => {
           a.usage.compression(message, 'import', ctx.sessionManager.getSessionId());
-        }, accepted: () => a.config.summaryAcceptBytes });
+        }, onHeaders: headers => noteLimits(a.dir, headers), accepted: () => a.config.summaryAcceptBytes });
         const completed = await showProgress(ctx, job, (signal, progress) => runImport(a.dir, compress, signal, a.config.jobs, progress), signal);
         ctx.ui.notify(completed ? `Imported ${job.added} messages into ${a.name}. Previous memory retained at ${job.previous === '.' ? a.dir : join(a.dir, job.previous)}.`
           : 'Import paused. Use /optchat import to resume. Other profiles remain available.', 'info');

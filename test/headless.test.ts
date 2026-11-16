@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionFactory, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
+import { readLimits } from '../src/limits.ts';
 import { createProfile, lastProfile, loadConfig, lockProfile, profilePath, rememberProfile, saveConfig } from '../src/profiles.ts';
 import { textContent } from '../src/transcript.ts';
 import { emptyUsage } from '../src/usage.ts';
@@ -27,21 +28,26 @@ for (const name of ['work', 'personal']) {
 rememberProfile('personal');
 
 /** A headless Pi (print or RPC) whose model answers "OK to: <prompt>" and records what each call was sent. */
-async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?: string; connect?: string; agent?: string; hold?: Promise<void>; later?: ExtensionFactory } = {}) {
+async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?: string; connect?: string; agent?: string; hold?: Promise<void>; later?: ExtensionFactory; headers?: Record<string, string>; error?: string } = {}) {
   const dir = mkdtempSync(join(root, 's-'));
   const sent: string[] = [], errors: string[] = [];
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
   runtime.registerProvider('fixture', {
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
     models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple(model, context) {
+    streamSimple(model, context, call) {
       sent.push(JSON.stringify(context.messages));
       const last = context.messages.at(-1);
       const prompt = textContent(last && 'content' in last ? last.content : '');
       const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `OK to: ${prompt}` }],
         api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
       const stream = createAssistantMessageEventStream();
-      void ((prompt.includes('slow') ? options.hold : undefined) ?? Promise.resolve()).then(() => { stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
+      // An answer comes with the provider's headers, as Pi's own providers hand them over; one that is refused comes with none.
+      if (options.error) { stream.push({ type: 'error', reason: 'error', error: { ...message, content: [], stopReason: 'error', errorMessage: options.error } }); stream.end(); return stream; }
+      void ((prompt.includes('slow') ? options.hold : undefined) ?? Promise.resolve()).then(async () => {
+        if (options.headers) await call?.onResponse?.({ status: 200, headers: options.headers }, model);
+        stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: 'stop', message }); stream.end();
+      });
       return stream;
     },
   });
@@ -92,6 +98,24 @@ test('--optchat-profile still opens that profile headlessly', async () => {
     assert.deepEqual(pi.bindings(), [{ name: 'work' }]);
     assert.match(pi.sent[0], /You are OptChat/);
   } finally { await pi.close(); }
+});
+
+test('the main chat\'s answers save the subscription\'s limits in its profile, and a refused one is noted there; plain Pi saves none', async () => {
+  const headers = { 'anthropic-ratelimit-unified-5h-utilization': '0.62', 'anthropic-ratelimit-unified-5h-reset': '1794846600', 'anthropic-ratelimit-unified-5h-status': 'allowed' };
+  const plain = await headless('print', { headers });
+  try { await plain.ask('Say OK'); } finally { await plain.close(); }
+  assert.equal(readLimits(profilePath('personal')), undefined, 'no profile is open, so none is written');
+  const pi = await headless('print', { flag: 'work', headers });
+  try {
+    await pi.ask('Say OK');
+    assert.deepEqual(pi.errors, []);
+  } finally { await pi.close(); }
+  const saved = readLimits(profilePath('work'));
+  assert.deepEqual(saved?.limits, [{ window: '5h', used: 0.62, resets: '2026-11-16T16:30:00.000Z', reached: false }]);
+  const refused = await headless('print', { flag: 'work', error: '429 {"type":"error","error":{"type":"rate_limit_error","message":"Try again later."}}' });
+  try { await refused.ask('Say OK'); } finally { await refused.close(); }
+  assert.deepEqual({ ...readLimits(profilePath('work')), refused: undefined }, { ...saved, refused: undefined }, 'the windows are as they were');
+  assert.ok(Date.parse(readLimits(profilePath('work'))?.refused ?? '') >= Date.parse(saved?.at ?? ''));
 });
 
 test('in an RPC host (Pi Web), /optchat profile <name> as the first message binds that session in place', async () => {
