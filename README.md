@@ -94,6 +94,7 @@ Compression and subagents make extra model requests with your provider credentia
 | Subagent levels | 1 | 1: only the main agent starts subagents. 2 or more: subagents may start their own, that many levels deep. Applies to subagents started or resumed after the change. |
 | Max active agents | 8 | Subagents running at once in the profile, all levels together, so it also caps how deep a chain can go. |
 | Group subagent reports | off | Off: each subagent reports as soon as it finishes (the recipe). On: the subagents started by one spawn report together, in one message once the last of them finishes. Applies to the next spawn. |
+| Subagent memory view | on | On: subagents get the profile's memory view and read-only `zoom`/`date`, as in the recipe. Off: each starts with its task alone, with no view, `zoom`/`date` or `search`, which suits self-contained or blind work. A spawn task's `memory` overrides it either way. Applies to the next spawn. |
 | Previous exchange | on | Replays your last request and answer in full with the next turn. Off is the recipe. |
 | Previous exchange limit | 16 KB | A larger last exchange is left out. |
 | Memory search | off | Gives the agent, and subagents started or resumed after the change, a `search` tool over your original messages. Off is the recipe: zoom and date only. Applies from the next turn. |
@@ -111,7 +112,7 @@ Numbers must be whole numbers of at least 1 (512 for the summary size tolerance,
 
 Ask in plain words, for example: "Spawn an agent to investigate this repository and report back."
 
-- **What they get**: the profile's memory view (frozen at launch) and instructions, read-only `zoom`/`date`, normal coding tools, your installed extensions, and your MCP servers.
+- **What they get**: the profile's memory view (frozen at launch) and instructions, read-only `zoom`/`date`, normal coding tools, your installed extensions, and your MCP servers. A task with `memory: 'none'` gets its task alone instead (no view, `zoom`/`date` or `search`), and **Subagent memory view** makes that the profile's default.
 - **Reports**: each child reports when it finishes, as one message starting `[id]`, shown in a dark grey `↳ subagent <id>` box. Turn on **Group subagent reports** to get one message per spawn instead.
 - **Model**: children run the profile's subagent model. Ask for another in your request ("review it with anthropic/claude-haiku-5-5 at low") and the agent sets that task's `model` and `thinking`.
 - **Talking**: the parent sends guidance with `tell`; the child messages its parent mid-run with `tell_parent`. `tell` to a finished child resumes it with its saved transcript.

@@ -7,7 +7,7 @@ import { record } from './core/cache.ts';
 import { textContent } from './transcript.ts';
 import { isFinishReason, readRun, type FinishReason, type Guidance, type RunInfo, type RunState } from './run-record.ts';
 
-export { readRun, runStates, type FinishReason, type Guidance, type RunInfo, type RunState } from './run-record.ts';
+export { readRun, runStates, type FinishReason, type Guidance, type MemoryFrom, type RunInfo, type RunState } from './run-record.ts';
 
 /** How a run's reports and messages start: `[id]`, or `[id · title]` (see `HEAD` in report-message.ts). */
 export const reportHead = (run: { id: string; title?: string }) => `[${run.id}${run.title ? ` · ${run.title}` : ''}]`;

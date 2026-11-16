@@ -7,6 +7,9 @@ import { record } from './core/cache.ts';
 /** `paused`: interrupted by the user with nothing queued, alive and waiting for its next message. `interrupted` is a finished run cut off by Pi closing or a connected window ending. */
 export const runStates = ['running', 'waiting', 'stopping', 'completed', 'failed', 'stopped', 'interrupted', 'paused'] as const;
 export type RunState = typeof runStates[number];
+/** Where a run's memory choice came from: its task's own `memory`, the profile setting set to no view, a parent without the view (which always wins), or nothing naming one, so the view. */
+export const memorySources = ['task', 'setting', 'inherited', 'default'] as const;
+export type MemoryFrom = typeof memorySources[number];
 const finishReasons = ['complete', 'disconnected', 'owner-stopped', 'failed'] as const;
 export type FinishReason = typeof finishReasons[number];
 export const isFinishReason = (value: unknown): value is FinishReason => finishReasons.some(reason => reason === value);
@@ -18,8 +21,11 @@ export interface RunInfo {
   parentId?: string; depth: number;
   state: RunState; report?: string;
   connected?: boolean;
-  /** `none`: spawned without the memory view, so it has no view, zoom or date; a resume keeps that. Unset: it got the view. */
-  memory?: 'none';
+  /** What it got: `none` means no memory view, so no view, zoom or date. Records saved before this was written always leave it
+   * unset, which means the view. A resume keeps the saved choice instead of reading the profile setting again. */
+  memory?: 'view' | 'none';
+  /** Where `memory` came from (see `memorySources`), so an explicit choice reads differently from the default. Unset in older records. */
+  memoryFrom?: MemoryFrom;
   /** A connected window whose agent runs in its own Pi process (an RPC host's second session on a busy profile): `pid` is that
    * process, `session` its Pi session file, read when the window ends. The record is all this process has of it. `after`: a window
    * that went on after /complete shares that session with the conversations before it, so only its messages from then on are its. */
@@ -41,7 +47,8 @@ function isRun(value: unknown): value is RunInfo {
     && (value.sessionFile === undefined || typeof value.sessionFile === 'string')
     && (value.report === undefined || typeof value.report === 'string')
     && (value.connected === undefined || typeof value.connected === 'boolean')
-    && (value.memory === undefined || value.memory === 'none')
+    && (value.memory === undefined || value.memory === 'view' || value.memory === 'none')
+    && (value.memoryFrom === undefined || memorySources.includes(value.memoryFrom as MemoryFrom))
     && (value.cutOff === undefined || typeof value.cutOff === 'boolean')
     && (value.window === undefined || record(value.window) && typeof value.window.pid === 'number' && (value.window.session === undefined || typeof value.window.session === 'string')
       && (value.window.after === undefined || typeof value.window.after === 'number'))

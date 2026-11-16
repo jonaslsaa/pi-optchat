@@ -9,6 +9,7 @@ import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { SUBAGENT_NO_VIEW } from '../src/prompts.ts';
 import { readRun } from '../src/run-record.ts';
+import type { Settings } from '../src/settings.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
 import { removeDir } from './support.ts';
@@ -26,7 +27,7 @@ const model = (id: string) => ({ id, name: id, reasoning: false, input: ['text' 
 /** Everything a request carried: its task (the first user message's words after the view), system prompt, tool names and full payload text. */
 type Request = { task: string; system: string; tools: string[]; payload: string };
 
-async function setup(dir: string, api: 'openai-completions' | 'anthropic-messages', hold = new Set<string>()) {
+async function setup(dir: string, api: 'openai-completions' | 'anthropic-messages', hold = new Set<string>(), settings: () => Partial<Settings> = () => ({})) {
   const requests: Request[] = [], releases: (() => void)[] = [];
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider('optchat-test', {
@@ -54,7 +55,7 @@ async function setup(dir: string, api: 'openai-completions' | 'anthropic-message
   const memory = new Memory(join(dir, 'profile'), async input => input.source.slice(0, 100), () => {});
   memory.append('user', SECRET);
   const make = () => new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'optchat-test', model: 'child', thinking: 'off' }), () => 'USER INSTRUCTIONS', async () => {}, () => {},
-    join(dir, 'profile'), { settings: () => ({ subagentLevels: 2, maxAgents: 8 }), createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+    join(dir, 'profile'), { settings: () => ({ subagentLevels: 2, maxAgents: 8, ...settings() }), createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
   return { requests, release: () => { for (const r of releases.splice(0)) r(); }, make, memory };
 }
 
@@ -79,9 +80,10 @@ test("memory 'none': the first request carries the task alone, no view, no zoom/
     // Check 3: the default child is unchanged.
     assert.ok(view.payload.includes('VIEW-ONLY-MARKER') && view.tools.includes('zoom') && view.tools.includes('date'));
     assert.match(view.system, /Your first message holds the view below/);
-    assert.equal(children.history.records.get(blind)?.memory, 'none');
-    assert.equal(children.history.records.get(plain)?.memory, undefined, 'a default run records nothing new');
-    assert.equal(readRun(join(dir, 'profile'), blind).memory, 'none', 'saved with the run');
+    assert.deepEqual([children.history.records.get(blind)?.memory, children.history.records.get(blind)?.memoryFrom], ['none', 'task']);
+    assert.deepEqual([children.history.records.get(plain)?.memory, children.history.records.get(plain)?.memoryFrom], ['view', 'default'],
+      'a run nothing named one for records the view and says it was the default');
+    assert.deepEqual([readRun(join(dir, 'profile'), blind).memory, readRun(join(dir, 'profile'), blind).memoryFrom], ['none', 'task'], 'saved with the run');
   } finally { await children.close(); removeDir(dir); }
 });
 
@@ -149,4 +151,82 @@ test("check 6: a report to a 'none' parent carries no zoom pointer, since that p
     assert.ok(report.payload.includes(child), "the parent got its child's report");
     assert.ok(!report.payload.includes('zoom('), 'no pointer to a tool the no-view parent does not have');
   } finally { release(); await children.close(); removeDir(dir); }
+});
+
+test("the profile's Subagent memory view sets the default, and a task's memory overrides it either way", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-setting-memory-'));
+  const settings: Partial<Settings> = { subagentMemory: false };
+  const { requests, make } = await setup(dir, 'openai-completions', undefined, () => settings);
+  const children = make();
+  const record = (id: string) => [children.history.records.get(id)?.memory, children.history.records.get(id)?.memoryFrom];
+  try {
+    // Row 1: the setting is off and the task says nothing.
+    const [bySetting, asked] = await children.spawn([{ task: 'the setting says no view' }, { task: 'the task asks for the view', memory: 'view' }], dir);
+    await until(() => !children.active);
+    const none = requests.find(r => r.task === 'the setting says no view')!, view = requests.find(r => r.task === 'the task asks for the view')!;
+    assert.ok(!none.payload.includes('VIEW-ONLY-MARKER') && !none.tools.includes('zoom') && !none.tools.includes('date'), 'the setting alone keeps the view out');
+    assert.ok(none.system.includes(SUBAGENT_NO_VIEW) && !/view|zoom/i.test(none.system), 'and its prompt describes no view');
+    assert.equal(textContent(children.messages(bySetting).find(m => m.role === 'user')?.content ?? ''), 'the setting says no view', 'its first message is the task alone');
+    assert.deepEqual(record(bySetting), ['none', 'setting'], 'the record says the setting did it');
+    // Row 2: the setting is off and the task asks for the view.
+    assert.ok(view.payload.includes('VIEW-ONLY-MARKER') && view.tools.includes('zoom') && view.tools.includes('date'), "the task's memory: 'view' beats a setting of none");
+    assert.match(view.system, /Your first message holds the view below/, 'a child given the view is told so');
+    assert.match(view.system, /Subagents get no memory view, as this profile sets/, 'and is told what the profile gives its own children');
+    assert.deepEqual(record(asked), ['view', 'task'], 'the record says the task did it');
+
+    settings.subagentMemory = true;
+    // Row 3: the setting is on and the task says 'none'; row 4: the setting is on and the task says nothing.
+    const [refused, defaulted] = await children.spawn([{ task: 'the task says no view', memory: 'none' }, { task: 'nothing names one' }], dir);
+    await until(() => !children.active);
+    const off = requests.find(r => r.task === 'the task says no view')!, on = requests.find(r => r.task === 'nothing names one')!;
+    assert.ok(!off.payload.includes('VIEW-ONLY-MARKER') && !off.tools.includes('zoom') && off.system.includes(SUBAGENT_NO_VIEW), "a task's memory: 'none' keeps it off with the setting on");
+    assert.deepEqual(record(refused), ['none', 'task']);
+    assert.ok(on.payload.includes('VIEW-ONLY-MARKER') && on.tools.includes('zoom') && on.system.includes('Subagents see your memory view by default'), 'the setting on gives the view and says so');
+    assert.deepEqual(record(defaulted), ['view', 'default']);
+  } finally { await children.close(); removeDir(dir); }
+});
+
+test("a no-view parent's child stays blind even when its task asks for the view", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-inherited-none-'));
+  const { requests, release, make } = await setup(dir, 'openai-completions', new Set(['parent']));
+  const children = make();
+  try {
+    const [parent] = await children.spawn([{ task: 'parent', memory: 'none' }], dir);
+    await until(() => requests.some(r => r.task === 'parent'));
+    const [child] = await children.spawn([{ task: 'asks for the view', memory: 'view' }], dir, undefined, parent);
+    await until(() => children.history.records.get(child)?.state === 'completed');
+    const asked = requests.find(r => r.task === 'asks for the view')!;
+    assert.ok(!asked.payload.includes('VIEW-ONLY-MARKER') && !asked.tools.includes('zoom') && !asked.tools.includes('date'), 'a no-view parent wins over the task');
+    assert.ok(asked.system.includes(SUBAGENT_NO_VIEW) && !/view|zoom/i.test(asked.system), 'and the prompt names no view at all');
+    assert.deepEqual([children.history.records.get(child)?.memory, children.history.records.get(child)?.memoryFrom], ['none', 'inherited']);
+  } finally { release(); await children.close(); removeDir(dir); }
+});
+
+test('a resumed run keeps the memory choice saved with it, even after the profile setting changes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-memory-resume-'));
+  const settings: Partial<Settings> = { subagentMemory: false };
+  const { requests, make } = await setup(dir, 'openai-completions', undefined, () => settings);
+  const children = make();
+  const record = (id: string) => [children.history.records.get(id)?.memory, children.history.records.get(id)?.memoryFrom];
+  try {
+    const [blind] = await children.spawn([{ task: 'started blind' }], dir);
+    await until(() => !children.active);
+    settings.subagentMemory = true;
+    await children.tell(blind, 'one more thing');
+    await until(() => !children.active && children.history.records.get(blind)?.state === 'completed');
+    const resumed = requests.filter(r => r.task === 'started blind');
+    assert.equal(resumed.length, 2, 'spawned, then resumed');
+    assert.ok(!resumed[1].payload.includes('VIEW-ONLY-MARKER') && !resumed[1].tools.includes('zoom'), 'the resume keeps the no-view choice, not the new setting');
+    assert.deepEqual(record(blind), ['none', 'setting'], 'and keeps saying where it came from');
+
+    const [sighted] = await children.spawn([{ task: 'started with the view' }], dir);
+    await until(() => !children.active);
+    settings.subagentMemory = false;
+    await children.tell(sighted, 'and another');
+    await until(() => !children.active && children.history.records.get(sighted)?.state === 'completed');
+    const again = requests.filter(r => r.task === 'started with the view');
+    assert.equal(again.length, 2, 'spawned, then resumed');
+    assert.ok(again[1].payload.includes('VIEW-ONLY-MARKER') && again[1].tools.includes('zoom'), 'the resume keeps the view it had');
+    assert.deepEqual(record(sighted), ['view', 'default']);
+  } finally { await children.close(); removeDir(dir); }
 });

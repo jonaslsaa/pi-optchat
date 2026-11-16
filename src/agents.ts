@@ -15,7 +15,7 @@ import type { Memory } from './memory.ts';
 import type { ModelChoice } from './profiles.ts';
 import { cachePayload } from './core/cache.ts';
 import { childInput } from './core/messages.ts';
-import { alive, runMessages, runsElsewhere, CUT_OFF, reportHead, RunHistory, isActiveRun, isRunning, transition, sessionMessages, savedSession, undelivered, sentText, queuedWindows, unqueueWindow, type Guidance, type RemoteWindow, type RunInfo, type RunState, type FinishReason } from './runs.ts';
+import { alive, runMessages, runsElsewhere, CUT_OFF, reportHead, RunHistory, isActiveRun, isRunning, transition, sessionMessages, savedSession, undelivered, sentText, queuedWindows, unqueueWindow, type Guidance, type MemoryFrom, type RemoteWindow, type RunInfo, type RunState, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { fullChat, refreshFraction, textContent } from './transcript.ts';
 import { Type, type Static } from 'typebox';
@@ -79,12 +79,14 @@ export const taskDirectory = (cwd: string, path = '.', windows = process.platfor
   resolve(cwd, path.replace(windows ? /^~(?=$|[\\/])/ : /^~(?=$|\/)/, homedir()));
 const TITLE_DOC = 'Short label shown to the user, e.g. "Fix steering bug"';
 const CWD_DOC = 'Project directory the subagent works in (~ allowed); its AGENTS.md files load from there. Defaults to your current directory.';
-/** The spawn tools' tasks. What a task leaves out of model and thinking is the profile's subagent choice. */
+/** The spawn tools' tasks. What a task leaves out of model, thinking and memory is the profile's subagent choice. */
 export const TASKS = Type.Array(Type.Object({ task: Type.String(), title: Type.Optional(Type.String({ description: TITLE_DOC })), cwd: Type.Optional(Type.String({ description: CWD_DOC })),
   model: Type.Optional(Type.String({ description: 'Leave unset for the profile\'s subagent model (named in your instructions). Set only when the user asks for a model, as provider/id from models().' })),
   thinking: Type.Optional(StringEnum(THINKING, { description: 'Leave unset for the profile\'s subagent level. Set only when the user asks for one.' })),
-  memory: Type.Optional(StringEnum(['view', 'none'], { description: 'Leave unset for the memory view. \'none\' starts the child with only its task: no view, no zoom/date. Use for self-contained or blind tasks.' })) }), { minItems: 1 });
+  memory: Type.Optional(StringEnum(['view', 'none'], { description: 'Leave unset for the profile\'s default for subagents (your instructions name it). \'none\' starts the child with its task alone: no view, no zoom/date, for self-contained or blind work. \'view\' asks for the view when the profile sets none.' })) }), { minItems: 1 });
 export type Task = Static<typeof TASKS>[number];
+/** What a task's `memory` comes out as, and why: the four rows of the precedence (see `launch`). */
+type EffectiveMemory = { memory: 'view' | 'none'; memoryFrom: MemoryFrom };
 /** The tool beside spawn that lists what a task's `model` may be. */
 export const modelsTool = (children: () => Children) => ({ name: 'models', label: 'List models',
   description: 'The models a spawn task may name, as provider/id, with the profile\'s subagent default marked. provider narrows the list to one provider.',
@@ -244,13 +246,23 @@ export class Children {
   private async launch(tasks: Task[], cwd: string, signal: AbortSignal | undefined, parentId: string | undefined, connected = false) {
     for (const directory of tasks.map(t => taskDirectory(cwd, t.cwd))) if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new Error(`No such directory: ${directory}`);
     const profile = this.choice();
-    // A child without the view can't hand it on: its own children get none either.
-    const viewless = parentId !== undefined && this.running.get(parentId)?.info.memory === 'none';
+    // Containment: a child spawned without the view stays blind in its own children too, so a blind parent's helpers cannot read the
+    // chat. The view itself would be there to render (it comes from profile memory), so this is a rule, not a limit; it wins over the
+    // task and the setting alike.
+    const parentViewless = parentId !== undefined && this.running.get(parentId)?.info.memory === 'none';
+    // Read with the other spawn-time settings, before the memory settles, so one spawn sees one value of it.
+    const { subagentMemory } = this.settings;
     const runs = tasks.map(task => {
       const name = task.model ?? `${profile.provider}/${profile.model}`, model = this.find(name);
       // Like Pi's own setModel: a named model needs auth, so a guess at a provider the user isn't logged in to fails here, not in the child.
       if (!model || task.model && !this.registry.hasConfiguredAuth(model)) throw new Error(`Subagent model unavailable: ${name}. Models you can use: ${this.registry.getAvailable().map(m => `${m.provider}/${m.id}`).join(', ') || 'none'}.`);
-      return { ...task, model, thinking: task.thinking ?? profile.thinking, memory: viewless ? 'none' as const : task.memory };
+      // Memory: a parent without the view wins, then the task's own choice (the schema allows only 'view' and 'none'), then the
+      // profile setting; nothing naming one is the view.
+      const memory: EffectiveMemory = parentViewless ? { memory: 'none', memoryFrom: 'inherited' }
+        : task.memory ? { memory: task.memory === 'none' ? 'none' : 'view', memoryFrom: 'task' }
+        : subagentMemory ? { memory: 'view', memoryFrom: 'default' }
+        : { memory: 'none', memoryFrom: 'setting' };
+      return { ...task, model, thinking: task.thinking ?? profile.thinking, ...memory };
     });
     if (this.closing) throw new Error('Profile is closing.');
     this.settling++;
@@ -288,7 +300,7 @@ export class Children {
     launch.then(done, done);
     return launch;
   }
-  private async launchBatch({ tasks, cwd, depth, parentId, connected, signal, cancelled }: { tasks: (Omit<Task, 'model' | 'thinking'> & { model: Model<Api>; thinking: ModelChoice['thinking'] })[]; cwd: string; depth: number;
+  private async launchBatch({ tasks, cwd, depth, parentId, connected, signal, cancelled }: { tasks: (Omit<Task, 'model' | 'thinking' | 'memory'> & { model: Model<Api>; thinking: ModelChoice['thinking'] } & EffectiveMemory)[]; cwd: string; depth: number;
     parentId?: string; connected: boolean; signal?: AbortSignal; cancelled: () => boolean }) {
     const launched: LiveRun[] = [];
     let reserved = tasks.length;
@@ -303,7 +315,7 @@ export class Children {
         // One short line without brackets, so the `[id · title]` head of its reports stays parseable and small.
         const title = oneLine(task.title ?? '').replace(/[[\]]/g, '').trim().slice(0, 128).trimEnd();
         const info: RunInfo = { id, task: task.task, ...(title ? { title } : {}), cwd: directory, model: `${task.model.provider}/${task.model.id}`, thinking: session.thinkingLevel,
-          parentSession: this.options.parentSession ?? '', parentId, depth, sessionFile: session.sessionFile, started: Date.now(), state: 'running', guidance: [], ...(connected ? { connected: true } : {}), ...(task.memory === 'none' ? { memory: 'none' as const } : {}) };
+          parentSession: this.options.parentSession ?? '', parentId, depth, sessionFile: session.sessionFile, started: Date.now(), state: 'running', guidance: [], ...(connected ? { connected: true } : {}), memory: task.memory, memoryFrom: task.memoryFrom };
         const live: LiveRun = { session, info, updated: Date.now(), tools: new Map(), pendingReports: [], pendingGuidance: [], steering: Promise.resolve() };
         launched.push(live); this.save(info); this.running.set(id, live);
         this.launching--; reserved--;
@@ -343,7 +355,9 @@ export class Children {
         pi.on('before_agent_start', event => {
           // Without the view, the preamble says the first message is the task alone, and nothing describes the view, zoom or search.
           event.systemPromptOptions.customPrompt = viewless ? SUBAGENT_NO_VIEW : allowSearch(`${SUBAGENT}\n\n${VIEW_DOC}${memorySearch ? SEARCH_DOC : ''}`, memorySearch);
-          event.systemPromptOptions.sections.instructions = [this.instructions(), delegates ? delegation(maxAgents, this.choice()) : NO_DELEGATION, STEERABLE, connected ? CONNECTED : NOT_CONNECTED].filter(Boolean).join('\n\n');
+          // What this agent's own children get by default, read as the other settings are; nothing to tell it when it has no view to pass on.
+          const childrenMemory = viewless ? undefined : this.settings.subagentMemory ? 'view' as const : 'none' as const;
+          event.systemPromptOptions.sections.instructions = [this.instructions(), delegates ? delegation(maxAgents, this.choice(), childrenMemory) : NO_DELEGATION, STEERABLE, connected ? CONNECTED : NOT_CONNECTED].filter(Boolean).join('\n\n');
           refreshContextFiles(event.systemPromptOptions);
         });
         pi.on('before_provider_request', async (event, ctx) => {
@@ -655,7 +669,8 @@ export class Children {
     this.launching++; this.resuming.add(id);
     let reserved = true;
     try {
-      // No thinking level: the session restores the one it ran with.
+      // No thinking level: the session restores the one it ran with. The memory choice comes from the record, not the profile setting,
+      // which may have changed since: a resume keeps what the run already had.
       const session = await this.open({ id, directory: run.cwd, depth: run.depth, parentId: run.parentId, connected: false, model, memory: run.memory, sessionManager: manager });
       // stop() cannot see this child until it is registered, so a parent stopped meanwhile must cancel it here.
       const parent = run.parentId ? this.running.get(run.parentId) : undefined;

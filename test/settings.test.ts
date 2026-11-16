@@ -58,11 +58,11 @@ test('a config.json from before settings existed loads with the defaults, and se
   const dir = mkdtempSync(join(tmpdir(), 'optchat-config-'));
   try {
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ compactor: defaults.compactor, subagent: defaults.subagent }));
-    assert.deepEqual(loadConfig(dir), { ...defaults, subagentLevels: 1, maxAgents: 8, previousExchange: true, previousExchangeKB: 16, memorySearch: false, summaryAcceptBytes: 640 });
-    const changed = { ...loadConfig(dir), subagentLevels: 3, maxAgents: 12, previousExchange: false, previousExchangeKB: 4, memorySearch: true, summaryAcceptBytes: 512 };
+    assert.deepEqual(loadConfig(dir), { ...defaults, subagentLevels: 1, maxAgents: 8, subagentMemory: true, previousExchange: true, previousExchangeKB: 16, memorySearch: false, summaryAcceptBytes: 640 });
+    const changed = { ...loadConfig(dir), subagentLevels: 3, maxAgents: 12, subagentMemory: false, previousExchange: false, previousExchangeKB: 4, memorySearch: true, summaryAcceptBytes: 512 };
     saveConfig(dir, changed);
     assert.deepEqual(loadConfig(dir), changed);
-    for (const [key, value] of [['subagentLevels', 0], ['maxAgents', -1], ['previousExchangeKB', 1.5], ['subagentLevels', '3'], ['previousExchange', 'yes'], ['summaryAcceptBytes', 511], ['maxAgents', null], ['jobs', 0], ['jobs', 65]] as const) {
+    for (const [key, value] of [['subagentLevels', 0], ['maxAgents', -1], ['previousExchangeKB', 1.5], ['subagentLevels', '3'], ['previousExchange', 'yes'], ['subagentMemory', 'none'], ['summaryAcceptBytes', 511], ['maxAgents', null], ['jobs', 0], ['jobs', 65]] as const) {
       writeFileSync(join(dir, 'config.json'), JSON.stringify({ ...changed, [key]: value }));
       assert.throws(() => loadConfig(dir), /Invalid profile config/, `${key}: ${value}`);
     }
@@ -222,6 +222,21 @@ test('the settings page saves a valid number and explains an invalid one', () =>
   } finally { removeDir(dir); }
 });
 
+test('the settings page shows the Subagent memory view row and saves it toggled off', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-page-'));
+  try {
+    const config: ProfileConfig = { ...defaults };
+    const page = settingsPage(plain, { profile: 'demo', config, models: [{ name: 'anthropic/claude-sonnet-5-5', thinking: ['low', 'medium'] }], dir }, () => {});
+    assert.match(page.render(100).join('\n'), /Subagent memory view\s+on  default\n/);
+    // Down past the two model rows and the three subagent ones above it, then toggle it.
+    for (const key of ['\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', ' ']) page.handleInput(key);
+    assert.equal(config.subagentMemory, false);
+    assert.equal(JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')).subagentMemory, false);
+    assert.match(page.render(100).join('\n'), /Subagent memory view\s+off  default on[\s\S]*Saved subagent memory view off/);
+    page.handleInput('\x1b');
+  } finally { removeDir(dir); }
+});
+
 test('turning Previous exchange off also reaches a turn that a subagent report starts while idle', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'oc-report-'));
   const oldHome = process.env.OPTCHAT_HOME;
@@ -243,11 +258,11 @@ test('turning Previous exchange off also reaches a turn that a subagent report s
     const manager = SessionManager.inMemory(dir);
     manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
     session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom'] })).session;
-    // The settings page, driven by keys: down past Group subagent reports to Previous exchange, toggle it, close.
+    // The settings page, driven by keys: down past Group subagent reports and Subagent memory view to Previous exchange, toggle it, close.
     const custom = (async (factory: (tui: unknown, theme: Theme, keys: unknown, done: (result: undefined) => void) => Component) => {
       let closed = false;
       const page = factory({ requestRender: () => {} }, plain, {}, () => { closed = true; });
-      for (const key of ['\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', ' ', '\x1b']) page.handleInput?.(key);
+      for (const key of ['\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', ' ', '\x1b']) page.handleInput?.(key);
       assert.ok(closed);
     }) as unknown as ExtensionUIContext['custom'];
     await session.bindExtensions({ uiContext: { ...session.extensionRunner.getUIContext(), custom }, mode: 'tui' });
@@ -291,7 +306,7 @@ test('Memory search turned on and off in /optchat settings adds and removes the 
     // The settings page, driven by keys: down to Memory search, toggle it, close.
     const custom = (async (factory: (tui: unknown, theme: Theme, keys: unknown, done: (result: undefined) => void) => Component) => {
       const page = factory({ requestRender: () => {} }, plain, {}, () => {});
-      for (const key of ['\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', ' ', '\x1b']) page.handleInput?.(key);
+      for (const key of ['\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', '\x1b[B', ' ', '\x1b']) page.handleInput?.(key);
     }) as unknown as ExtensionUIContext['custom'];
     await session.bindExtensions({ uiContext: { ...session.extensionRunner.getUIContext(), custom }, mode: 'tui' });
     // Pi declares the tools on the leading system message, next to the prompt.
