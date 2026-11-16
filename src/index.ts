@@ -284,17 +284,15 @@ export default function optchat(pi: ExtensionAPI) {
       if (!Array.isArray(saved) || !saved.every(isPendingReport)) throw new Error('Invalid pending report journal.');
       const memory = await Memory.open(memoryDirectory(dir), createCompressor(ctx.modelRegistry, () => config.compactor, { onUsage: message => {
         usage.compression(message, 'compactor', sessionId);
-        noteRefusal(dir, message.errorMessage);
         status(ctx);
-      }, onHeaders: headers => noteLimits(dir, headers), accepted: () => config.summaryAcceptBytes }), { warn: warning => ctx.ui.notify(warning, 'error'), jobs: config.jobs });
+      }, limits: dir, accepted: () => config.summaryAcceptBytes }), { warn: warning => ctx.ui.notify(warning, 'error'), jobs: config.jobs });
       openingMemory = memory;
       const inbox = new Inbox(dir);
       const recovered = pendingImport(dir) ? 0 : inbox.recover(memory);
       if (recovered) ctx.ui.notify(`Recovered ${recovered} unanswered inputs into ${name}'s memory. Ask to continue them when ready.`, 'info');
       const children = new Children(memory, ctx.modelRegistry, () => config.subagent, () => `${readInstructions(dir)}\n\n${IMPORT_GUIDANCE}`,
-        deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, builtins: () => loadedBuiltins(pi), settings: () => config, hold: holdReports,
-          onHeaders: headers => noteLimits(dir, headers), onError: error => noteRefusal(dir, error),
-          summarizeHandoff: createHandoffSummarizer(ctx.modelRegistry, () => config.compactor, message => usage.compression(message, 'compactor', sessionId)) });
+        deliverReport, text => ctx.ui.notify(text, 'error'), dir, { parentSession: sessionId, usage, limits: dir, builtins: () => loadedBuiltins(pi), settings: () => config, hold: holdReports,
+          summarizeHandoff: createHandoffSummarizer(ctx.modelRegistry, () => config.compactor, message => usage.compression(message, 'compactor', sessionId), undefined, dir) });
       const loggedReports = new Set(memory.root.map(e => e.receipt));
       // Reports a crash held back with their unfinished siblings are delivered now, as they are.
       reports = saved.map(s => typeof s === 'string' ? { text: s } : { text: s.text, count: s.count, quiet: s.quiet })
@@ -589,7 +587,8 @@ export default function optchat(pi: ExtensionAPI) {
     catch (error) { ctx.ui.notify(`Could not save usage: ${errorText(error)}`, 'error'); }
   };
   // How much of the subscription's limits is used, as each answer's headers say it: the main chat's here, its agents' and the
-  // compactor's where they are made. Kept for an app to show; only the Pi that holds the profile writes it.
+  // compactor's where they are made. Kept for an app to show; only the Pi that holds the profile writes it. So a chat in a
+  // connected window that runs in its own Pi saves nothing, and the snapshot is as old as this Pi's latest answer.
   pi.on('after_provider_response', event => { if (active) noteLimits(active.dir, event.headers); });
   pi.on('turn_end', (event, ctx) => {
     collectUsage(ctx);
@@ -711,7 +710,7 @@ export default function optchat(pi: ExtensionAPI) {
         if (!closed) { await a.memory.close(); closed = true; }
         const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, { onUsage: message => {
           a.usage.compression(message, 'import', ctx.sessionManager.getSessionId());
-        }, onHeaders: headers => noteLimits(a.dir, headers), accepted: () => a.config.summaryAcceptBytes });
+        }, limits: a.dir, accepted: () => a.config.summaryAcceptBytes });
         const completed = await showProgress(ctx, job, (signal, progress) => runImport(a.dir, compress, signal, a.config.jobs, progress), signal);
         ctx.ui.notify(completed ? `Imported ${job.added} messages into ${a.name}. Previous memory retained at ${job.previous === '.' ? a.dir : join(a.dir, job.previous)}.`
           : 'Import paused. Use /optchat import to resume. Other profiles remain available.', 'info');

@@ -2,6 +2,7 @@ import type { ModelRegistry } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { isRetryableAssistantError, type AssistantMessage } from '@earendil-works/pi-ai';
 import { reasoningFor } from './compactor.ts';
+import { noteLimits, noteRefusal } from './limits.ts';
 import type { ModelChoice } from './profiles.ts';
 import { retryTransient } from './core/compactor.ts';
 import { HANDOFF } from './prompts.ts';
@@ -32,9 +33,10 @@ function formatEvidence({ run, messages, transcriptError }: HandoffEvidence) {
   return transcript + (queued.length ? `\nMessages queued but NOT delivered to this agent:\n${queued.join('\n')}` : '');
 }
 
-/** Summarize in one call when possible; otherwise fold chunks with the prior handoff included in the budget. */
+/** Summarize in one call when possible; otherwise fold chunks with the prior handoff included in the budget. `limits` is the
+ * profile's folder where its answers keep the subscription's limits, as the compactor's do. */
 export function createHandoffSummarizer(registry: ModelRegistry, choice: () => ModelChoice,
-  usage: (message: AssistantMessage) => void, retryDelays?: readonly number[]) {
+  usage: (message: AssistantMessage) => void, retryDelays?: readonly number[], limits?: string) {
   return async (run: RunInfo, messages: AgentMessage[], descendants: HandoffEvidence[] = [], signal?: AbortSignal) => {
     const selected = choice(), model = registry.find(selected.provider, selected.model);
     if (!model) throw new Error('Profile compactor model unavailable');
@@ -57,7 +59,9 @@ export function createHandoffSummarizer(registry: ModelRegistry, choice: () => M
       const reply = await retryTransient(() => registry.streamSimple(model, {
         systemPrompt: HANDOFF,
         messages: [{ role: 'user', timestamp: Date.now(), content: prefix + transcript.subarray(offset, end).toString('utf8') }],
-      }, { reasoning: reasoningFor(model, selected.thinking), maxTokens, signal: AbortSignal.any([AbortSignal.timeout(HANDOFF_TIMEOUT), ...signal ? [signal] : []]) }).result(), usage, isRetryableAssistantError, retryDelays, signal);
+      }, { reasoning: reasoningFor(model, selected.thinking), maxTokens, signal: AbortSignal.any([AbortSignal.timeout(HANDOFF_TIMEOUT), ...signal ? [signal] : []]),
+        onResponse: response => { if (limits) noteLimits(limits, response.headers); } }).result(),
+      reply => { usage(reply); if (limits) noteRefusal(limits, reply.errorMessage); }, isRetryableAssistantError, retryDelays, signal);
       summary = handoffText(reply);
       offset = end;
     }

@@ -29,7 +29,7 @@ export function limitsFrom(headers: Record<string, string>, now = Date.now()): L
     if (!used || !resets || !(Number(used) >= 0) || !(Number(resets) > 0)) return [];
     return [{ window, used: Number(used), resets: new Date(Number(resets) * 1000).toISOString(), reached: headers[header(window, '-status')] === 'rejected' }];
   });
-  return limits.length ? { at: new Date(now).toISOString(), limits, overage: headers[header('', 'overage-in-use')] === 'true' } : undefined;
+  return limits.length ? { at: new Date(now).toISOString(), limits, overage: headers['anthropic-ratelimit-unified-overage-in-use'] === 'true' } : undefined;
 }
 
 /** A profile's limits as last saved, or nothing: none were saved yet, or the file is not one of these. Writes nothing. */
@@ -48,10 +48,13 @@ export function noteLimits(directory: string, headers: Record<string, string>, n
     if (limits) atomicWrite(file(directory), JSON.stringify(limits));
   } catch { /* The next answer saves it. */ }
 }
-/** Notes that the provider turned a request away for a rate limit, if `error` is that: Anthropic's error of the type
- * `rate_limit_error`, which Pi gives as the answer's error text. The windows stay as they were last counted. */
+/** Notes on the saved limits that the provider turned a request away for a rate limit, if `error` is that: Anthropic's error
+ * of the type `rate_limit_error`, which Pi gives as the answer's error text. The windows stay as they were last counted. With
+ * no limits saved nothing is noted: an API key's rate limit is not a subscription's, and no later answer would clear it. */
 export function noteRefusal(directory: string, error: string | undefined, now = Date.now()) {
   if (!error?.includes('rate_limit_error')) return;
-  try { atomicWrite(file(directory), JSON.stringify({ ...readLimits(directory) ?? { at: new Date(now).toISOString(), limits: [], overage: false }, refused: new Date(now).toISOString() } satisfies Limits)); }
-  catch { /* As above. */ }
+  try {
+    const limits = readLimits(directory);
+    if (limits) atomicWrite(file(directory), JSON.stringify({ ...limits, refused: new Date(now).toISOString() } satisfies Limits));
+  } catch { /* As above. */ }
 }

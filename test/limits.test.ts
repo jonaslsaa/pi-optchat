@@ -7,6 +7,7 @@ import { createAssistantMessageEventStream, type AssistantMessage } from '@earen
 import { createAgentSession, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { Children } from '../src/agents.ts';
 import { createCompressor } from '../src/compactor.ts';
+import { createHandoffSummarizer } from '../src/handoff.ts';
 import { readLimits } from '../src/files.ts';
 import { limitsFrom, noteLimits, noteRefusal } from '../src/limits.ts';
 import { Memory } from '../src/memory.ts';
@@ -54,16 +55,14 @@ test('a request the provider turns away for a rate limit is noted with the windo
   const dir = mkdtempSync(join(tmpdir(), 'optchat-limits-'));
   noteRefusal(dir, '500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}', NOW);
   noteRefusal(dir, undefined, NOW);
-  assert.equal(existsSync(join(dir, 'limits.json')), false, 'another error is not a refusal');
+  // Nor is a rate limit with no limits saved: an API key's, which no later answer would clear.
+  noteRefusal(dir, RATE_LIMITED, NOW);
+  assert.equal(existsSync(join(dir, 'limits.json')), false, 'another error is not a refusal, and nothing is noted where no limits are saved');
   noteLimits(dir, HEADERS, NOW);
   noteRefusal(dir, RATE_LIMITED, NOW + 60_000);
   assert.deepEqual(readLimits(dir), { ...SAVED, refused: '2026-11-16T13:13:51.000Z' });
   noteLimits(dir, HEADERS, NOW + 120_000);
   assert.deepEqual(readLimits(dir), { ...SAVED, at: '2026-11-16T13:14:51.000Z' });
-  // Turned away before any answer was counted: the refusal alone.
-  const fresh = mkdtempSync(join(tmpdir(), 'optchat-limits-'));
-  noteRefusal(fresh, RATE_LIMITED, NOW);
-  assert.deepEqual(readLimits(fresh), { at: AT, limits: [], overage: false, refused: AT });
 });
 
 /** A provider whose answers come with HEADERS, as Pi's own providers hand them over, and end in `error` when one is given. */
@@ -88,25 +87,34 @@ async function provider(dir: string, error?: string) {
 }
 const choice = () => ({ provider: 'optchat-test', model: 'model', thinking: 'off' as const });
 
-test('the compactor\'s answers hand over their headers too', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'optchat-limits-')), seen: Record<string, string>[] = [];
-  const compress = createCompressor(new ModelRegistry(await provider(dir)), choice, { onHeaders: headers => seen.push(headers), retryDelays: [] });
-  await compress({ context: '<chat>\n0+1|user: a line\n</chat>', source: 'x'.repeat(700), part: { l: 0, i: 0 }, images: [] }, new AbortController().signal);
-  assert.deepEqual(seen, [HEADERS]);
-});
+/** What `ask` leaves in a profile's folder: with answers that come with HEADERS, and then, on those limits, with ones that are refused. */
+async function saves(ask: (registry: ModelRegistry, dir: string, runtime: ModelRuntime) => Promise<unknown>) {
+  const asked = async (dir: string, error?: string) => { const runtime = await provider(dir, error); return ask(new ModelRegistry(runtime), dir, runtime); };
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-limits-'));
+  await asked(dir);
+  const { at, ...counted } = readLimits(dir) ?? {};
+  assert.deepEqual(counted, { limits: SAVED.limits, overage: true });
+  await asked(dir, RATE_LIMITED).catch(() => {});
+  const noted = readLimits(dir);
+  assert.deepEqual({ ...noted, refused: undefined }, { at, ...counted, refused: undefined }, 'the windows are as they were');
+  assert.ok(noted?.refused, 'the refusal is noted');
+}
 
-test('a subagent\'s answers hand over their headers, and the error one ends in', async () => {
-  for (const error of [undefined, RATE_LIMITED]) {
-    const dir = mkdtempSync(join(tmpdir(), 'optchat-limits-')), seen: Record<string, string>[] = [], errors: string[] = [];
-    const runtime = await provider(dir, error);
-    const children = new Children(new Memory(dir, async input => input.source.slice(0, 100), () => {}), new ModelRegistry(runtime), choice, () => '', async () => {}, () => {}, dir,
-      { onHeaders: headers => seen.push(headers), onError: text => errors.push(text), createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
+test('the compactor\'s answers keep the limits too, for the chat\'s summaries and an import\'s alike', () =>
+  saves((registry, dir) => createCompressor(registry, choice, { limits: dir, retryDelays: [] })({ context: '<chat>\n0+1|user: a line\n</chat>', source: 'x'.repeat(700), part: { l: 0, i: 0 }, images: [] }, new AbortController().signal)));
+
+test('so do the answers that summarize a connected window\'s handoff', () =>
+  saves((registry, dir) => createHandoffSummarizer(registry, choice, () => {}, [], dir)({ id: 'a1', task: 'Task', cwd: dir, model: 'optchat-test/model', thinking: 'off', parentSession: 'main', started: 0, depth: 1, state: 'completed', guidance: [] }, [])));
+
+test('and a subagent\'s, which runs in a session of its own without pi-optchat', () =>
+  saves(async (registry, dir, runtime) => {
+    const refused = !!readLimits(dir);
+    const children = new Children(new Memory(dir, async input => input.source.slice(0, 100), () => {}), registry, choice, () => '', async () => {}, () => {}, dir,
+      { limits: dir, createSession: options => createAgentSession({ ...options, modelRuntime: runtime }) });
     try {
       await children.spawn([{ task: 'anything' }], dir);
-      // Pi asks again after a rate limit, so the child is still at work when its first error is in.
+      // Pi asks again after a rate limit, so the child is still at work when its first refusal is in.
       const deadline = Date.now() + 10_000;
-      while (!(error ? errors.length : seen.length && !children.active)) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(resolve => setTimeout(resolve, 10)); }
-      assert.deepEqual([seen, errors[0]], error ? [[], error] : [[HEADERS], undefined]);
+      while (refused ? !readLimits(dir)?.refused : !readLimits(dir) || children.active) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(resolve => setTimeout(resolve, 10)); }
     } finally { await children.close(); }
-  }
-});
+  }));
