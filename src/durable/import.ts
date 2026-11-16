@@ -53,8 +53,11 @@ export function optchatImport({ memory, db, read, open, onActivated }: ImportOpt
     const state = (await harness.getTask(last.task, context))?.state;
     return state?.status === 'terminal' && state.outcome.status === 'faulted' ? state.outcome.error : undefined;
   };
-  /** Starts the pending import's task, unless one is live. */
-  const run = async () => { const { job } = await tables.state(); if (job && !(await tasks(job.generation)).length) await createTask(job.generation); };
+  /** Starts the pending import's task, unless one is live. Calls that overlap (`attach`'s and `retry()`, or two `retry()`) share
+   * one run: each would otherwise find no live task and create one, and two tasks would build the same generation. */
+  let running: Promise<void> | undefined;
+  const run = () => running ??= (async () => { const { job } = await tables.state(); if (job && !(await tasks(job.generation)).length) await createTask(job.generation); })()
+    .finally(() => { running = undefined; });
 
   const Import = defineTask<{ generation: number }, { phase: 'import'; done: number }, null>({
     name: 'optchat.import', version: 1,

@@ -676,8 +676,10 @@ test('an import cut off again and again with no progress stays failed, also afte
     await new Promise(resolve => setTimeout(resolve, 50));
     const failed = await agent.importer.pending();
     assert.deepEqual([failed?.task, failed?.failed?.detail], [undefined, { reason: 'restart_limit' }]);
+    // Retries that overlap start one task, not one each; held, so a finished task is not left out of the live ones.
+    await Promise.all([agent.importer.retry(), agent.importer.retry()]);
+    assert.equal((await agent.harness.inspect(context)).tasks.filter(({ record }) => record.kind === 'optchat.import').length, 1);
     summaries.release();
-    await agent.importer.retry();
     await agent.activated;
     assert.equal(await agent.importer.pending(), undefined);
   } finally { await agent.close(); }
