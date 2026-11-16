@@ -195,10 +195,13 @@ export default function optchat(pi: ExtensionAPI) {
   };
   // Shown as a dark background box, not as the user's own message.
   const sendReport = (report: Report) => {
-    const { text, count, quiet } = report, message = { customType: REPORT_TYPE, content: text, display: true, details: { count } };
-    if (quiet) { pi.sendMessage<ReportDetails>(message, { deliverAs: 'nextTurn' }); return; }
-    report.steered = !idle();
-    pi.sendMessage<ReportDetails>(message, { triggerTurn: true, deliverAs: 'steer' });
+    const message = ({ text, count }: Report) => ({ customType: REPORT_TYPE, content: text, display: true, details: { count } });
+    if (report.quiet) { pi.sendMessage<ReportDetails>(message(report), { deliverAs: 'nextTurn' }); return; }
+    // A running turn takes this report now, ahead of the quiet ones Pi holds for the next turn: they go in first (their held copy is dropped).
+    for (const r of [...idle() ? [] : reports.filter(r => r.quiet && !r.steered && r !== report), report]) {
+      r.steered = !idle();
+      pi.sendMessage<ReportDetails>(message(r), { triggerTurn: true, deliverAs: 'steer' });
+    }
   };
   const deliverReport = async (text: string, { once = false, count, quiet }: ReportOptions = {}) => {
     if (once && (active?.memory.root.some(e => e.receipt === reportReceipt(text)) || reports.some(r => r.text === text))) return;
