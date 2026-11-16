@@ -493,6 +493,7 @@ export default function optchat(pi: ExtensionAPI) {
       catch (error) { ctx.ui.notify(`OptChat could not keep an image: ${errorText(error)}`, 'warning'); }
     }
     if (!active) return;
+    let ahead = -1;
     if (message.role === 'user') {
       try {
         const text = textContent(message.content);
@@ -503,6 +504,9 @@ export default function optchat(pi: ExtensionAPI) {
           if (reports.filter(r => !r.batch && r.text === text).length <= copies && (copies > 0 || active.memory.root.some(e => e.receipt === receipt)))
             return { message: { ...bounded, content: DUPLICATE_REPORT, display: false } };
           receipts.set(message, receipt);
+          // Pi puts a quiet report it held (a window's start) after the report that starts the turn (its handoff): it goes first.
+          const at = run.findLastIndex(m => m.role === 'user');
+          if (logged === 0 && reports.some(r => r.quiet && r.text === text) && receipts.get(run[at])?.startsWith(REPORT_RECEIPT)) ahead = at;
         } else {
           // The inbox journaled the typed input: match without image references or Pi's image notes.
           const typed = typedText(message.content), skill = parseSkillBlock(typed.bare);
@@ -513,7 +517,7 @@ export default function optchat(pi: ExtensionAPI) {
         }
       } catch (error) { ctx.abort(); fault = errorText(error); ctx.ui.notify(fault, 'error'); }
     }
-    run.push(message);
+    if (ahead >= 0) run.splice(ahead, 0, message); else run.push(message);
     if (view !== undefined) {
       try { flush(); } catch (error) { ctx.abort(); fault = errorText(error); ctx.ui.notify(fault, 'error'); }
     }

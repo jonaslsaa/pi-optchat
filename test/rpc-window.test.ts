@@ -9,6 +9,7 @@ import { createProfile, loadConfig, lockProfile, profilePath, saveConfig } from 
 import { textContent } from '../src/transcript.ts';
 import { ROLE_STATUS, type Role } from '../src/rpc-window.ts';
 import { fixtureProvider, type Sent } from './fixtures/rpc-provider.ts';
+import { connectWindow, type WindowEvent } from '../src/window-client.ts';
 import { removeDir } from './support.ts';
 
 // Short paths: the profile's sockets have a ~103-byte limit on macOS.
@@ -146,7 +147,25 @@ test('an RPC session on a busy profile joins as a connected window: its own agen
     await until(() => owner.sent.some(s => s.last.includes(`[${next.id}] Connected conversation interrupted`)));
     const summarized = owner.sent.find(s => s.system.includes('handoff') && s.last.includes('Next topic?'))?.last ?? '';
     assert.ok(summarized && !summarized.includes('What colour?'), 'only its own conversation is summarized');
+    // Ended before the main agent took a turn: its handoff starts that turn, and the start Pi held for it still comes first.
+    await until(() => !owner.session.isStreaming && logged(name).some(text => text.startsWith(`[${next.id}] Connected conversation interrupted`)));
+    assert.deepEqual(logged(name).filter(text => text.startsWith(`[${next.id}]`)).map(text => text.split(' ')[1]), ['User', 'Connected'], 'memory has the start, then the handoff');
+    const turn = owner.sent.find(s => !s.last.startsWith('Compaction:') && s.messages.some(m => m.includes(`[${next.id}] User started`)))!;
+    assert.match(turn.last, /Connected conversation interrupted/, 'and the model reads the handoff last');
   } finally { await window.close(); await owner.close(); }
+});
+
+test('a terminal window\'s first message, like an RPC window\'s, reaches the main agent on its next turn without one of its own', async () => {
+  const name = profile(), owner = await rpc(name), events: WindowEvent[] = [];
+  const client = await connectWindow(profilePath(name), event => events.push(event), () => {});
+  try {
+    await client.request('start', 'Count the files.', root);
+    await until(() => events.some(e => e.name === 'message' && e.from === 'agent'));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.ok(!owner.sent.some(s => s.messages.some(m => m.includes('User started'))), 'no main agent turn');
+    await owner.ask('Anything new?');
+    assert.match(owner.sent.at(-1)!.messages.join('\n'), /User started a connected conversation in/);
+  } finally { client.close(); await owner.close(); }
 });
 
 test('a window that completes and then closes is handed off once', async () => {

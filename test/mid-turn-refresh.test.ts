@@ -30,6 +30,13 @@ test('with the refresh off the request is the one sent before mid-turn refresh e
   assert.deepEqual(buildContext([], refreshedRun(run, 0, TURN_REFRESHED), '<chat>\n</chat>', 'p'), buildContext([], run, '<chat>\n</chat>', 'p'));
 });
 
+test('a refresh keeps every message the turn started with: a handoff and the window start Pi gave with it', () => {
+  const step = (id: string): AgentMessage[] => [reply([{ type: 'toolCall', id, name: 'date', arguments: { id: 0 } }], 'toolUse'),
+    { role: 'toolResult', toolCallId: id, toolName: 'date', content: [{ type: 'text', text: 'Fri' }], isError: false, timestamp: 3 }];
+  const run: AgentMessage[] = [{ role: 'user', content: '[a] User started', timestamp: 1 }, { role: 'user', content: '[a] Handoff', timestamp: 1 }, ...step('x'), ...step('y')];
+  assert.deepEqual(refreshedRun(run, 4, 'note').map(m => textContent('content' in m ? m.content : '')), ['[a] User started', '[a] Handoff\n\n\nnote', '', 'Fri']);
+});
+
 test('the threshold is typed as 30, 30% or 0.3, OPTCHAT_REFRESH_AT overrides it, and 0 turns it off', () => {
   assert.deepEqual(['30', '30%', '0.3', '8', '0', 'abc'].map(parsePercent), [0.3, 0.3, 0.3, 0.08, 0, NaN]);
   assert.match(invalid('refreshAt', 0.95) ?? '', /from 0% to 90%/);

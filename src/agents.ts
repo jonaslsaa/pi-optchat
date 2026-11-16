@@ -724,13 +724,13 @@ export class Children {
    * Registers a connected window whose agent runs in its own Pi process, or takes back one an earlier owner registered
    * (see `RunInfo.window`). Its agent loop, tools and transcript stay there; this process keeps its record and delivers its handoff.
    */
-  async adopt(window: RemoteWindow, { quiet = false } = {}) {
+  async adopt(window: RemoteWindow, { announce = true } = {}) {
     const { id, task, cwd, model, thinking, title, pid, session, after } = window, known = this.history.records.get(id);
     if (known && !runsElsewhere(known)) throw new Error(`${id} is already a run in this profile`);
     const where = { pid, session, after };
     this.save(known ? { ...known, window: where } : { id, task, cwd, model, thinking, ...(title ? { title } : {}), parentSession: this.options.parentSession ?? '',
       depth: 1, started: Date.now(), state: 'running', guidance: [], connected: true, window: where });
-    if (!known && !quiet) await this.report(`[${id}] User started a connected conversation in ${cwd}, in a Pi window of its own. That agent is handling this request with the user directly; don't do it yourself. Initial message: ${task}\n\nIt runs in another Pi process, so tell can't reach it. It sends a final handoff on completion or disconnect.`, { quiet: true });
+    if (!known && announce) await this.report(`[${id}] User started a connected conversation in ${cwd}, in a Pi window of its own. That agent is handling this request with the user directly; don't do it yourself. Initial message: ${task}\n\nIt runs in another Pi process, so tell can't reach it. It sends a final handoff on completion or disconnect.`, { quiet: true });
   }
   /** A window in its own process has ended. `written`: the handoff it wrote itself (/complete); without one the compactor writes it from the window's transcript. */
   async endRemote(id: string, reason: FinishReason, written?: string) {
@@ -752,7 +752,7 @@ export class Children {
         if (!known || known.window && !known.handoff?.delivered) {
           // Its own ending wins over the `owner-stopped` one a restart gave a record whose window was gone by then.
           if (known && !isActiveRun(known)) delete known.handoff;
-          else await this.adopt(rest, { quiet: true });
+          else await this.adopt(rest, { announce: false });
           await this.endRemote(window.id, reason, text);
         }
         unqueueWindow(this.profileDirectory, window.id);

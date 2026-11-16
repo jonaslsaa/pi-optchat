@@ -121,16 +121,21 @@ export function lastStep(run: readonly AnyMessage[]) {
  * What stays verbatim (the task and the last step) must fit in half the budget: a bigger last step, such as many parallel
  * reads, would otherwise pass the budget again on the next call and refresh every call. It waits for a smaller step instead. */
 export function refreshPoint(run: readonly AnyMessage[], keep: number, budget: number | undefined) {
-  const cut = lastStep(run), task = run.find(m => m.role === 'user');
+  const cut = lastStep(run);
   if (!budget || cut <= keep) return undefined;
   const size = chars(run.slice(keep));
-  if (size <= budget || (task ? messageChars(task) : 0) + chars(run.slice(cut)) > budget / 2) return undefined;
+  if (size <= budget || chars(taskOf(run)) + chars(run.slice(cut)) > budget / 2) return undefined;
   return { cut, size };
 }
+/** The task: the messages the run started with, its request and any reports Pi gave that turn. */
+const taskOf = <M extends AnyMessage>(run: readonly M[]) => {
+  const first = run.findIndex(m => m.role === 'user'), end = run.findIndex((m, i) => i > first && m.role !== 'user');
+  return first < 0 ? [] : run.slice(first, end < 0 ? undefined : end);
+};
 /** The run as sent after a mid-turn refresh at `keep`: the task verbatim, then the run from `keep` on. Everything between is in the view. */
 export function refreshedRun<M extends AnyMessage>(run: readonly M[], keep: number, note: string): (M | UserMessage)[] {
-  const task = run.find(m => m.role === 'user');
-  if (!keep || !task || !is(task, 'user')) return [...run];
-  const content = typeof task.content === 'string' ? [{ type: 'text' as const, text: task.content }] : task.content;
-  return [{ ...task, content: [...content, { type: 'text' as const, text: `\n\n${note}` }] }, ...run.slice(keep)];
+  const task = taskOf(run), last = task.at(-1);
+  if (!keep || !last || !is(last, 'user')) return [...run];
+  const content = typeof last.content === 'string' ? [{ type: 'text' as const, text: last.content }] : last.content;
+  return [...task.slice(0, -1), { ...last, content: [...content, { type: 'text' as const, text: `\n\n${note}` }] }, ...run.slice(keep)];
 }
