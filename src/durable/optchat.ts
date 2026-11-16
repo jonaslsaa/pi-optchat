@@ -1,9 +1,9 @@
 import {
   AssistantEntry, CompactionTask, defineExtension, defineTask, defineTool, GenerationTask, hook, InboxDoc, LiveDoc, ResetEntry, ROOT_CONVERSATION_ID,
   section, ToolResultEntry, ToolTask, UserEntry, type Conversation, type ConversationId, type EntryId, type EntryRecord, type GenerationHooks, type Harness,
-  type HarnessOptions, type ToolExecutionResult, type ToolHooks, type UserInput,
+  type HarnessOptions, type ToolExecutionResult, type ToolHooks, type ToolRegistration, type UserInput,
 } from '@earendil-works/pi-durable';
-import type { Static, TSchema } from 'typebox';
+import type { TSchema } from 'typebox';
 import {
   allowSearch, boundedMessage, cachePayload, CHILD, childInput, completedExchange, CONTINUITY, isImage, logMessage, memoryTools, refreshBudget, refreshedRun,
   refreshPoint, SEARCH_DOC, searchTool, textContent, TURN_REFRESHED, VIEW_DOC, withView, type Memory,
@@ -29,7 +29,7 @@ const encoder = new TextEncoder();
 /** One of core's memory tools as a Pi Durable tool, its arguments typed by its own schema. */
 const durableTool = <P extends TSchema>(tool: {
   name: string; description: string; parameters: P;
-  execute: (callId: string, args: Static<P>) => Promise<{ content: ToolExecutionResult['output'] }>;
+  execute: (callId: string, args: Parameters<ToolRegistration<P>['execute']>[0]) => Promise<{ content: ToolExecutionResult['output'] }>;
 }) => defineTool({
   name: tool.name, description: tool.description, parameters: tool.parameters, replay: 'safe',
   execute: async (args, api) => ({ output: (await tool.execute(api.callId, args)).content }),
@@ -280,9 +280,9 @@ export function optchat({ memory, conversation: id = ROOT_CONVERSATION_ID, promp
     /** Starts following the conversation, and resets it now if a run ended before a restart. Returns a function that stops. */
     attach(harness: Harness, ctx: Context) {
       attached.set(harness, ctx);
-      const stop = harness.subscribeCommits(() => void schedule());
+      const commits = harness.observeCommits({ advance: () => void schedule(), end: () => {} });
       void schedule();
-      return stop;
+      return () => commits.detach();
     },
   };
 }

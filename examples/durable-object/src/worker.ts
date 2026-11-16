@@ -74,7 +74,7 @@ export class Agent extends DurableObject<Env> {
       const pi = await Harness.open(storage, {
         models: withCacheMarks(this.models), registry: this.registry, onWake,
         settings: { compaction: { enabled: false } },
-        onReport: (error, info) => { this.stats.warnings.push(`${info.type}: ${error instanceof Error ? error.message : String(error)}`); },
+        onReport: ({ kind, error }) => { this.stats.warnings.push(`${kind}: ${error instanceof Error ? error.message : String(error)}`); },
       }, context);
       this.optchat.stop?.();
       const stops = [this.optchat.extension.attach(pi, context), this.optchat.importer.attach(pi, context)];

@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager, getAgentDir, type AgentSession, type AgentSessionEvent, type ExtensionAPI, type InlineExtension, type ModelRegistry } from '@earendil-works/pi-coding-agent';
 import * as sdk from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { StringEnum, type Api, type Model } from '@earendil-works/pi-ai';
+import type { Api, Model } from '@earendil-works/pi-ai';
 import { allowSearch, SEARCH_DOC, VIEW_DOC } from './core/prompts.ts';
 import { windowHandoff, CONNECTED, cutOffChildren, delegation, NO_DELEGATION, NOT_CONNECTED, RESTARTED, STEERABLE, SUBAGENT } from './prompts.ts';
 import { memoryTools } from './tools.ts';
@@ -85,7 +85,7 @@ const CWD_DOC = 'Project directory the subagent works in (~ allowed); its AGENTS
 /** The spawn tools' tasks. What a task leaves out of model and thinking is the profile's subagent choice. */
 export const TASKS = Type.Array(Type.Object({ task: Type.String(), title: Type.Optional(Type.String({ description: TITLE_DOC })), cwd: Type.Optional(Type.String({ description: CWD_DOC })),
   model: Type.Optional(Type.String({ description: 'Leave unset for the profile\'s subagent model (named in your instructions). Set only when the user asks for a model, as provider/id from models().' })),
-  thinking: Type.Optional(StringEnum(THINKING, { description: 'Leave unset for the profile\'s subagent level. Set only when the user asks for one.' })) }), { minItems: 1 });
+  thinking: Type.Optional(Type.Unsafe<typeof THINKING[number]>({ type: 'string', enum: [...THINKING], description: 'Leave unset for the profile\'s subagent level. Set only when the user asks for one.' })) }), { minItems: 1 });
 export type Task = Static<typeof TASKS>[number];
 /** `quiet`: the main agent reads the report on its next turn instead of taking one for it. */
 export type ReportOptions = { once?: boolean; count?: number; quiet?: boolean };

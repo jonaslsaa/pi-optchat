@@ -55,7 +55,7 @@ async function open(file: string, replies: FauxResponseStep[], compress: Compres
   for (const extension of extensions(memoryExtension)) registry.install(extension);
   const harness = await Harness.open(await SqliteStorage.open(db, { prefix: 'pi_' }),
     { models: withCacheMarks(models), registry, settings: { compaction: { enabled: false }, afterFailedRun: 'continue' },
-      onReport: (error, info) => { if (info.type === 'task_faulted' || info.type === 'task_parked') fault(error); } }, context);
+      onReport: report => { if (report.kind === 'task_faulted') fault(report.error); } }, context);
   const root = await harness.root(context, { agent: { model: { provider: faux.provider.id, modelId: faux.getModel().id } } });
   memoryExtension.attach(harness, context);
   importer.attach(harness, context);
@@ -620,7 +620,7 @@ test('a rebuild cut off by a restart resumes without summarizing anything twice,
   } finally { await restarted.close(); }
 });
 
-test('an import saves its progress, so restarts over a long one don\'t park it', async () => {
+test('an import saves its progress, so restarts over a long one don\'t end it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-durable-')), summaries = recording();
   dirs.push(dir);
   const snapshot = (n: number) => join(dir, `crash-${n}.sqlite`);
@@ -628,13 +628,13 @@ test('an import saves its progress, so restarts over a long one don\'t park it',
   summaries.hold(15);
   await agent.importer.start(Array.from({ length: 400 }, (_, n) => old(n)), 'rebuild');
   try {
-    // Pi Durable parks a task cut off 5 times without progress: crash 8 times, each after fewer summaries than one checkpoint's
+    // Pi Durable ends a task cut off 5 times without progress: crash 8 times, each after fewer summaries than one checkpoint's
     // worth, so only progress carried across runs saves it.
     for (let crash = 1; crash <= 8; crash++) {
       const current = agent, made = summaries.made.length;
       const saved = async () => Number(JSON.stringify((await current.harness.inspect(context)).tasks).match(/"done":(\d+)/)?.[1] ?? 0);
       const before = await saved();
-      // A parked task fails the test here, through `activated`.
+      // A task that Pi Durable ended fails the test here, through `activated`.
       await Promise.race([until(() => summaries.made.length === made + 15), current.activated]);
       // Until the progress is saved, if this run saves any.
       const deadline = Date.now() + 300;
@@ -647,6 +647,39 @@ test('an import saves its progress, so restarts over a long one don\'t park it',
     }
     await agent.activated;
     assert.equal(agent.memory.root.length, 0);
+  } finally { await agent.close(); }
+});
+
+test('an import cut off again and again with no progress stays failed, also after a restart, until it is retried', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-durable-')), summaries = recording();
+  dirs.push(dir);
+  const snapshot = (n: number) => join(dir, `crash-${n}.sqlite`);
+  let crash = 0, agent = await open(snapshot(crash), [], undefined, { importing: summaries.compress });
+  summaries.hold();
+  await agent.importer.start(history, 'rebuild');
+  try {
+    // Each crash is a copy taken while the task runs and waits for its first summary, so it never saves progress. Pi Durable ends
+    // the task at the 5th; more crashes than that mean it was started again.
+    while ((await agent.importer.pending())?.failed === undefined && crash < 8) {
+      crash++;
+      const current = agent;
+      await until(async () => (await current.importer.pending())?.task?.kind === 'running');
+      await until(() => { try { current.sql.exec(`VACUUM INTO '${snapshot(crash)}'`); return true; } catch { return false; } });
+      await current.close();
+      agent = await open(snapshot(crash), [], undefined, { importing: summaries.compress });
+      await until(async () => { const pending = await agent.importer.pending(); return pending?.task?.kind === 'running' || pending?.failed !== undefined; });
+    }
+    assert.deepEqual((await agent.importer.pending())?.failed?.detail, { reason: 'restart_limit' });
+    await agent.close();
+    agent = await open(snapshot(crash), [], undefined, { importing: summaries.compress });
+    // Long enough for `attach` to have started it again, if it did.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const failed = await agent.importer.pending();
+    assert.deepEqual([failed?.task, failed?.failed?.detail], [undefined, { reason: 'restart_limit' }]);
+    summaries.release();
+    await agent.importer.retry();
+    await agent.activated;
+    assert.equal(await agent.importer.pending(), undefined);
   } finally { await agent.close(); }
 });
 

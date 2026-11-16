@@ -1,13 +1,20 @@
-import { defineExtension, defineTask, ROOT_CONVERSATION_ID, type Harness } from '@earendil-works/pi-durable';
+import { defineDoc, defineExtension, defineTask, ROOT_CONVERSATION_ID, type Harness, type TaskId } from '@earendil-works/pi-durable';
 import type { SqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite';
 import { chronological, deduplicate, isEntry, runImport, type ImportedEntry, type ImportMode, type Memory } from '../core/index.ts';
 import { attachment, type Context } from './optchat.ts';
 import { importTables, type Read } from './store.ts';
 
 export type { ImportJob } from './store.ts';
-/** How many new summaries the import builds between the progress it saves. Pi Durable parks a task that restarts 5 times without
- * saving progress, which a long rebuild could otherwise do over a few deploys. */
+/** How many new summaries the import builds between the progress it saves. Pi Durable ends a task that is cut off 5 times in a row
+ * without saving progress (`settings.restartLimit`), which a long rebuild could otherwise be over a few deploys. */
 const CHECKPOINT = 50;
+/** The task that builds a generation. Pi Durable lists only live tasks, so this is how the one it ended is found. */
+const ImportTask = defineDoc<{ generation: number | null; task: TaskId | null }>({
+  kind: 'optchat.import.task', version: 1, scope: 'session', initial: () => ({ generation: null, task: null }), checkpointWhen: () => true,
+});
+/** Pi Durable ended the task because it was cut off `settings.restartLimit` times in a row. */
+const cutOff = (failed: { detail?: unknown } | undefined) =>
+  typeof failed?.detail === 'object' && failed.detail !== null && 'reason' in failed.detail && failed.detail.reason === 'restart_limit';
 
 export interface ImportOptions {
   /** The live memory, as `optchat()` gets it. */
@@ -35,8 +42,19 @@ export function optchatImport({ memory, db, read, open, onActivated }: ImportOpt
   /** The live tasks building `generation`'s import. */
   const tasks = async (generation: number) => (await attached.get().harness.inspect(attached.get().context)).tasks
     .filter(({ record: { kind, input } }) => kind === Import.definition.name && typeof input === 'object' && input !== null && !Array.isArray(input) && input.generation === generation);
-  const createTask = (generation: number) => attached.get().harness.commit(tx => tx.createTask(Import, { generation },
-    { ownership: { kind: 'conversation' }, conversationId: ROOT_CONVERSATION_ID, background: true }), attached.get().context);
+  const createTask = (generation: number) => attached.get().harness.commit(async tx => {
+    const task = await tx.createTask(Import, { generation }, { ownership: { kind: 'conversation' }, conversationId: ROOT_CONVERSATION_ID, background: true });
+    Object.assign(await tx.doc(ImportTask), { generation, task });
+  }, attached.get().context);
+  /** Why `generation`'s task ended, when it threw or Pi Durable ended it; undefined while it lives, and when it never started. */
+  const failure = async (generation: number) => {
+    const { harness, context } = attached.get(), last = await harness.snapshot(ImportTask, context);
+    if (last?.generation !== generation || last.task === null) return undefined;
+    const state = (await harness.getTask(last.task, context))?.state;
+    return state?.status === 'terminal' && state.outcome.status === 'faulted' ? state.outcome.error : undefined;
+  };
+  /** Starts the pending import's task, unless one is live. */
+  const run = async () => { const { job } = await tables.state(); if (job && !(await tasks(job.generation)).length) await createTask(job.generation); };
 
   const Import = defineTask<{ generation: number }, { phase: 'import'; done: number }, null>({
     name: 'optchat.import', version: 1,
@@ -71,11 +89,12 @@ export function optchatImport({ memory, db, read, open, onActivated }: ImportOpt
 
   return {
     extension: defineExtension({ name: 'optchat.import', tasks: [Import] }),
-    /** Runs a pending import whose task is gone: it failed, or the object died before creating it. Returns a function that stops. */
+    /** Runs a pending import whose task is gone: it threw, or the object died before creating it. One that Pi Durable ended after
+     * it was cut off again and again stays failed until `retry()`, since running it may be what stops the object. Returns a function that stops. */
     attach(harness: Harness, ctx: Context) {
       attached.set(harness, ctx);
       opened ??= tables.state().then(state => state.live);
-      void (async () => { const { job } = await tables.state(); if (job && !(await tasks(job.generation)).length) await createTask(job.generation); })()
+      void (async () => { const { job } = await tables.state(); if (job && !cutOff(await failure(job.generation))) await run(); })()
         .catch(error => console.error(`OptChat could not resume the import: ${error instanceof Error ? error.message : String(error)}`));
       return attached.clear;
     },
@@ -97,12 +116,17 @@ export function optchatImport({ memory, db, read, open, onActivated }: ImportOpt
       await createTask(job.generation);
       return { ...job, added: added.length, skipped };
     },
-    /** The pending import, if any, with its task's state: running, ready, or blocked (parked after restarts: `harness.retryTask`).
-     * No task means it failed; `attach` starts it again at the next restart. */
+    /** The pending import, if any, with its live task's state (running, pending, or blocked by a version that cannot run it), or
+     * with `failed`, the error that ended its task. `attach` starts a failed one again at the next restart, unless Pi Durable ended
+     * it at its restart limit (`failed.detail` is `{ reason: 'restart_limit' }`): that one waits for `retry()` or `discard()`. */
     async pending() {
       const { job } = await tables.state();
-      return job && { ...job, task: (await tasks(job.generation))[0]?.state };
+      if (!job) return undefined;
+      const task = (await tasks(job.generation))[0]?.state;
+      return { ...job, task, failed: task ? undefined : await failure(job.generation) };
     },
+    /** Runs the pending import again after it failed, from the progress it saved. */
+    retry: run,
     /** Stops the pending import; the live memory is left as it is. One started meanwhile is left alone. */
     async discard() {
       const { job } = await tables.state();
