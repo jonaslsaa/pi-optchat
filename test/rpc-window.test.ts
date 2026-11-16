@@ -96,9 +96,14 @@ test('an RPC session on a busy profile joins as a connected window: its own agen
     assert.match(request.messages.join('\n'), /The colour is teal\./, 'the view, read from disk, comes with the request');
     assert.ok(!window.sent.some(s => s.system.includes('"spawn"')) && !window.session.getActiveToolNames().includes('spawn'), 'a window delegates nothing');
     assert.ok(window.session.getActiveToolNames().includes('zoom'));
-    // The owner's agent is told about the window (a turn that changes the view), and summarizes that long report.
-    await until(() => owner.sent.some(s => s.last.includes('User started a connected conversation')) && !owner.session.isStreaming);
+    // The owner's agent is told about the window on its next turn, without a turn of its own; that changes the view.
+    const pending = () => readFileSync(join(profilePath(name), 'pending-reports.json'), 'utf8');
+    await until(() => pending().includes('User started a connected conversation') || owner.sent.length > calls);
     await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(owner.sent.length, calls, 'a window\'s first message wakes no main agent turn');
+    await owner.ask('Anything new?');
+    assert.match(owner.sent.at(-1)!.messages.join('\n'), /User started a connected conversation/);
+    assert.equal(logged(name).filter(text => /^\[\w+\] User started a connected conversation/.test(text)).length, 1, 'logged once');
     await window.ask('And the size?');
     const moved = window.sent[1].messages, at = moved.findIndex(m => m.includes('<chat>'));
     assert.ok(at > 0 && moved[at].includes('And the size?'), 'a changed view moves to the newest request');
@@ -135,7 +140,7 @@ test('an RPC session on a busy profile joins as a connected window: its own agen
     assert.match(window.sent.at(-1)!.messages[0], /<chat>/, 'and the view on its request');
     assert.deepEqual(window.errors, []);
     assertBoundary(window);
-    await until(() => owner.sent.some(s => s.last.includes(`[${next.id}] User started a connected conversation`)));
+    await until(() => pending().includes(`[${next.id}] User started a connected conversation`));
     // Closed without /complete: the compactor gets this conversation's transcript only, not the completed one before it.
     await window.close();
     await until(() => owner.sent.some(s => s.last.includes(`[${next.id}] Connected conversation interrupted`)));
@@ -303,7 +308,7 @@ test('an idle window registers with an owner that opens later, which then hands 
   const owner = await rpc(name);
   try {
     await until(() => { const role = window.role(); return role?.role === 'window' && role.connected; });
-    await until(() => owner.sent.some(s => s.last.includes('User started a connected conversation')));
+    await until(() => readFileSync(join(profilePath(name), 'pending-reports.json'), 'utf8').includes('User started a connected conversation'));
     // Registered, it leaves the queue.
     await until(() => readdirSync(join(profilePath(name), 'remote-windows')).length === 0);
     await window.close();

@@ -19,7 +19,7 @@ import { boundedMessage, refreshedRun, refreshBudget, refreshPoint } from './cor
 import { registerReportRenderer, type ReportDetails } from './report-message.ts';
 import { memoryTools } from './tools.ts';
 import { result, searchTool } from './core/tools.ts';
-import { Children, loadedBuiltins, modelsTool, refreshContextFiles, TASKS } from './agents.ts';
+import { Children, loadedBuiltins, modelsTool, refreshContextFiles, TASKS, type ReportOptions } from './agents.ts';
 import { isActiveRun, type RunInfo } from './runs.ts';
 import { exportBrowser } from './browser.ts';
 import { Inbox } from './inbox.ts';
@@ -86,8 +86,8 @@ export default function optchat(pi: ExtensionAPI) {
   let wake = false;
   let fault: string | undefined;
   /** Reports not yet in memory. `count`: how many subagent reports the text joins. `batch`: held while the rest of that spawn runs, not sent yet.
-   * `steered`: last sent into a running turn, where Esc or a dequeue can clear it from Pi's queue unseen. */
-  let reports: { text: string; count?: number; batch?: string; steered?: boolean }[] = [];
+   * `steered`: last sent into a running turn, where Esc or a dequeue can clear it from Pi's queue unseen. `quiet`: see ReportOptions. */
+  let reports: { text: string; count?: number; quiet?: boolean; batch?: string; steered?: boolean }[] = [];
   type Report = (typeof reports)[number];
   let idle = () => true;
   const receipts = new Map<AgentMessage, string>();
@@ -107,8 +107,8 @@ export default function optchat(pi: ExtensionAPI) {
     if (a) title.show(text => ctx.ui.setTitle(text), mainTitle(a.name, working, a.children.ids.length));
   };
   /** Journals written before batches held plain strings. */
-  const isPendingReport = (s: unknown): s is string | { text: string; count?: number } =>
-    typeof s === 'string' || record(s) && typeof s.text === 'string' && (s.count === undefined || typeof s.count === 'number');
+  const isPendingReport = (s: unknown): s is string | { text: string; count?: number; quiet?: boolean } =>
+    typeof s === 'string' || record(s) && typeof s.text === 'string' && (s.count === undefined || typeof s.count === 'number') && (s.quiet === undefined || typeof s.quiet === 'boolean');
   const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
   pi.registerFlag('optchat-profile', { description: 'OptChat profile (required for noninteractive sessions without a saved binding)', type: 'string' });
   pi.registerFlag('optchat-connect', { description: 'pi -p or RPC on a profile open in another Pi: auto (join it if busy, default), join (only join), off (error if busy)', type: 'string', default: 'auto' });
@@ -195,13 +195,14 @@ export default function optchat(pi: ExtensionAPI) {
   };
   // Shown as a dark background box, not as the user's own message.
   const sendReport = (report: Report) => {
-    const { text, count } = report;
+    const { text, count, quiet } = report, message = { customType: REPORT_TYPE, content: text, display: true, details: { count } };
+    if (quiet) { pi.sendMessage<ReportDetails>(message, { deliverAs: 'nextTurn' }); return; }
     report.steered = !idle();
-    pi.sendMessage<ReportDetails>({ customType: REPORT_TYPE, content: text, display: true, details: { count } }, { triggerTurn: true, deliverAs: 'steer' });
+    pi.sendMessage<ReportDetails>(message, { triggerTurn: true, deliverAs: 'steer' });
   };
-  const deliverReport = async (text: string, { once = false, count }: { once?: boolean; count?: number } = {}) => {
+  const deliverReport = async (text: string, { once = false, count, quiet }: ReportOptions = {}) => {
     if (once && (active?.memory.root.some(e => e.receipt === reportReceipt(text)) || reports.some(r => r.text === text))) return;
-    const report = { text, count };
+    const report = { text, count, quiet };
     reports.push(report); saveReports();
     if (!stopping) sendReport(report);
   };
@@ -290,7 +291,7 @@ export default function optchat(pi: ExtensionAPI) {
           summarizeHandoff: createHandoffSummarizer(ctx.modelRegistry, () => config.compactor, message => usage.compression(message, 'compactor', sessionId)) });
       const loggedReports = new Set(memory.root.map(e => e.receipt));
       // Reports a crash held back with their unfinished siblings are delivered now, as they are.
-      reports = saved.map(s => typeof s === 'string' ? { text: s } : { text: s.text, count: s.count })
+      reports = saved.map(s => typeof s === 'string' ? { text: s } : { text: s.text, count: s.count, quiet: s.quiet })
         .filter(r => !loggedReports.has(reportReceipt(r.text)));
       atomicWrite(pending, JSON.stringify(reports));
       rememberProfile(name);
