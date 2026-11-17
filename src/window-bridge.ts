@@ -37,6 +37,7 @@ export async function serveWindows(directory: string, children: Children, availa
   report: (text: string) => Promise<void>, configure?: (patch: ConfigPatch) => void) {
   const path = profileSocket(directory, 'windows'); checkSocketPath(path);
   removeStaleSocket(path); // A previous owner can no longer hold the profile lock.
+  const ready = () => { if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready'); };
   const connections = new Set<Socket>();
   const work = new Set<Promise<void>>();
   let closing = false;
@@ -68,18 +69,18 @@ export async function serveWindows(directory: string, children: Children, availa
           } else if (frame.action === 'configure') {
             // Another app's settings change (pi-optchat/files' updateConfig), checked again here and applied as the settings page does.
             if (!configure) throw new Error('This Pi takes no settings changes');
-            if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
+            ready();
             let patch: unknown;
             try { patch = JSON.parse(frame.text ?? ''); } catch { patch = undefined; }
             checkPatch(patch);
             configure(patch);
           } else if (frame.action === 'resume-cut-off') {
             // An RPC host's go-ahead for what interactive Pi does at every start (see index.ts).
-            if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
+            ready();
             await children.resumeCutOff();
           } else if (frame.action === 'attach') {
             if (child) throw new Error('This window already has a conversation');
-            if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
+            ready();
             const id = frame.text?.trim();
             if (!id || !/^[a-zA-Z0-9-]+$/.test(id)) throw new Error('An exact agent ID is required');
             const info = children.history.records.get(id);
@@ -96,7 +97,7 @@ export async function serveWindows(directory: string, children: Children, availa
             drainMessages(messages, info);
           } else if (frame.action === 'register') {
             if (child) throw new Error('This window already has a conversation');
-            if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
+            ready();
             let window: unknown;
             try { window = JSON.parse(frame.text ?? ''); } catch { window = undefined; }
             if (!isRemoteWindow(window)) throw new Error('Invalid window registration');
@@ -104,7 +105,7 @@ export async function serveWindows(directory: string, children: Children, availa
             child = window.id; remote = true;
           } else if (frame.action === 'start') {
             if (child) throw new Error('This window already has a conversation');
-            if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
+            ready();
             if (!frame.text?.trim() || !frame.cwd) throw new Error('A request and working directory are required');
             [child] = await children.spawn([{ task: frame.text, cwd: frame.cwd }], frame.cwd, controller.signal, undefined, true);
             if (socket.destroyed) { await children.finish(child, closing ? 'owner-stopped' : 'disconnected'); return; }
@@ -135,7 +136,7 @@ export async function serveWindows(directory: string, children: Children, availa
             if (frame.action === 'resume') {
               // Checked against the agent, not the view, which notices a finish only at its next tick.
               if (!attached || children.live(child)) throw new Error(`Only a finished agent you attached to resumes; ${child} is running, so say reaches it`);
-              if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
+              ready();
               await children.resumeByUser(child, frame.text ?? '');
               phase = 'open'; finalMessages = undefined; // As the next tick would, so a say right after this one is taken.
               send({ kind: 'reply', id: frame.id }); return;
