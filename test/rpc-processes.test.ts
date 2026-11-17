@@ -1,12 +1,14 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { ROLE_STATUS } from '../src/rpc-window.ts';
+import { readRun } from '../src/run-record.ts';
+import { resumeCutOff } from '../src/window-client.ts';
 import { removeDir } from './support.ts';
 
 // Real `pi --mode rpc` processes, as T3 Code or the OptChat app start one per thread or window, on a throwaway profile.
@@ -92,4 +94,21 @@ test('two real pi --mode rpc processes on one profile: the second is a window, /
   killed.child.kill('SIGKILL');
   await until('the interrupted handoff in the owner', () => owner.text().includes('interrupted (disconnected)') && /Summary: .*Remember the tide table/s.test(owner.text()));
   assert.ok(!owner.text().includes('Profile already running'), 'neither window failed on the busy profile');
+});
+
+test('a real pi --mode rpc resumes no cut-off subagent by itself, and does once its host asks over the profile socket', { timeout: 60_000 }, async () => {
+  createProfile('cut');
+  const dir = profilePath('cut');
+  mkdirSync(join(dir, 'runs'));
+  // As a close leaves it. Its transcript is gone, so a resume fails and says so: either way the mark is spent only by trying.
+  writeFileSync(join(dir, 'runs', 'cafe0001.optchat.json'), JSON.stringify({ id: 'cafe0001', task: 'Count the tides.', cwd: root, model: 'fixture/fixture', thinking: 'off',
+    parentSession: 'old', depth: 1, started: 1, ended: 2, state: 'interrupted', cutOff: true, report: 'Cut off.', guidance: [] }));
+  const owner = pi('cut');
+  await until('the owner role', () => owner.role()?.role === 'owner');
+  await new Promise(resolve => setTimeout(resolve, 1000)); // Startup recovery has run by now.
+  assert.equal(readRun(dir, 'cafe0001').cutOff, true, 'an RPC Pi waits for its host');
+  await resumeCutOff(dir);
+  assert.equal(readRun(dir, 'cafe0001').cutOff, undefined);
+  await until('the main agent told', () => owner.text().includes('Could not resume cafe0001'));
+  owner.child.kill('SIGKILL');
 });

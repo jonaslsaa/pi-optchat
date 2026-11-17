@@ -707,7 +707,7 @@ export class Children {
       try { await this.track(this.resume(id, RESTARTED)); resumed.push(id); }
       catch (error) {
         const still = current(id);
-        if (!still) continue; // Resumed by someone else meanwhile.
+        if (!still || this.resuming.has(id)) continue; // Resumed by someone else meanwhile, or being resumed now.
         lines.push(`Could not resume ${id}: ${error instanceof Error ? error.message : String(error)}`); drop(still);
       }
     }
