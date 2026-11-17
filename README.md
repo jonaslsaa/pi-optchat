@@ -55,6 +55,8 @@ Details, errors and join rules: [docs/connected-windows.md](docs/connected-windo
 
 ## Commands
 
+When an interactive session starts with an empty editor, the profile footer adds `to switch: /optchat profile`. Typing or pasting dismisses the hint for the rest of the session; the editor and its keybindings work as usual.
+
 | Command | Action |
 | --- | --- |
 | `/optchat` | Status and actions menu. |
