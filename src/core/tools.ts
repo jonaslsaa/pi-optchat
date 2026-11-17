@@ -25,14 +25,14 @@ export function searchPage(memory: Memory, text: string, before?: number) {
 const zoomParameters = Type.Object({ id: Type.Union([Type.Integer({ minimum: 0 }), Type.String({ minLength: 1 })]), n: Type.Optional(Type.Integer({ minimum: 1 })),
   offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: PAGE })) });
 
-/** A page of a run's transcript, saying where the next one starts. */
-export function runPage(text: string, offset = 0, limit = PAGE) {
+/** A page of a run's transcript, saying where the next one starts. A host may supply a complete continuation call. */
+export function runPage(text: string, offset = 0, limit = PAGE, continuation?: (offset: number) => string) {
   if (offset > text.length) throw new Error(`This transcript has ${text.length} characters; offset must be 0 to ${text.length}.`);
   // Never split a surrogate pair: a page starts on its first half and ends after its second.
   const from = /[\udc00-\udfff]/.test(text[offset] ?? '') ? offset - 1 : offset;
   let to = Math.min(text.length, from + limit);
   if (to < text.length && /[\ud800-\udbff]/.test(text[to - 1])) to += to - 1 === from ? 1 : -1;
-  return `${text.slice(from, to)}\n[characters ${from}-${to} of ${text.length}${to < text.length ? `; go on with offset ${to}` : ''}]`;
+  return `${text.slice(from, to)}\n[characters ${from}-${to} of ${text.length}${to < text.length ? `; ${continuation ? continuation(to) : `go on with offset ${to}`}` : ''}]`;
 }
 
 /** `runs`, for a host with subagents, gives one's transcript by run id, live or finished, as the host writes it; undefined for
