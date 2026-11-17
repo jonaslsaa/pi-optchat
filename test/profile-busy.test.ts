@@ -6,6 +6,7 @@ import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext, type SessionStartEvent } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
+import { readDefaultProfile, saveDefaultProfile } from '../src/profile-picker.ts';
 import { Memory } from '../src/memory.ts';
 import { checkSocketPath, createProfile, isWindows, loadConfig, lockProfile, profilePath, profileSocket, saveConfig, SOCKET_PATH_LIMIT } from '../src/profiles.ts';
 import { removeDir } from './support.ts';
@@ -14,7 +15,7 @@ const agentDir = process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'o
 after(() => removeDir(agentDir));
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: string, talked = false, sessionStartEvent?: SessionStartEvent) {
+async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: string, talked = false, sessionStartEvent?: SessionStartEvent, options: { mode?: 'tui' | 'print' | 'rpc'; flag?: string } = {}) {
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
     modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider('fixture', {
@@ -34,7 +35,8 @@ async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: strin
   const titles: string[] = [], errors: string[] = [];
   const uiContext: ExtensionUIContext = { ...session.extensionRunner.getUIContext(), setTitle: t => { titles.push(t); },
     notify: (text, type) => { if (type === 'error') errors.push(text); }, ...ui };
-  await session.bindExtensions({ uiContext, mode: 'tui' });
+  if (options.flag) session.extensionRunner.setFlagValue('optchat-profile', options.flag);
+  await session.bindExtensions({ uiContext, mode: options.mode ?? 'tui' });
   return { session, titles, errors, manager };
 }
 
@@ -287,4 +289,48 @@ test('Back from a lone busy profile shows the picker instead of retrying it', ()
     sessions.push(session);
     assert.deepEqual(asked, ['busy is open in another window', 'OptChat profile']);
   } finally { await unlock(); }
+}));
+
+
+test('the picker saves and clears a default without switching the current conversation', () => withHome('oc-default-', async (dir, sessions) => {
+  createProfile('work'); createProfile('personal');
+  let picks: (string | undefined)[] = ['Default profile: automatic', 'personal', undefined];
+  const opened = await start(dir, { select: async (_title, options) => {
+    const pick = picks.shift(); if (pick) assert.ok(options.includes(pick)); return pick;
+  } }, 'work'); sessions.push(opened.session);
+  await opened.session.prompt('/optchat profile');
+  assert.equal(readDefaultProfile(), 'personal');
+  assert.deepEqual(opened.manager.getEntries().flatMap(e => e.type === 'custom' && e.customType === 'optchat.profile' ? [e.data] : []), [{ name: 'work' }]);
+  picks = ['Default profile: personal', 'No saved default', undefined];
+  await opened.session.prompt('/optchat profile');
+  assert.equal(readDefaultProfile(), undefined);
+  assert.deepEqual(opened.errors, []);
+}));
+
+test('a saved default opens fresh interactive sessions, below explicit choices and never in headless runs', () => withHome('oc-default-', async (dir, sessions) => {
+  createProfile('work'); createProfile('personal'); saveDefaultProfile('personal');
+  for (const [bound, flag, env, mode, expected] of [
+    [undefined, undefined, undefined, 'tui', 'personal'],
+    [undefined, undefined, 'work', 'tui', 'work'],
+    [undefined, 'work', 'personal', 'tui', 'work'],
+    ['work', undefined, 'personal', 'tui', 'work'],
+    [undefined, undefined, undefined, 'print', undefined],
+    [undefined, undefined, undefined, 'rpc', undefined],
+  ] as const) {
+    if (env) process.env.OPTCHAT_PROFILE = env; else delete process.env.OPTCHAT_PROFILE;
+    const opened = await start(dir, noPicker, bound, false, undefined, { mode, flag }); sessions.push(opened.session);
+    assert.deepEqual(opened.errors, []);
+    const bindings = opened.manager.getEntries().flatMap(e => e.type === 'custom' && e.customType === 'optchat.profile' ? [e.data] : []);
+    assert.deepEqual(bindings, expected ? [{ name: expected }] : []);
+    await opened.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); opened.session.dispose(); sessions.pop();
+  }
+}));
+
+test('an unavailable saved default falls back to selection and invalid choices preserve the preference', () => withHome('oc-default-', async (dir, sessions) => {
+  createProfile('work'); createProfile('personal');
+  writeFileSync(join(process.env.OPTCHAT_HOME!, 'default-profile'), 'removed-profile\n');
+  const selected = await start(dir, { select: async (_title, options) => { assert.ok(options.includes('Default profile: automatic')); return 'work'; } }); sessions.push(selected.session);
+  assert.equal(selected.titles[0], 'π work');
+  assert.throws(() => saveDefaultProfile('missing'), /No profile/);
+  assert.equal(readDefaultProfile(), 'removed-profile', 'a failed selection does not replace the preference');
 }));
