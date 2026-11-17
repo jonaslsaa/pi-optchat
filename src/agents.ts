@@ -16,7 +16,7 @@ import type { Memory } from './memory.ts';
 import type { ModelChoice } from './profiles.ts';
 import { cachePayload } from './core/cache.ts';
 import { childInput } from './core/messages.ts';
-import { alive, runMessages, runsElsewhere, CUT_OFF, reportHead, RunHistory, isActiveRun, isRunning, transition, sessionMessages, savedSession, undelivered, sentText, queuedWindows, unqueueWindow, type Guidance, type RemoteWindow, type RunInfo, type RunState, type FinishReason } from './runs.ts';
+import { alive, runMessages, runsElsewhere, CUT_OFF, reportHead, RunHistory, isActiveRun, isRunning, transition, retainedMessages, sessionMessages, savedSession, undelivered, sentText, queuedWindows, unqueueWindow, type Guidance, type RemoteWindow, type RunInfo, type RunState, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { fullChat, refreshFraction, textContent } from './transcript.ts';
 import { Type, type Static } from 'typebox';
@@ -197,7 +197,7 @@ export class Children {
    */
   retained(id: string): AgentMessage[] {
     const live = this.running.get(id);
-    return live ? live.session.sessionManager.getEntries().flatMap(e => e.type === 'message' ? [e.message] : []) : this.messages(id);
+    return live ? retainedMessages(live.session.sessionManager.getEntries()) : this.messages(id);
   }
   /** A run's messages for zoom, live or finished; undefined for no such run. A subagent `reader` sees only its own descendants, as with tell. */
   transcript(id: string, reader?: string) {
@@ -208,7 +208,8 @@ export class Children {
     const retained = this.retained(id);
     // Pi puts the finalized message in session.messages before message_end listeners run, then persists that same object.
     const tail = live.streaming ?? live.session.messages.at(-1);
-    return tail && !retained.includes(tail) ? [...retained, tail] : retained;
+    // Custom entries reconstruct their message objects: include them once persisted, never again as an identity-based tail.
+    return tail && tail.role !== 'custom' && !retained.includes(tail) ? [...retained, tail] : retained;
   }
   /** Runs at work now: running, waiting for children, or stopping; not paused. */
   get working() { return [...this.running.values()].filter(live => isRunning(live.info)).map(live => live.info); }

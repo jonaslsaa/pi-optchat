@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { SessionManager } from '@earendil-works/pi-coding-agent';
+import { SessionManager, type SessionEntry } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { atomicWrite } from './store.ts';
 import { record } from './core/cache.ts';
@@ -76,8 +76,14 @@ export function queuedWindows(profileDirectory: string): QueuedWindow[] {
 /** A connected run that has ended but whose handoff summary has not reached the main agent yet. */
 export const isHandingOff = (run: RunInfo) => !isActiveRun(run) && !!run.handoff && !run.handoff.delivered;
 export const CUT_OFF = 'Pi closed before this agent finished. Its partial transcript is retained.';
+/** Original messages and visible extension messages; hidden injected context is not part of the chat. */
+export function retainedMessages(entries: readonly SessionEntry[]): AgentMessage[] {
+  return entries.flatMap((entry): AgentMessage[] => entry.type === 'message' ? [entry.message]
+    : entry.type === 'custom_message' && entry.display ? [{ role: 'custom', customType: entry.customType,
+      content: entry.content, display: entry.display, details: entry.details, timestamp: Date.parse(entry.timestamp) }] : []);
+}
 export function sessionMessages(file: string): AgentMessage[] {
-  return SessionManager.open(file).getEntries().flatMap(e => e.type === 'message' ? [e.message] : []);
+  return retainedMessages(SessionManager.open(file).getEntries());
 }
 
 /** Metadata sits beside the SDK's canonical child transcripts, inside this profile. */
