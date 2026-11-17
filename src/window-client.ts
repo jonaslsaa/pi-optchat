@@ -8,9 +8,13 @@ import { checkPatch, loadConfig, lockProfile, patchConfigFile, ProfileBusyError,
 
 /** `register` and `handoff` are a window whose agent runs in its own process (an RPC host's): it registers once it has a request,
  * and `handoff` ends it with the handoff it wrote. A window that drops its connection without one ended without /complete. */
-const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'stop', 'resume', 'withdraw', 'complete', 'register', 'handoff', 'configure', 'resume-cut-off'] as const;
+const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'stop', 'resume', 'withdraw', 'complete', 'register', 'handoff', 'configure', 'resume-cut-off',
+  'import-start', 'import-pause', 'import-resume', 'import-discard'] as const;
 export type Action = typeof ACTIONS[number];
 const isAction = (value: unknown): value is Action => ACTIONS.some(action => action === value);
+/** An app's import requests: pi-optchat/files' startImport (with its selection) and controlImport. */
+export type ImportAction = Extract<Action, `import-${string}`>;
+export const isImportAction = (action: Action): action is ImportAction => action.startsWith('import-');
 interface Request { kind: 'request'; id: number; action: Action; text?: string; cwd?: string; activeOnly?: boolean }
 interface Reply { kind: 'reply'; id: number; error?: string; text?: string }
 /** A tool the subagent is running right now, with its streamed output so far. */
@@ -100,9 +104,10 @@ export async function connectWindow(directory: string, event: (event: WindowEven
   });
   socket.setTimeout(0);
   return {
-    async request(action: Action, text?: string, cwd?: string, options: { timeout?: number; activeOnly?: boolean } = {}) {
+    async request(action: Action, text?: string, cwd?: string, options: { timeout?: number; activeOnly?: boolean; limit?: number } = {}) {
       if (socket.destroyed) throw new Error('The original Pi window is disconnected');
-      if (text && text.length > 256_000) throw new Error('Connected-window messages are limited to 256,000 characters');
+      const limit = options.limit ?? 256_000;
+      if (text && text.length > limit) throw new Error(`Connected-window messages are limited to ${limit.toLocaleString('en')} characters`);
       const id = next++;
       return await new Promise<string | undefined>((resolve, reject) => {
         const timer = setTimeout(() => { pending.delete(id); reject(new Error('Owner response timed out; closing this connection')); socket.destroy(); }, options.timeout ?? 120_000);

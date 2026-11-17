@@ -1,8 +1,8 @@
 import type { ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import type { Memory } from '../memory.ts';
-import { bytes } from '../core/memory.ts';
-import { withNotes, scanLocal, scanChatGPT, scanClaudeMemories, readConversation, type Conversation, type ImportedEntry, type Source } from './sources.ts';
-import { deduplicate, type ImportMode, type ImportJob, type ImportProgress } from './job.ts';
+import { scanLocal, scanChatGPT, scanClaudeMemories, type Conversation, type ImportedEntry, type Source } from './sources.ts';
+import type { ImportMode, ImportJob, ImportProgress } from './job.ts';
+import { estimate, select } from './plan.ts';
 import { selectMany } from './multi-select.ts';
 import { homedir } from 'node:os';
 import { sep } from 'node:path';
@@ -10,7 +10,7 @@ import { sep } from 'node:path';
 type ImportUI = { ui: Pick<ExtensionUIContext, 'select' | 'input' | 'confirm' | 'notify' | 'setWidget' | 'custom'> };
 const clean = (s: string) => s.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
 const size = (n: number) => `${(n / 1_000_000).toFixed(1)} MB`;
-export async function chooseImport(ctx: ImportUI, profile: string, memory: Memory, model: string, signal: AbortSignal): Promise<{ entries: ImportedEntry[]; mode: ImportMode } | undefined> {
+export async function chooseImport(ctx: ImportUI, profile: string, memory: Memory, model: string, signal: AbortSignal): Promise<{ entries: ImportedEntry[]; mode: ImportMode; skipped: number } | undefined> {
   const sourceLabel = await ctx.ui.select(`Import into ${profile} · source`, ['Claude Code', 'Claude Code memories', 'Codex', 'Pi / OMP', 'ChatGPT export'], { signal });
   if (!sourceLabel) return;
   const source: Source = sourceLabel === 'Claude Code' ? 'claude' : sourceLabel === 'Claude Code memories' ? 'claude-memory'
@@ -50,24 +50,17 @@ export async function chooseImport(ctx: ImportUI, profile: string, memory: Memor
   const conversations: Conversation[] | undefined = scope === `Choose individual ${unit}`
     ? await selectMany(ctx.ui, source === 'claude-memory' ? 'Memories' : 'Conversations', candidates, c => `${c.date.slice(0, 10)} · ${c.title} · ${c.id}`, signal) : candidates;
   if (!conversations) return;
-  const entries: ImportedEntry[] = [], warnings = [...scan.warnings];
-  try {
-    for (const [i, c] of conversations.entries()) {
-      ctx.ui.setWidget('optchat-import', [`Reading ${i + 1}/${conversations.length}: ${clean(c.title)}`]);
-      const parsed = await readConversation(c, signal);
-      for (const entry of parsed.entries) entries.push(entry);
-      for (const warning of parsed.warnings) warnings.push(warning);
-    }
-  } finally { ctx.ui.setWidget('optchat-import', undefined); }
+  let read;
+  try { read = await select(memory, conversations, signal, (i, c) => ctx.ui.setWidget('optchat-import', [`Reading ${i + 1}/${conversations.length}: ${clean(c.title)}`])); }
+  finally { ctx.ui.setWidget('optchat-import', undefined); }
+  // What gets staged, notes included, so the estimates below count them too.
+  const { added, skipped, staged } = read, warnings = [...scan.warnings, ...read.warnings];
   if (warnings.length) {
     const choice = await ctx.ui.select(`${warnings.length} source issues: unavailable conversations or unsupported records.\n${warnings.slice(0, 4).map(clean).join('\n')}`, ['Cancel', 'Continue with supported records'], { signal });
     if (choice !== 'Continue with supported records') return;
   }
-  if (!entries.length) { ctx.ui.notify('No readable messages remain to import. Rescan or choose different conversations.', 'info'); return; }
-  const existing = memory.entries(), { added, skipped } = deduplicate(existing, entries);
-  if (!added.length) { ctx.ui.notify(`Nothing new to import (${skipped} messages already present).`, 'info'); return; }
-  // What gets staged, notes included, so the estimates below count them too.
-  const staged = withNotes(added);
+  if (!added && !skipped) { ctx.ui.notify('No readable messages remain to import. Rescan or choose different conversations.', 'info'); return; }
+  if (!added) { ctx.ui.notify(`Nothing new to import (${skipped} messages already present).`, 'info'); return; }
   let mode: ImportMode = 'append';
   if (memory.root.length) {
     const selected = await ctx.ui.select('How should this history join your memory?', [
@@ -77,14 +70,10 @@ export async function chooseImport(ctx: ImportUI, profile: string, memory: Memor
     if (!selected) return;
     mode = selected.startsWith('Rebuild') ? 'rebuild' : 'append';
   }
-  const affected = mode === 'rebuild' ? [...existing, ...staged] : staged;
-  const inputBytes = affected.reduce((n, e) => n + bytes(e.text), 0);
-  let nodes = 0;
-  for (let n = memory.root.length + staged.length; n > 0; n = Math.floor(n / 2)) nodes += n;
-  if (mode === 'append') nodes -= memory.tree.size;
-  const preview = `${profile} · ${mode}\n${source === 'claude-memory' ? 'Each memory file as one note, marked [IMP <day>]; MEMORY.md indexes excluded.' : 'User messages and final replies, marked [IMP <day>], one note per conversation; tool activity excluded.'}\n${conversations.length} ${unit} selected · ${added.length} new ${source === 'claude-memory' ? 'notes' : 'messages'} · ${skipped} duplicates skipped\n${size(inputBytes)} text to index (~${Math.ceil(inputBytes / 4).toLocaleString()} source tokens; rough estimate)\nCompactor: ${model}\nUp to ${nodes} new summary nodes; small nodes need no model call. A big import costs about 3x the source tokens in compactor input, plus cached context and retries.\nChatting in this profile pauses until completion or discard. You can pause and resume compression. The previous memory is retained.`;
+  const { bytes: inputBytes, tokens, summaries: nodes } = estimate(memory, staged, mode);
+  const preview = `${profile} · ${mode}\n${source === 'claude-memory' ? 'Each memory file as one note, marked [IMP <day>]; MEMORY.md indexes excluded.' : 'User messages and final replies, marked [IMP <day>], one note per conversation; tool activity excluded.'}\n${conversations.length} ${unit} selected · ${added} new ${source === 'claude-memory' ? 'notes' : 'messages'} · ${skipped} duplicates skipped\n${size(inputBytes)} text to index (~${tokens.toLocaleString()} source tokens; rough estimate)\nCompactor: ${model}\nUp to ${nodes} new summary nodes; small nodes need no model call. A big import costs about 3x the source tokens in compactor input, plus cached context and retries.\nChatting in this profile pauses until completion or discard. You can pause and resume compression. The previous memory is retained.`;
   if (!await ctx.ui.confirm('Start import?', preview, { signal })) return;
-  return { entries: staged, mode };
+  return { entries: staged, mode, skipped };
 }
 export async function showProgress(ctx: { ui: Pick<ExtensionUIContext, 'select' | 'setWidget'> }, job: ImportJob,
   run: (signal: AbortSignal, progress: (value: ImportProgress) => void) => Promise<unknown>, outerSignal: AbortSignal) {

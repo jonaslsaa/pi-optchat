@@ -66,6 +66,10 @@ Re-importing skips messages already present, even if titles or paths changed. A 
 
 **Pause import** (or Escape) saves progress, and so does restarting Pi. `/optchat import` then offers **Resume** or **Discard staged import**. While an import is pending, chat in that profile is blocked; other profiles still work. Imports need the main agent and its subagents to be idle.
 
+## From another app
+
+An app such as optchat-app imports through `pi-optchat/files` ([storage.md](storage.md#reading-profiles-from-another-app)). It scans and previews in its own process, with no Pi and no model calls, and may take conversations from several sources in one run: they land in date order, one conversation after another, as a single source's do. The Pi that owns the profile does the import itself, since it has the compactor: it reads the chosen conversations again, skips duplicates again and refuses when nothing is new, with the same rules as `/optchat import` (main agent and subagents idle, no pending reports). The app pauses, resumes and discards it there too, and reads its state from `imports/status.json` through `readImport`, also after either of them restarts. As in the terminal, the owner starts a new session when an import ends, pauses or fails, so its profile opens again on the memory it now has.
+
 ## Safety
 
 - Imports build a new memory generation and switch to it only when the whole tree is ready. The previous generation stays on disk.

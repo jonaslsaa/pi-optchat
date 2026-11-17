@@ -7,7 +7,7 @@ import { checkPatch, checkSocketPath, isWindows, profileSocket, removeStaleSocke
 import { textContent } from './transcript.ts';
 import { isActiveRun, isRemoteWindow, type RunInfo } from './runs.ts';
 import { HANDOFF_REQUEST } from './prompts.ts';
-import { connectWindow, isAssistant, wire, type Action, type AttachableAgent, type LiveState, type WindowMessage } from './window-client.ts';
+import { connectWindow, isAssistant, isImportAction, wire, type Action, type ImportAction, type AttachableAgent, type LiveState, type WindowMessage } from './window-client.ts';
 import type { AssistantMessage, UserMessage } from '@earendil-works/pi-ai';
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -34,7 +34,7 @@ const fits = (value: unknown) => { try { return JSON.stringify(value).length < 1
 
 /** Call only while holding the profile lock. The owner hosts every child session. */
 export async function serveWindows(directory: string, children: Children, available: () => boolean,
-  report: (text: string) => Promise<void>, configure?: (patch: ConfigPatch) => void) {
+  report: (text: string) => Promise<void>, configure?: (patch: ConfigPatch) => void, importer?: (action: ImportAction, selection: string) => Promise<void>) {
   const path = profileSocket(directory, 'windows'); checkSocketPath(path);
   removeStaleSocket(path); // A previous owner can no longer hold the profile lock.
   const ready = () => { if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready'); };
@@ -78,6 +78,10 @@ export async function serveWindows(directory: string, children: Children, availa
             // An RPC host's go-ahead for what interactive Pi does at every start (see index.ts).
             ready();
             await children.resumeCutOff();
+          } else if (isImportAction(frame.action)) {
+            // Not `ready()`: that refuses while an import is pending or running, which is what a pause, resume or discard is for. The importer has the import's own guards.
+            if (!importer) throw new Error('This Pi takes no imports');
+            await importer(frame.action, frame.text ?? '');
           } else if (frame.action === 'attach') {
             if (child) throw new Error('This window already has a conversation');
             ready();

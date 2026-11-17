@@ -24,7 +24,8 @@ import { isActiveRun, type RunInfo } from './runs.ts';
 import { exportBrowser } from './browser.ts';
 import { Inbox } from './inbox.ts';
 import { checkpoint } from './checkpoint.ts';
-import { pendingImport, prepareImport, runImport, discardImport } from './import/job.ts';
+import { pendingImport, prepareImport, runImport, discardImport, type ImportJob, type ImportProgress } from './import/job.ts';
+import { parseSelection, stageSelection } from './import/plan.ts';
 import { chooseImport, showProgress } from './import/ui.ts';
 import { noteLimits, noteRefusal } from './limits.ts';
 import { UsageLedger } from './usage.ts';
@@ -32,7 +33,7 @@ import { agentLabel, oneLine, showInspector, type InspectorPage } from './inspec
 import { showAgentView } from './agent-view.ts';
 import { inspectorShortcut, mountNavigation } from './navigation.ts';
 import { joinHeadless, serveWindows } from './window-bridge.ts';
-import { listAttachableAgents } from './window-client.ts';
+import { listAttachableAgents, type ImportAction } from './window-client.ts';
 import { openConnectedWindow, registerConnectedRenderer } from './connected-window.ts';
 import { openRemoteWindow, ROLE_STATUS, type Role } from './rpc-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
@@ -97,6 +98,19 @@ export default function optchat(pi: ExtensionAPI) {
   let stopping = false;
   let importController: AbortController | undefined;
   let importTask: Promise<void> | undefined;
+  /** Where an import's choices come from (the terminal pickers or an app) and how it is followed once it runs. `ended`: it is over,
+   * or never started, with `failure` if it failed. */
+  type ImportStart = {
+    choose: (job: ImportJob | undefined, signal: AbortSignal) => Promise<'resume' | Awaited<ReturnType<typeof chooseImport>>>;
+    follow: (job: ImportJob, run: (signal: AbortSignal, progress?: (value: ImportProgress) => void) => Promise<unknown>, signal: AbortSignal) => Promise<boolean>;
+    ended?: (failure?: unknown) => void;
+  };
+  /** An app's start or resume (pi-optchat/files), waiting for `/optchat import app` to run it: only a command may start the new
+   * session an import ends with. */
+  let appImport: ImportStart | undefined;
+  let importRun: Promise<unknown> | undefined;
+  /** The app's import requests the profile socket waits on. An import's new session closes that socket, so their replies go first. */
+  const replying = new Set<Promise<void>>();
   let unmountNavigation: (() => void) | undefined;
   let inspectorController: AbortController | undefined;
   const shortcut = inspectorShortcut();
@@ -303,7 +317,9 @@ export default function optchat(pi: ExtensionAPI) {
       await restoreMain(ctx, active);
       if (ctx.mode === 'tui') unmountNavigation = mountNavigation(ctx, children, memory, shortcut, page => { void inspect(ctx, page); });
       // A one-shot run (`pi -p`, JSON) exits after its own prompt, which would end every conversation connected to it.
-      if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport, patch => configure(ctx, patch));
+      if (ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport, patch => configure(ctx, patch), (action, text) => {
+        const reply = importFromApp(ctx, action, text); replying.add(reply); return reply;
+      });
       untitle = children.subscribe(() => showTitle(ctx)); showTitle(ctx);
       status(ctx);
       // An RPC host (the OptChat app) shows the profile itself; the banner would sit over its first prompt every start.
@@ -649,6 +665,32 @@ export default function optchat(pi: ExtensionAPI) {
     }
     applyConfig(a.dir, a.config, patch);
   };
+  /** Another app's import, through the profile socket: what /optchat import does, with the app's choices instead of the pickers. */
+  const importFromApp = async (ctx: ExtensionContext, action: ImportAction, text: string) => {
+    const a = required();
+    if (action === 'import-pause') {
+      // Only a run: a terminal's import still in its dialogs is the terminal's to cancel. Replies once the run has saved where it paused.
+      if (!importRun) throw new Error('No import is running in this profile.');
+      importController?.abort(); await importRun.catch(() => {}); return;
+    }
+    if (importing || appImport) throw new Error('An import is already open in this profile.');
+    if (action === 'import-discard') { discardImport(a.dir); status(ctx); return; }
+    const selection = action === 'import-start' ? parseSelection(text) : undefined;
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    let answered = false;
+    const answer = (error?: unknown) => { if (answered) return; answered = true; if (error === undefined) resolve(); else reject(error); };
+    appImport = {
+      choose: async (job, signal) => {
+        if (!!selection === !!job) throw new Error(job ? 'Resume or discard the pending import first.' : 'No paused import to resume.');
+        return selection ? stageSelection(a.memory, selection, signal) : 'resume';
+      },
+      // The app follows the run through the status it writes, so the request is answered once it runs.
+      follow: (_job, run, signal) => { const running = run(signal); answer(); return running.then(() => true, (error: unknown) => { if (signal.aborted) return false; throw error; }); },
+      ended: failure => answer(failure ?? new Error('The import did not start.')),
+    };
+    pi.sendUserMessage('/optchat import app', { expandPromptTemplates: true });
+    return promise;
+  };
   const pickModel = async (ctx: ExtensionContext, role: 'compactor' | 'subagent') => {
     const a = required();
     if (ctx.mode !== 'tui') throw new Error('Choosing a model requires interactive Pi or optchat-app.');
@@ -674,6 +716,42 @@ export default function optchat(pi: ExtensionAPI) {
     finally { if (inspectorController === controller) inspectorController = undefined; }
   };
   pi.registerShortcut(shortcut, { description: 'Inspect OptChat agents, usage and background activity', handler: ctx => inspect(ctx, 'agents') });
+  /** /optchat import, from the terminal or an app: the guards, staging with the old memory closed, the run, then a new session. */
+  const openImport = async (ctx: ExtensionCommandContext, start: ImportStart) => {
+    const a = required();
+    if (!ctx.isIdle() || a.children.active || reports.length) throw new Error('Finish active work and pending reports before importing.');
+    importing = true; importController = new AbortController(); let closed = false;
+    status(ctx);
+    const signal = importController.signal;
+    importTask = (async () => {
+      let job = pendingImport(a.dir);
+      const plan = await start.choose(job, signal);
+      if (!plan) return;
+      if (plan !== 'resume') {
+        signal.throwIfAborted();
+        flush(); a.inbox.recover(a.memory); await checkpoints; await a.memory.close(); closed = true;
+        signal.throwIfAborted();
+        job = prepareImport(a.dir, a.memory, plan.entries, plan.mode, plan.skipped);
+      }
+      if (!job) return;
+      if (!closed) { await a.memory.close(); closed = true; }
+      const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, { onUsage: message => {
+        a.usage.compression(message, 'import', ctx.sessionManager.getSessionId());
+      }, limits: a.dir, accepted: () => a.config.summaryAcceptBytes });
+      const completed = await start.follow(job, (signal, progress) => importRun = runImport(a.dir, compress, signal, a.config.jobs, progress), signal);
+      ctx.ui.notify(completed ? `Imported ${job.added} messages into ${a.name}. Previous memory retained at ${job.previous === '.' ? a.dir : join(a.dir, job.previous)}.`
+        : 'Import paused. Use /optchat import to resume. Other profiles remain available.', 'info');
+    })();
+    let failure: unknown;
+    try { await importTask; } catch (error) { failure = error; }
+    finally { importing = false; importTask = undefined; importRun = undefined; importController = undefined; ctx.ui.setWidget('optchat-import', undefined); }
+    start.ended?.(failure);
+    // The socket awaited each request before this does, so its reply is written before the new session closes the socket.
+    await Promise.all([...replying].map(reply => reply.catch(() => {}))); replying.clear();
+    if (closed && !stopping) await ctx.newSession({ setup: async manager => { manager.appendCustomEntry(binding, { name: a.name }); } });
+    else status(ctx);
+    if (failure) throw failure;
+  };
   const command = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
     if (remote && !remote.ended || rpcWindow) { ctx.ui.notify('Manage this profile in its original window. Here use /tell-main or /complete.', 'info'); return; }
     if (importing) throw new Error('Close the import dialog before changing profile settings.');
@@ -686,43 +764,12 @@ export default function optchat(pi: ExtensionAPI) {
     if (action === 'import') {
       const a = required();
       if (!ctx.hasUI) throw new Error('/optchat import requires interactive Pi.');
-      if (!ctx.isIdle() || a.children.active || reports.length) throw new Error('Finish active work and pending reports before importing.');
-      importing = true; importController = new AbortController(); let closed = false;
-      status(ctx);
-      const signal = importController.signal;
-      importTask = (async () => {
-        let job = pendingImport(a.dir);
-        if (job) {
-          const selected = await ctx.ui.select(`Paused ${job.mode} import · ${job.added} new messages`, ['Resume import', 'Discard staged import', 'Cancel'], { signal });
-          if (selected === 'Discard staged import') {
-            if (await ctx.ui.confirm('Discard import?', 'Original memory stays unchanged. Staged summaries will be removed.', { signal })) { signal.throwIfAborted(); discardImport(a.dir); }
-            return;
-          }
-          if (selected !== 'Resume import') return;
-        } else {
-          const plan = await chooseImport(ctx, a.name, a.memory, `${a.config.compactor.provider}/${a.config.compactor.model} (${a.config.compactor.thinking})`, signal);
-          if (!plan) return;
-          signal.throwIfAborted();
-          flush(); a.inbox.recover(a.memory); await checkpoints; await a.memory.close(); closed = true;
-          signal.throwIfAborted();
-          job = prepareImport(a.dir, a.memory, plan.entries, plan.mode);
-          if (!job) return;
-        }
-        if (!closed) { await a.memory.close(); closed = true; }
-        const compress = createCompressor(ctx.modelRegistry, () => a.config.compactor, { onUsage: message => {
-          a.usage.compression(message, 'import', ctx.sessionManager.getSessionId());
-        }, limits: a.dir, accepted: () => a.config.summaryAcceptBytes });
-        const completed = await showProgress(ctx, job, (signal, progress) => runImport(a.dir, compress, signal, a.config.jobs, progress), signal);
-        ctx.ui.notify(completed ? `Imported ${job.added} messages into ${a.name}. Previous memory retained at ${job.previous === '.' ? a.dir : join(a.dir, job.previous)}.`
-          : 'Import paused. Use /optchat import to resume. Other profiles remain available.', 'info');
-      })();
-      let failure: unknown;
-      try { await importTask; } catch (error) { failure = error; }
-      finally { importing = false; importTask = undefined; importController = undefined; ctx.ui.setWidget('optchat-import', undefined); }
-      if (closed && !stopping) await ctx.newSession({ setup: async manager => { manager.appendCustomEntry(binding, { name: a.name }); } });
-      else status(ctx);
-      if (failure) throw failure;
-      return;
+      return openImport(ctx, { follow: (job, run, signal) => showProgress(ctx, job, run, signal), choose: async (job, signal) => {
+        if (!job) return chooseImport(ctx, a.name, a.memory, `${a.config.compactor.provider}/${a.config.compactor.model} (${a.config.compactor.thinking})`, signal);
+        const selected = await ctx.ui.select(`Paused ${job.mode} import · ${job.added} new messages`, ['Resume import', 'Discard staged import', 'Cancel'], { signal });
+        if (selected === 'Discard staged import' && await ctx.ui.confirm('Discard import?', 'Original memory stays unchanged. Staged summaries will be removed.', { signal })) { signal.throwIfAborted(); discardImport(a.dir); }
+        return selected === 'Resume import' ? 'resume' : undefined;
+      } });
     }
     const named = /^profile\s+(\S+)$/.exec(action)?.[1];
     if (ctx.mode !== 'tui' && (named || action === 'profile')) {
@@ -778,6 +825,12 @@ export default function optchat(pi: ExtensionAPI) {
   } });
   pi.registerCommand('optchat', { description: 'OptChat profiles, settings, models, agents, instructions, memory browser, and imports',
     getArgumentCompletions: prefix => ['profile', 'settings', 'model', 'agents', 'agents model', 'usage', 'activity', 'instructions', 'browse', 'import'].filter(s => s.startsWith(prefix)).map(value => ({ value, label: value })),
-    handler: async (args, ctx) => { try { await command(args, ctx); } catch (error) { ctx.ui.notify(errorText(error), 'error'); } },
+    handler: async (args, ctx) => {
+      // `/optchat import app` is how an app's request (importFromApp) runs as a command; typed, it finds none waiting.
+      const app = args.trim() === 'import app' ? appImport : undefined;
+      if (app) appImport = undefined;
+      try { await (app ? openImport(ctx, app) : command(args, ctx)); } catch (error) { app?.ended?.(error); ctx.ui.notify(errorText(error), 'error'); }
+      finally { app?.ended?.(); } // Answered already, unless it never got as far as running (an early `return`).
+    },
   });
 }

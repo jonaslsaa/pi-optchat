@@ -6,14 +6,14 @@ import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
-import { getAgentDir, parseSkillBlock } from '@earendil-works/pi-coding-agent';
 import { record } from '../core/cache.ts';
 import { bytes, type Kind, type Origin } from '../core/memory.ts';
 import type { ImportedEntry } from '../core/import.ts';
 export type { ImportedEntry };
 
 /** The histories Pi's OptChat imports, as their entries' `origin.source`. */
-export type Source = 'claude' | 'claude-memory' | 'codex' | 'pi' | 'chatgpt';
+export const SOURCES = ['claude', 'claude-memory', 'codex', 'pi', 'chatgpt'] as const;
+export type Source = typeof SOURCES[number];
 export interface Conversation {
   source: Source; id: string; file: string; title: string; project: string; date: string; size: number;
   exported?: Record<string, unknown>;
@@ -73,15 +73,25 @@ const codexTyped = (content: unknown) => (Array.isArray(content) ? content : [co
 const piTyped = (m: Record<string, unknown>) => m.role === 'user' && m.attribution !== 'agent' && m.synthetic !== true;
 /** OptChat writes `optchat.*` entries into every session it runs; those messages are already in a profile's memory. */
 const optchatEntry = (v: Record<string, unknown>) => v.type === 'custom' && String(v.customType).startsWith('optchat.');
-/** Pi's sessions, then OMP's: its default profile in ~/.omp/agent/sessions, others in ~/.omp/profiles/<name>/agent/sessions. */
-async function piRoots(): Promise<string[]> {
-  const profiles = join(homedir(), '.omp/profiles');
+/** The skill and what followed it in a `/skill:name args` Pi expanded, as Pi's parseSkillBlock reads its own block. */
+const skillBlock = (text: string) => /^<skill name="([^"]+)" location="[^"]+">\n[\s\S]*?\n<\/skill>(?:\n\n([\s\S]+))?$/.exec(text);
+/**
+ * Where each source keeps its history under `home`: Pi's sessions (in Pi's agent directory, which PI_CODING_AGENT_DIR moves when `home`
+ * is the user's own), then OMP's, its default profile in ~/.omp/agent/sessions and others in ~/.omp/profiles/<name>/agent/sessions. An app
+ * passes another `home` to scan a test's folder instead of the user's. `scanClaudeMemories` takes the one Claude Code root.
+ */
+export async function historyRoots(source: 'claude' | 'claude-memory' | 'codex' | 'pi', home = homedir()): Promise<string[]> {
+  if (source === 'claude' || source === 'claude-memory') return [join(home, '.claude/projects')];
+  if (source === 'codex') return [join(home, '.codex/sessions'), join(home, '.codex/archived_sessions')];
+  const profiles = join(home, '.omp/profiles');
   const entries = await readdir(profiles, { withFileTypes: true }).catch(error => {
     if (missingSource(error)) return [];
     throw error;
   });
   const named = entries.filter(e => e.isDirectory()).map(e => join(profiles, e.name, 'agent/sessions')).sort();
-  return [join(getAgentDir(), 'sessions'), join(homedir(), '.omp/agent/sessions'), ...named];
+  // As Pi's getAgentDir finds it, without loading Pi.
+  const agent = home === homedir() && process.env.PI_CODING_AGENT_DIR ? process.env.PI_CODING_AGENT_DIR.replace(/^~(?=$|[\\/])/, home) : join(home, '.pi/agent');
+  return [join(agent, 'sessions'), join(home, '.omp/agent/sessions'), ...named];
 }
 /** What the user typed for a Pi or OMP session message, or undefined for anything they did not type. */
 function piUserText(v: Record<string, unknown>): string | undefined {
@@ -92,7 +102,7 @@ function piUserText(v: Record<string, unknown>): string | undefined {
   const m = v.type === 'message' ? v.message : undefined;
   if (!record(m)) return undefined;
   // Pi expands `/skill:name args` into the skill's body followed by the args.
-  if (piTyped(m)) { const typed = text(m.content), skill = parseSkillBlock(typed); return skill ? `/skill:${skill.name} ${skill.userMessage ?? ''}`.trimEnd() : typed; }
+  if (piTyped(m)) { const typed = text(m.content), skill = skillBlock(typed); return skill ? `/skill:${skill[1]} ${skill[2]?.trim() ?? ''}`.trimEnd() : typed; }
   // `!cmd` and `$code` the user ran: the command as typed, never its output. `!!` and `$$` kept them from the model, so they stay out.
   if (m.excludeFromContext === true) return undefined;
   if (m.role === 'bashExecution' && typeof m.command === 'string') return `!${m.command}`;
@@ -145,9 +155,7 @@ async function filesUnder(path: string, accept: (name: string) => boolean, signa
   return files.sort();
 }
 export async function scanLocal(source: 'claude' | 'codex' | 'pi', roots?: string[], signal?: AbortSignal): Promise<Scan> {
-  const folders = roots ?? (source === 'claude' ? [join(homedir(), '.claude/projects')]
-    : source === 'pi' ? await piRoots()
-    : [join(homedir(), '.codex/sessions'), join(homedir(), '.codex/archived_sessions')]);
+  const folders = roots ?? await historyRoots(source);
   const conversations: Conversation[] = [], warnings: string[] = [];
   let underOptChat = 0;
   // Claude workflow journals contain orchestration events, not conversation messages.
