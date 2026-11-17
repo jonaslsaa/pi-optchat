@@ -97,6 +97,7 @@ It lists the id and the first words of each task, so the main agent knows what i
 - Agents run inside the Pi process. Closing Pi stops them; there is no detached mode.
 - Subagents that were working when Pi closed, crashed or `/reload`ed are resumed from their saved transcripts when the profile next opens in interactive Pi, and the main agent is told which.
 - Headless `pi -p` doesn't resume them; they wait for the next interactive start.
+- `--mode rpc` doesn't resume them by itself either: its host asks its user, then resumes them with `resumeCutOff` from `pi-optchat/files`.
 - Ones you stopped or paused aren't resumed.
 
 ## Long subagent turns

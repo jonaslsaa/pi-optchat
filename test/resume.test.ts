@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, ModelRegistry, ModelRuntime, type AgentSession } from '@earendil-works/pi-coding-agent';
 import { Children } from '../src/agents.ts';
+import { resumeCutOff } from '../src/files.ts';
+import { serveWindows } from '../src/window-bridge.ts';
 import { Memory } from '../src/memory.ts';
 import type { Settings } from '../src/settings.ts';
 import { emptyUsage } from '../src/usage.ts';
@@ -344,6 +346,29 @@ test('subagents cut off by Pi closing or crashing are resumed at the next start,
     assert.equal(reports.length, told, 'nothing left to resume, nothing to say');
     assert.deepEqual(warnings, []);
   } finally { await cleanup(first, ...later); }
+});
+
+test('an RPC host resumes nothing by itself, then resumes the cut-off subagents over the profile socket, and the main agent is told once', async () => {
+  const { dir, releases, reports, make, cleanup } = await setup('optchat-resume-socket-');
+  const first = make('first-session');
+  let later: Children | undefined, close: (() => Promise<void>) | undefined;
+  try {
+    const [held] = await first.spawn([{ task: 'hold on' }], dir);
+    await until(() => releases.has('hold on'));
+    await first.close();
+    reports.length = 0;
+    later = make('rpc-session');
+    // The owner opens the profile and serves its socket, and the run stays cut off until its host says so.
+    close = await serveWindows(dir, later, () => true, async () => {});
+    assert.equal(later.history.records.get(held)?.cutOff, true);
+    await resumeCutOff(dir);
+    assert.equal(reports[0], `Pi restarted while subagents were working. Resumed ${held} from where it left off; reports arrive as usual.`);
+    await until(() => later!.history.records.get(held)?.state === 'completed');
+    assert.equal(later.history.records.get(held)?.cutOff, undefined);
+    const told = reports.length;
+    await resumeCutOff(dir);
+    assert.equal(reports.length, told, 'a second go-ahead finds nothing cut off');
+  } finally { await close?.(); await cleanup(first, ...later ? [later] : []); }
 });
 
 test('with grouped reports, the main agent is told that resumed subagents now report on their own', async () => {

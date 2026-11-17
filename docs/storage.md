@@ -40,6 +40,7 @@ Memory reaches disk through one seam, `Store` in `src/core/store.ts` (Pi's `File
 It can also reach a profile's subagents through the Pi that owns it, over that Pi's connected-window socket, as the user would from the Agents page:
 
 - `attachAgent(profileDir, id, onEvent, onDisconnect?)`: opens any subagent by its exact ID (a finished one too, from `readRuns`), or throws. Its conversation so far, then live, arrives as `WindowEvent`s; a `status` event carries `LiveState` (state, model, the streaming reply, running tools, queued messages). The handle has `say(text)` (a message from the user to a live agent), `resume(text)` (the same to a finished one, which goes on in its earlier conversation as the main agent's `tell` would resume it; only the main agent's own subagents resume, and a nested one throws "Only <parent> can resume it"), `interrupt()`, `stop()` (it ends and its parent gets the usual "Stopped by the user" report) and `close()`, which detaches only. A finished agent sends a `finished` event, and another one after a resume.
+- `resumeCutOff(profileDir)`: resumes the subagents the last close or crash cut off (records with `cutOff`), and tells the main agent once, as interactive Pi does when it opens the profile. An RPC host resumes none by itself, so this is its way to, once its user says so.
 
 ## Windows differences
 

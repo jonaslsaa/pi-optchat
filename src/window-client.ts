@@ -8,7 +8,7 @@ import { checkPatch, loadConfig, lockProfile, patchConfigFile, ProfileBusyError,
 
 /** `register` and `handoff` are a window whose agent runs in its own process (an RPC host's): it registers once it has a request,
  * and `handoff` ends it with the handoff it wrote. A window that drops its connection without one ended without /complete. */
-const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'stop', 'resume', 'withdraw', 'complete', 'register', 'handoff', 'configure'] as const;
+const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'stop', 'resume', 'withdraw', 'complete', 'register', 'handoff', 'configure', 'resume-cut-off'] as const;
 export type Action = typeof ACTIONS[number];
 const isAction = (value: unknown): value is Action => ACTIONS.some(action => action === value);
 interface Request { kind: 'request'; id: number; action: Action; text?: string; cwd?: string; activeOnly?: boolean }
@@ -154,6 +154,16 @@ export async function attachAgent(profileDirectory: string, id: string, event: (
 }
 export type AttachedAgent = Awaited<ReturnType<typeof attachAgent>>;
 
+/**
+ * Resumes the subagents the profile's last Pi close or crash cut off, in the Pi that owns it now, and tells its main agent once,
+ * as interactive Pi does by itself when it opens a profile. An RPC host (the OptChat app) resumes nothing by itself: it asks the
+ * user, then calls this. Nothing cut off is nothing to do. Throws if no Pi has the profile open.
+ */
+export async function resumeCutOff(profileDirectory: string) {
+  const connection = await connectWindow(profileDirectory, () => {}, () => {});
+  try { await connection.request('resume-cut-off'); }
+  finally { connection.close(); }
+}
 /**
  * Changes a profile's settings or its compactor or subagent model, as /optchat settings does, and returns the config as it now is.
  * While a Pi owns the profile, that Pi applies the change at once (a model must be one it is logged in to); otherwise config.json

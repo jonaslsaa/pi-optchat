@@ -313,7 +313,8 @@ export default function optchat(pi: ExtensionAPI) {
         // Queued before handoff recovery can start a turn, so a saved window start goes in ahead of that window's handoff.
         for (const r of queuedReports) if (r.quiet) sendReport(r);
         const recover = (work: Promise<void>, what: string) => work.catch(error => ctx.ui.notify(`${what}: ${errorText(error)}`, 'error'));
-        // Only an interactive Pi picks cut-off subagents up: a one-shot headless run would stop them again as it exits.
+        // Only an interactive Pi picks cut-off subagents up by itself: a one-shot headless run would stop them again as it exits,
+        // and an RPC host (the OptChat app) asks its user first, then sends `resume-cut-off` (pi-optchat/files' resumeCutOff).
         recovery = Promise.all([recover(children.recoverHandoffs(), 'Handoff recovery'), ...ctx.mode === 'tui' ? [recover(children.resumeCutOff(), 'Resuming subagents')] : []]).then(() => {});
       }
       setImmediate(() => { if (active?.memory === memory && !pendingImport(dir)) for (const r of queuedReports) if (!r.quiet) sendReport(r); });

@@ -73,6 +73,10 @@ export async function serveWindows(directory: string, children: Children, availa
             try { patch = JSON.parse(frame.text ?? ''); } catch { patch = undefined; }
             checkPatch(patch);
             configure(patch);
+          } else if (frame.action === 'resume-cut-off') {
+            // An RPC host's go-ahead for what interactive Pi does at every start (see index.ts).
+            if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
+            await children.resumeCutOff();
           } else if (frame.action === 'attach') {
             if (child) throw new Error('This window already has a conversation');
             if (!available()) throw new Error('Profile is importing or shutting down; try again when it is ready');
