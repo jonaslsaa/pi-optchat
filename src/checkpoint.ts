@@ -1,6 +1,6 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWrite } from './store.ts';
 const exec = promisify(execFile);
@@ -14,9 +14,33 @@ const LOCKS = ['index.lock', 'HEAD.lock', 'refs/heads/main.lock'];
 // The subscription's limits as last counted (limits.ts): a new one with nearly every answer, and nothing to keep.
 const LOCAL = '/limits.json';
 
+/** Checkpoints own their repository; inherited Git routing must not redirect a write into the caller's repository. */
+function checkpointEnvironment() {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')));
+}
+
+function validateCheckpointRepository(directory: string, env: NodeJS.ProcessEnv) {
+  const metadata = join(directory, '.git'), entry = lstatSync(metadata, { throwIfNoEntry: false });
+  if (!entry) return;
+  const invalid = (reason: string) => new Error(`Invalid checkpoint repository at ${metadata}: ${reason}`);
+  if (!entry.isDirectory()) throw invalid('.git must be a real directory, not a symlink or file.');
+  const probe = spawnSync('git', ['-C', directory, 'rev-parse', '--path-format=absolute', '--absolute-git-dir', '--git-common-dir', '--show-toplevel', '--is-bare-repository'], { encoding: 'utf8', env });
+  if (probe.status !== 0) throw invalid(probe.error?.message ?? probe.stderr.trim());
+  const paths = probe.stdout.split('\n'), profile = realpathSync(directory), repository = join(profile, '.git');
+  if (paths.length !== 5 || paths[3] !== 'false' || paths[4] !== '') throw invalid('Expected a non-bare profile-local repository.');
+  const expected = [repository, repository, profile];
+  if (!paths.slice(0, 3).every((path, index) => realpathSync(path) === expected[index]))
+    throw invalid('Git directory, common directory and worktree must match the selected profile.');
+}
+
 export async function checkpoint(directory: string) {
-  const git = (args: string[]) => exec('git', ['-C', directory, ...args], { maxBuffer: 1_000_000 });
-  if (!existsSync(join(directory, '.git'))) await git(['init', '-q', '-b', 'main']);
+  const env = checkpointEnvironment();
+  const git = (args: string[]) => exec('git', ['-C', directory, ...args], { maxBuffer: 1_000_000, env });
+  validateCheckpointRepository(directory, env);
+  if (!existsSync(join(directory, '.git'))) {
+    await git(['init', '-q', '-b', 'main']);
+    validateCheckpointRepository(directory, env);
+  }
   if (!existsSync(join(directory, '.gitignore'))) atomicWrite(join(directory, '.gitignore'), '/runs/\n/memory.html\n/usage.jsonl\n*.tmp\n');
   // What is no memory and came after the ignore file, which is written once and may be the user's by now, is left out through git's own list.
   const exclude = join(directory, '.git', 'info', 'exclude'), excluded = existsSync(exclude) ? readFileSync(exclude, 'utf8') : '';
