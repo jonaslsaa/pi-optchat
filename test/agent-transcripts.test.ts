@@ -35,6 +35,13 @@ test('a run transcript is its chat as kind|text lines, without the memory view, 
   assert.ok(text.length < 1_500);
 });
 
+test('named zoom includes visible extension text with its source and leaves hidden context out', () => {
+  const visible: AgentMessage = { role: 'custom', customType: 'review-result', content: [{ type: 'text', text: 'Review complete.' }], display: true, ...at };
+  const hidden: AgentMessage = { role: 'custom', customType: 'private-context', content: 'HIDDEN_CONTEXT', display: false, ...at };
+  assert.equal(runTranscript([visible, hidden, ...chat.slice(0, 1), visible]),
+    'user|[review-result] Review complete.\nuser|Your task:\nRun the tests.\nuser|[review-result] Review complete.');
+});
+
 test('zoom takes a run id: the transcript in pages that say where to go on; an unknown run says so', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-runs-'));
   const memory = new Memory(dir, async () => 'summary', () => {});
@@ -109,9 +116,13 @@ test('live zoom retains compacted evidence, its page offsets and the unsaved tai
           return { compaction: { summary: 'Earlier steps summarized.', firstKeptEntryId: event.preparation.firstKeptEntryId, tokensBefore: event.preparation.tokensBefore } };
         }); }] });
       await loader.reload();
-      return createAgentSession({ ...options, settingsManager: settings, modelRuntime: runtime, resourceLoader: loader, tools: ['read_evidence'],
+      const created = await createAgentSession({ ...options, settingsManager: settings, modelRuntime: runtime, resourceLoader: loader, tools: ['read_evidence'],
         customTools: [{ name: 'read_evidence', label: 'Evidence', description: 'Return a test record.', parameters: Type.Object({ step: Type.Number() }),
           execute: async (_id, { step }) => result(`EVIDENCE_${step} ${'y'.repeat(6000)}`) }] });
+      // Real Pi extension messages are separate custom_message entries, including repeated identical notices.
+      for (let i = 0; i < 2; i++) await created.session.sendCustomMessage({ customType: 'fixture-visible', content: 'VISIBLE_NOTICE', display: true });
+      await created.session.sendCustomMessage({ customType: 'fixture-hidden', content: 'HIDDEN_CONTEXT', display: false });
+      return created;
     },
   });
   const deadline = setTimeout(() => { releaseFirst(); releaseLast(); void children.close(); }, 10000);
@@ -137,12 +148,16 @@ test('live zoom retains compacted evidence, its page offsets and the unsaved tai
     const before = await page();
     assert.ok(before.includes(`go on with offset ${PAGE}`));
     assert.match(before, /EARLY_REPLY/);
+    assert.equal(before.split('user|[fixture-visible] VISIBLE_NOTICE').length - 1, 2);
+    assert.doesNotMatch(before, /HIDDEN_CONTEXT/);
     releaseFirst(); await last;
     await until(() => runTranscript(children.messages(id)).includes('FINAL_STREAMING'));
     assert.equal(compactions, 1);
     assert.ok(!runTranscript(children.messages(id)).includes('EARLY_REPLY'), 'the inspector still shows the compacted working context');
     const retained = runTranscript(children.transcript(id)!);
     assert.match(retained, /EARLY_REPLY/); assert.match(retained, /EVIDENCE_1/);
+    assert.equal(retained.split('user|[fixture-visible] VISIBLE_NOTICE').length - 1, 2, 'compaction preserves each visible notice once');
+    assert.doesNotMatch(retained, /HIDDEN_CONTEXT/);
     assert.equal(retained.split('FINAL_STREAMING').length - 1, 1);
     assert.equal((await page()).slice(0, PAGE), before.slice(0, PAGE), 'compaction preserves the existing page prefix');
     assert.match(await page(PAGE), /EVIDENCE_1/, 'a pre-compaction continuation still reaches the old evidence');
