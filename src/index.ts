@@ -595,7 +595,7 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('before_provider_request', (event, ctx) => ctx.model?.api === 'anthropic-messages' ? cachePayload(event.payload) : event.payload);
   pi.on('cache_warming_decision', () => ({ action: 'stop' }));
   pi.on('session_before_compact', (_event, ctx) => {
-    if (rpcWindow) return; // Its conversation isn't in memory: Pi's compaction keeps it in bounds.
+    if (!active || rpcWindow) return; // Plain Pi and connected RPC windows keep their own compaction.
     ctx.ui.notify('OptChat manages history between turns. Pi compaction is disabled; an exceptionally long single run may require stopping and continuing in a new turn.', 'info');
     return { cancel: true };
   });
