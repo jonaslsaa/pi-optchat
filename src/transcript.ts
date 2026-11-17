@@ -97,23 +97,45 @@ function latestExchange(branch: readonly SessionEntry[]) {
 export const fullChat = (id: string) => `Full chat: zoom("${id}")`;
 export const withoutFullChat = (text: string) => text.replace(/\n\nFull chat: zoom\("[\w-]+"\)$/gm, '');
 const TASK = `\n</chat>${TASK_HEADER}`;
-/** Tool calls and results in a run transcript keep their head and tail, so a page holds many steps. */
-const STEP = 1_000;
-/** A subagent's chat for zoom, as `kind|text` lines: its task without the memory view, replies, tool calls and results, and what it was told. */
-export function runTranscript(messages: readonly AgentMessage[]) {
+/** Tool calls and results keep their head and tail in the overview. */
+export const RUN_ITEM_PAGE = 1_000;
+interface TranscriptLine { kind: 'user' | 'talk' | 'tool' | 'echo'; text: string; item?: number }
+/** Tool items are numbered in retained transcript order, independently of provider call IDs. */
+function* transcriptLines(messages: readonly AgentMessage[]): Generator<TranscriptLine> {
   const task = messages.find(message => message.role === 'user');
-  return messages.flatMap(message => {
+  let item = 0;
+  for (const message of messages) {
     if (message.role === 'user') {
       // Only the task prompt holds the memory view: core's childInput({ view, task }) (src/agents.ts), the view, TASK_HEADER and the task.
       const text = textContent(message.content, false), at = text.indexOf(TASK);
-      return [`user|${message === task && isView(text) && at >= 0 ? text.slice(at + '\n</chat>\n\n'.length) : text}`];
+      yield { kind: 'user', text: message === task && isView(text) && at >= 0 ? text.slice(at + '\n</chat>\n\n'.length) : text };
+    } else if (message.role === 'toolResult') {
+      yield { kind: 'echo', text: `${message.toolName}: ${textContent(message.content, false)}`, item: ++item };
+    } else if (message.role === 'assistant') {
+      for (const block of message.content) {
+        if (block.type === 'text' && block.text.trim()) yield { kind: 'talk', text: block.text };
+        else if (block.type === 'toolCall') yield { kind: 'tool', text: `${block.name} ${JSON.stringify(block.arguments)}`, item: ++item };
+      }
+      if (message.stopReason === 'error' || message.stopReason === 'aborted')
+        yield { kind: 'echo', text: `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}` };
     }
-    if (message.role === 'toolResult') return [`echo|${cap(`${message.toolName}: ${textContent(message.content, false)}`, STEP)}`];
-    if (message.role !== 'assistant') return [];
-    return [...message.content.flatMap(block => block.type === 'text' && block.text.trim() ? [`talk|${block.text}`]
-      : block.type === 'toolCall' ? [`tool|${cap(`${block.name} ${JSON.stringify(block.arguments)}`, STEP)}`] : []),
-    ...message.stopReason === 'error' || message.stopReason === 'aborted' ? [`echo|Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`] : []];
-  }).join('\n');
+  }
+}
+/** The usual clipped overview, with an explicit read call where a tool item's middle was omitted. */
+export function runTranscript(messages: readonly AgentMessage[], id?: string) {
+  const lines: string[] = [];
+  for (const { kind, text, item } of transcriptLines(messages)) {
+    const more = item && text.length > RUN_ITEM_PAGE ? id === undefined ? `\n[full text: item ${item}]`
+      : `\n[Read more: zoom(${JSON.stringify({ id, item, offset: 0, limit: RUN_ITEM_PAGE })})]` : '';
+    lines.push(`${kind}|${item ? cap(text, RUN_ITEM_PAGE) : text}${more}`);
+  }
+  return lines.join('\n');
+}
+/** One original tool call or result; the caller pages it before returning it to the model. */
+export function runTranscriptItem(messages: readonly AgentMessage[], item: number) {
+  if (!Number.isSafeInteger(item) || item < 1) throw new Error('item must be a positive integer from the run transcript.');
+  for (const line of transcriptLines(messages)) if (line.item === item) return `${line.kind}|${line.text}`;
+  throw new Error(`No tool item ${item} in this run. Read its transcript for available items.`);
 }
 
 /** The status line naming running agents by id and the first words of their title or task; none while nothing runs. */
