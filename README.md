@@ -37,11 +37,21 @@ The footer shows the active profile. Memory follows the profile across directori
 
 ### Headless and RPC
 
-- `pi -p`, `--mode rpc` and other extensions' runners need `--optchat-profile work`; `OPTCHAT_PROFILE` and a lone profile apply to interactive Pi only. Without it (and without a saved profile in a resumed session) the run is plain Pi with no OptChat memory.
+- `pi -p`, `--mode rpc` and other extensions' runners can use an existing project profile, `--optchat-profile work`, or a saved session binding. `OPTCHAT_PROFILE` and a lone global profile apply to interactive Pi only. Without a selected profile, the run is plain Pi with no OptChat memory.
 - In hosts that create sessions themselves (Pi Web), send `/optchat profile work` as the first message of a new session.
 - If the profile is open in another Pi, `pi -p` joins it as a connected window by default, and so does an RPC session (one T3 Code thread or OptChat app window per process), with its agent running in its own process; `--optchat-connect auto|join|off` controls this.
 
 Details, errors and join rules: [docs/connected-windows.md](docs/connected-windows.md#headless-and-rpc-runs).
+
+### Project profiles
+
+Inside a Git repository, `/optchat profile` offers **+ Create project profile**. It creates one memory at the Git worktree root's `.pi/optchat/` and switches to it in a fresh session. The footer uses the worktree directory's name; the picker marks it **(this project)** to distinguish it from a same-named global profile.
+
+Subsequent fresh launches anywhere in that worktree open the project profile automatically, without a picker. This includes print and RPC modes. Separate worktrees and nested repositories have separate project memories. Startup never creates a profile. Outside Git, or when no project profile exists, normal global-profile selection applies.
+
+Use `/optchat profile` to switch to a global profile for a session. `/new` keeps your selection, and resumed sessions retain their original profile directory even when launched elsewhere. The next fresh launch in the project loads its project profile again. `--optchat-profile` still explicitly selects a named global profile; there is no project enable/disable setting. `OPTCHAT_HOME` continues to control global storage and does not move project memory.
+
+Creation adds `/.pi/optchat/` to Git's local exclude file when needed, without modifying tracked source files. Tracked profile data or conflicting `.gitignore` rules must be resolved before the profile opens. `.pi`, `.pi/optchat`, and any checkpoint `.git` must be real directories. A missing, invalid or busy automatically selected project profile reports an error instead of silently selecting another memory or opening a picker. To connect to a busy project, select it explicitly in `/optchat profile`: the usual connection options appear, including **Back** to choose another profile. Print/RPC runs retain their existing `--optchat-connect` join behavior.
 
 ## How it works
 
