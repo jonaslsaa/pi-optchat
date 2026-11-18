@@ -51,7 +51,7 @@ async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?:
       return stream;
     },
   });
-  const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+  const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 1 }, cacheWarming: 'off', retry: { enabled: false } });
   const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
     noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat, ...options.later ? [options.later] : []] });
   await loader.reload();
@@ -124,6 +124,28 @@ for (const mode of ['print', 'rpc'] as const) for (const flag of [undefined, 'wo
         assert.deepEqual(pi.errors, []);
       } finally { await pi.close(); }
     });
+test('Pi compaction runs without an OptChat profile and remains blocked with an active profile', async () => {
+  for (const mode of ['print', 'rpc'] as const) for (const flag of [undefined, 'work']) {
+    const pi = await headless(mode, { flag });
+    try {
+      await pi.ask('Remember the first step.');
+      await pi.ask('Continue with the next step.');
+      if (flag) {
+        await assert.rejects(pi.session.compact(), /Compaction cancelled/);
+        assert.match(pi.notes.at(-1) ?? '', /OptChat manages history/);
+        assert.ok(!pi.session.sessionManager.getEntries().some(e => e.type === 'compaction'));
+      } else {
+        const result = await pi.session.compact();
+        assert.ok(result.summary.length > 0);
+        assert.equal(pi.session.sessionManager.getEntries().filter(e => e.type === 'compaction').length, 1, `${mode}: Pi saved its summary`);
+        assert.ok(!pi.notes.some(note => note.includes('Pi compaction is disabled')));
+        assert.equal(await pi.ask('Continue after compaction.'), 'OK to: Continue after compaction.');
+        assert.deepEqual(pi.bindings(), [], 'compaction did not activate OptChat');
+      }
+      assert.deepEqual(pi.errors, []);
+    } finally { await pi.close(); }
+  }
+});
 
 test('the main chat\'s answers save the subscription\'s limits in its profile, and a refused one is noted there; plain Pi saves none', async () => {
   const headers = { 'anthropic-ratelimit-unified-5h-utilization': '0.62', 'anthropic-ratelimit-unified-5h-reset': '1794846600', 'anthropic-ratelimit-unified-5h-status': 'allowed' };
