@@ -132,6 +132,7 @@ export default function optchat(pi: ExtensionAPI) {
   const isPendingReport = (s: unknown): s is string | { text: string; count?: number; quiet?: boolean } =>
     typeof s === 'string' || record(s) && typeof s.text === 'string' && (s.count === undefined || typeof s.count === 'number') && (s.quiet === undefined || typeof s.quiet === 'boolean');
   const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+  pi.registerFlag('no-optchat', { description: 'Run plain Pi without OptChat memory, profile selection or connections', type: 'boolean', default: false });
   pi.registerFlag('optchat-profile', { description: 'Named OptChat profile (overrides project autoload in new sessions)', type: 'string' });
   pi.registerFlag('optchat-connect', { description: 'pi -p or RPC on a profile open in another Pi: auto (join it if busy, default), join (only join), off (error if busy)', type: 'string', default: 'auto' });
   pi.registerFlag('optchat-agent', { description: 'Open an existing background agent by exact ID in this terminal (TUI only; requires a running profile owner)', type: 'string' });
@@ -388,8 +389,18 @@ export default function optchat(pi: ExtensionAPI) {
       throw error;
     }
   };
+  const plainPi = (ctx: ExtensionContext) => {
+    fault = undefined;
+    const tools = pi.getActiveTools(), memoryTools = ['zoom', 'date', 'search', 'spawn', 'models', 'tell'];
+    suspendedTools = [...new Set([...suspendedTools, ...tools.filter(tool => memoryTools.includes(tool))])];
+    pi.setActiveTools(tools.filter(tool => !memoryTools.includes(tool)));
+    status(ctx);
+  };
   pi.on('session_start', async (event, ctx) => {
     stopping = false;
+    // A process-wide opt-out also bypasses discovery, saved bindings and connection flags.
+    // Do not rewrite a resumed conversation's binding merely because this launch disabled OptChat.
+    if (pi.getFlag('no-optchat') === true) { plainPi(ctx); return; }
     const entries = ctx.sessionManager.getEntries();
     let boundName: ProfileChoice | undefined;
     // A session with conversation in it belongs to its profile. One that is only bound (a fresh `/optchat profile` session) may still pick another.
@@ -416,24 +427,23 @@ export default function optchat(pi: ExtensionAPI) {
       }
       const automatic = boundName !== undefined ? boundName : typeof flag === 'string' ? flag : defaultProfile(ctx, event);
       // /optchat profile creates an empty, pre-bound session. Its explicit choice may offer Connect/Back;
-      // automatic project startup (including /new and resume) must not open an unsolicited dialog.
-      const picked = event.reason === 'new' && boundName !== undefined && !settled;
+      // a busy automatic choice first offers the picker, unless the conversation already has messages.
+      let picked = event.reason === 'new' && boundName !== undefined && !settled;
       let name = automatic !== undefined ? automatic : await chooseProfile(ctx);
       if (connectFor(ctx) === 'join' && !name) { process.exitCode = 1; throw new Error('--optchat-connect join needs a profile: pass --optchat-profile'); }
       for (;;) {
         if (!name) {
           if (name === null && boundName !== null) pi.appendEntry(binding, profileBinding(null));
-          fault = undefined;
-          const tools = pi.getActiveTools(), memoryTools = ['zoom', 'date', 'search', 'spawn', 'models', 'tell'];
-          suspendedTools = [...new Set([...suspendedTools, ...tools.filter(tool => memoryTools.includes(tool))])];
-          pi.setActiveTools(tools.filter(tool => !memoryTools.includes(tool)));
-          status(ctx); return;
+          plainPi(ctx); return;
         }
         try { await openOrJoin(name, ctx); break; }
         catch (error) {
           if (!(error instanceof ProfileBusyError) || ctx.mode !== 'tui') throw error;
-          if (automatic !== undefined && !picked && (typeof automatic === 'object' || boundName === undefined && typeof flag !== 'string'))
-            throw new Error(`${error.message}\nUse /optchat profile to connect or choose another profile.`);
+          if (automatic !== undefined && !picked && (typeof automatic === 'object' || boundName === undefined && typeof flag !== 'string')) {
+            if (settled) throw new Error(`${error.message}\nUse /optchat profile to connect or choose another profile.`);
+            name = await chooseProfile(ctx); picked = true;
+            continue;
+          }
           // A resumed conversation already belongs to this profile, so another profile needs a new session (/optchat profile).
           // Older owners have no listing protocol. Keep their existing Connect/Back menu rather than failing startup.
           const listed = settled ? undefined : await listAttachableAgents(resolveProfile(name).dir).catch(() => undefined);
@@ -795,6 +805,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (failure) throw failure;
   };
   const command = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+    if (pi.getFlag('no-optchat') === true) { ctx.ui.notify('OptChat is disabled by --no-optchat. Restart Pi without that flag to use it.', 'info'); return; }
     if (remote && !remote.ended || rpcWindow) { ctx.ui.notify('Manage this profile in its original window. Here use /tell-main or /complete.', 'info'); return; }
     if (importing) throw new Error('Close the import dialog before changing profile settings.');
     let action = args.trim();

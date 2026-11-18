@@ -31,7 +31,7 @@ function global(name: string) {
   createProfile(name); const dir = profilePath(name);
   saveConfig(dir, { ...loadConfig(dir), compactor: fixture, subagent: fixture });
 }
-async function start(dir: string, options: { mode?: 'tui' | 'rpc' | 'print'; bound?: unknown; flag?: string; connect?: string; agent?: string; ui?: Partial<ExtensionUIContext>; manager?: SessionManager; lifecycle?: boolean; fromFile?: boolean } = {}) {
+async function start(dir: string, options: { mode?: 'tui' | 'rpc' | 'print'; bound?: unknown; flag?: string; disabled?: boolean; connect?: string; agent?: string; ui?: Partial<ExtensionUIContext>; manager?: SessionManager; lifecycle?: boolean; fromFile?: boolean } = {}) {
   const state = sandbox(), sent: Context[] = [], notes: string[] = [], errors: string[] = [], picks: string[][] = [], statuses: string[] = [];
   const runtime = await ModelRuntime.create({ authPath: join(state, 'auth.json'), modelsPath: null, modelsStorePath: join(state, 'models.json'), refreshOnCreate: false });
   runtime.registerProvider('fixture', {
@@ -52,6 +52,7 @@ async function start(dir: string, options: { mode?: 'tui' | 'rpc' | 'print'; bou
   if (options.bound !== undefined) manager.appendCustomEntry('optchat.profile', options.bound);
   const { session } = await createAgentSession({ cwd: dir, modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date'] });
   if (options.flag !== undefined) session.extensionRunner.setFlagValue('optchat-profile', options.flag);
+  if (options.disabled !== undefined) session.extensionRunner.setFlagValue('no-optchat', options.disabled);
   if (options.connect !== undefined) session.extensionRunner.setFlagValue('optchat-connect', options.connect);
   if (options.agent !== undefined) session.extensionRunner.setFlagValue('optchat-agent', options.agent);
   let host: AgentSessionRuntime | undefined;
@@ -60,6 +61,8 @@ async function start(dir: string, options: { mode?: 'tui' | 'rpc' | 'print'; bou
       const resources = new DefaultResourceLoader({ cwd: target.cwd, agentDir: target.agentDir, settingsManager, noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
       await resources.reload();
       const created = await createAgentSession({ ...target, modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: resources, settingsManager, tools: ['zoom', 'date'] });
+      // The CLI reapplies its launch flags whenever it builds a session runtime.
+      if (options.disabled !== undefined) created.session.extensionRunner.setFlagValue('no-optchat', options.disabled);
       return { ...created, services: { cwd: target.cwd, agentDir: target.agentDir, modelRuntime: runtime, resourceLoader: resources, settingsManager, diagnostics: [] }, diagnostics: [] };
     };
     host = new AgentSessionRuntime(session, { cwd: dir, agentDir: join(state, 'agent'), modelRuntime: runtime, resourceLoader: loader, settingsManager, diagnostics: [] }, make);
@@ -143,6 +146,7 @@ test('an existing project autoloads without a picker in TUI, print and RPC, inde
       assert.ok(pi.statuses.some(s => s.startsWith(`OptChat: ${resolveProfile(ref).name} ·`)));
       await pi.session.prompt(`remember ${mode}`);
       assert.match(JSON.stringify(pi.sent), /PROJECT-INSTRUCTIONS/);
+      assert.match(JSON.stringify(pi.sent), /pi --no-optchat/);
       assert.equal(process.env.OPTCHAT_HOME, home);
     } finally { await pi.close(); }
   }
@@ -192,21 +196,27 @@ test('saved bindings and the explicit profile flag take precedence; project resu
   finally { await resumed.close(); }
 });
 
-test('busy or invalid project profiles do not open a picker or silently use a global profile', async () => {
+test('a busy automatic project opens the picker and Escape keeps plain Pi through new sessions', async () => {
   const dir = repository(), ref = project(dir);
   const owner = await start(dir, { mode: 'tui' });
   try {
     for (const bound of [undefined, ref]) {
       const busy = await start(dir, { mode: 'tui', bound, lifecycle: true });
       try {
-        assert.deepEqual(busy.picks, []); assert.match(busy.notes.join('\n'), /Profile already running/);
-        assert.match(busy.notes.join('\n'), /Use \/optchat profile to connect or choose another profile/);
-        await busy.session.prompt('must not answer'); assert.deepEqual(busy.sent, []);
+        assert.equal(busy.picks.length, 1); assert.deepEqual(busy.notes, []);
+        assert.deepEqual(busy.bindings().at(-1), { kind: 'none' });
+        await busy.session.prompt('Plain Pi after Escape'); assert.equal(busy.sent.length, 1);
+        assert.doesNotMatch(JSON.stringify(busy.sent), /You are OptChat/);
         await busy.host!.newSession();
-        assert.deepEqual(busy.picks, [], '/new does not turn autoload into an explicit picker selection');
+        assert.equal(busy.picks.length, 1, '/new keeps the explicit none choice');
+        assert.deepEqual(busy.bindings(), [{ kind: 'none' }]);
       } finally { await busy.close(); }
     }
   } finally { await owner.close(); }
+});
+
+test('invalid project profiles still report an error without switching memories', async () => {
+  const dir = repository(); project(dir);
   writeFileSync(join(dir, '.pi', 'optchat', 'config.json'), 'invalid');
   const invalid = await start(dir, { mode: 'tui' });
   try {
@@ -215,7 +225,69 @@ test('busy or invalid project profiles do not open a picker or silently use a gl
   } finally { await invalid.close(); }
 });
 
-test('explicitly picking a busy project offers the existing connect, back and cancel flows', async () => {
+test('a busy resumed project with messages keeps its binding instead of offering another memory', async () => {
+  const dir = repository(), ref = project(dir), original = await start(dir);
+  let file: string;
+  try { await original.session.prompt('Remember this project'); file = original.manager.getSessionFile()!; }
+  finally { await original.close(); }
+  const owner = await start(dir);
+  const resumed = await start(dir, { mode: 'tui', manager: SessionManager.open(file!) });
+  try {
+    assert.deepEqual(resumed.picks, []); assert.deepEqual(resumed.bindings(), [ref]);
+    assert.match(resumed.notes.join('\n'), /Use \/optchat profile to connect or choose another profile/);
+    await resumed.session.prompt('Do not switch my memory'); assert.deepEqual(resumed.sent, []);
+  } finally { await resumed.close(); await owner.close(); }
+});
+
+test('--no-optchat bypasses a busy project, bindings and explicit flags in every mode', async () => {
+  const dir = repository(), ref = project(dir), owner = await start(dir);
+  const firstOwner = await profileOwner(ref.dir);
+  try {
+    for (const mode of ['tui', 'print', 'rpc'] as const) {
+      const pi = await start(dir, { mode, disabled: true, bound: ref, flag: 'missing', connect: 'join', agent: 'unused', lifecycle: true });
+      try {
+        assert.deepEqual(pi.picks, []); assert.deepEqual(pi.errors, []); assert.deepEqual(pi.notes, []);
+        assert.deepEqual(pi.statuses, []); assert.deepEqual(pi.session.getActiveToolNames(), []);
+        assert.deepEqual(pi.bindings(), [ref], 'disabling this process does not rewrite a saved binding');
+        await pi.session.prompt('Run independently');
+        assert.equal(pi.sent.length, 1); assert.doesNotMatch(JSON.stringify(pi.sent), /You are OptChat|pi --no-optchat/);
+        assert.equal(await pi.session.extensionRunner.emitCacheWarmingDecision({ type: 'cache_warming_decision', action: 'warm',
+          warmCost: 0.01, missCost: 0.1, continuationProbability: 0.5 }), 'warm');
+        await pi.session.compact();
+        assert.ok(pi.manager.getEntries().some(e => e.type === 'compaction'));
+        await pi.session.prompt('/optchat profile');
+        assert.match(pi.notes.at(-1)!, /disabled by --no-optchat/);
+        assert.deepEqual(pi.picks, []);
+        await pi.host!.newSession();
+        await pi.session.prompt('Still independent');
+        assert.doesNotMatch(JSON.stringify(pi.sent), /You are OptChat/);
+        assert.deepEqual(pi.errors, []);
+        assert.deepEqual(await profileOwner(ref.dir), firstOwner);
+        assert.deepEqual(owner.sent, [], 'the child never sends a task to the profile owner');
+      } finally { await pi.close(); }
+    }
+  } finally { await owner.close(); }
+});
+
+test('--no-optchat skips invalid project discovery and saved defaults without saving a preference', async () => {
+  const dir = repository(), ref = project(dir);
+  writeFileSync(join(ref.dir, 'config.json'), 'invalid');
+  const preference = join(process.env.OPTCHAT_HOME!, 'default-profile');
+  mkdirSync(process.env.OPTCHAT_HOME!, { recursive: true });
+  writeFileSync(preference, '{invalid');
+  try {
+    const pi = await start(dir, { mode: 'tui', disabled: true });
+    try {
+      assert.deepEqual(pi.picks, []); assert.deepEqual(pi.errors, []); assert.deepEqual(pi.notes, []);
+      assert.deepEqual(pi.bindings(), []);
+      await pi.session.prompt('Plain Pi'); assert.equal(pi.sent.length, 1);
+      assert.equal(readFileSync(preference, 'utf8'), '{invalid');
+      assert.equal(readFileSync(join(ref.dir, 'config.json'), 'utf8'), 'invalid');
+    } finally { await pi.close(); }
+  } finally { saveDefaultProfile(null); }
+});
+
+test('the busy startup picker offers the existing connect, back and cancel flows', async () => {
   const dir = repository(), ref = project(dir), name = resolveProfile(ref).name;
   global('busy-fallback');
   const owner = await start(dir, { mode: 'tui' });
@@ -228,9 +300,6 @@ test('explicitly picking a busy project offers the existing connect, back and ca
         asked.push({ title: title.split('\n')[0], choices: options }); return choices.shift();
       } } });
       try {
-        assert.equal(asked.length, 0, 'startup does not prompt before the user asks to switch');
-        const initialNotes = pi.notes.length;
-        await pi.session.prompt('/optchat profile');
         assert.deepEqual(asked.slice(0, 2).map(a => a.title), ['OptChat profile', `${name} is open in another window`]);
         assert.deepEqual(asked[1].choices, [connect, 'Back']);
         assert.deepEqual(pi.errors, []);
@@ -240,18 +309,18 @@ test('explicitly picking a busy project offers the existing connect, back and ca
           assert.deepEqual(pi.bindings().at(-1), { name: 'busy-fallback' });
           assert.ok(pi.statuses.some(s => s.startsWith('OptChat: busy-fallback ·')));
         } else {
-          assert.deepEqual(pi.bindings().at(-1), ref);
           if (action === connect) {
+            assert.deepEqual(pi.bindings().at(-1), ref);
             assert.ok(pi.statuses.some(s => s.includes('connected window · send a task to start')));
             assert.equal((await pi.session.extensionRunner.emit({ type: 'session_before_switch', reason: 'new' }))?.cancel, true);
             assert.deepEqual(owner.sent, [], 'connecting does not wake the owning agent');
           } else {
-            assert.match(pi.notes.slice(initialNotes).join('\n'), /Profile already running/);
+            assert.match(pi.notes.join('\n'), /Profile already running/);
             await pi.session.prompt('must not fall back to another memory');
             assert.deepEqual(pi.sent, []);
           }
         }
-        if (action !== undefined) assert.ok(!pi.notes.slice(initialNotes).some(n => n.includes('Profile already running')));
+        if (action !== undefined) assert.ok(!pi.notes.some(n => n.includes('Profile already running')));
       } finally { await pi.close(); }
     }
   } finally { await owner.close(); }
@@ -305,8 +374,7 @@ test('a second Pi loads the extension from disk, sees the busy project in its pi
   }, options) } });
   try {
     assert.deepEqual(owner.picks, []); assert.deepEqual(second.picks, []);
-    assert.match(second.notes.join('\n'), /Profile already running/);
-    await second.session.prompt('/optchat profile');
+    assert.deepEqual(second.notes, []);
     assert.ok(screen.includes(`${name} (this project) (in-use)`));
     assert.deepEqual(second.bindings(), [{ kind: 'none' }]);
     await second.session.prompt('Plain Pi still answers while the project is busy');
@@ -425,7 +493,7 @@ test('project defaults saved by older builds are ignored outside their worktree,
   } finally { saveDefaultProfile(null); }
 });
 
-test('a busy saved default stays quiet at startup and marks only the other instance as in-use', async () => {
+test('a busy saved default opens the picker and marks only the other instance as in-use', async () => {
   const dir = sandbox(); global('busy-default'); saveDefaultProfile('busy-default');
   let screen = '';
   const inspect: ExtensionUIContext['custom'] = async (factory, options) => profilePickerUI(async () => undefined)(async (...args) => {
@@ -434,9 +502,7 @@ test('a busy saved default stays quiet at startup and marks only the other insta
   const owner = await start(dir, { mode: 'tui', ui: { custom: inspect } });
   const second = await start(dir, { mode: 'tui', lifecycle: true, ui: { custom: inspect } });
   try {
-    assert.deepEqual(second.picks, []); assert.equal(screen, '');
-    assert.match(second.notes.join('\n'), /Profile already running/);
-    await second.session.prompt('/optchat profile');
+    assert.deepEqual(second.notes, []);
     assert.match(screen, /busy-default \(in-use\) \(default\)/);
     assert.deepEqual(second.bindings(), [{ kind: 'none' }], 'Escape after a failed autoload selects plain Pi');
     await second.session.prompt('Plain Pi after leaving the busy profile picker');
