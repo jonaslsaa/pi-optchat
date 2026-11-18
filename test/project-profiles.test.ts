@@ -404,6 +404,7 @@ test('a global default loads quietly outside projects; a project overrides it bu
 test('project defaults saved by older builds are ignored outside their worktree, without deleting project data', async () => {
   const dir = repository(), ref = project(dir);
   const path = join(process.env.OPTCHAT_HOME!, 'default-profile'), saved = `${JSON.stringify(ref)}\n`;
+  mkdirSync(process.env.OPTCHAT_HOME!, { recursive: true });
   writeFileSync(path, saved);
   try {
     assert.equal(readDefaultProfile(), undefined);
