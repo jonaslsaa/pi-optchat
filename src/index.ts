@@ -38,6 +38,7 @@ import { openConnectedWindow, registerConnectedRenderer } from './connected-wind
 import { openRemoteWindow, ROLE_STATUS, type Role } from './rpc-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
+import { pickProfile, preferredProfile } from './profile-picker.ts';
 import { showModelPicker, showSettings } from './settings-page.ts';
 import { showMenu } from './menu.ts';
 import { createProjectProfile, discoverProjectProfile, parseProfileBinding, prepareProjectProfile, profileBinding, projectLocation, resolveProfile, sameProfile, type ProfileSelection } from './project-profiles.ts';
@@ -260,7 +261,7 @@ export default function optchat(pi: ExtensionAPI) {
     const project = projectLocation(ctx.cwd), existing = project && discoverProjectProfile(ctx.cwd);
     const projectLabel = project ? existing ? `${resolveProfile(project).name} (this project)` : '+ Create project profile' : undefined;
     if (projectLabel) names.push(projectLabel);
-    const selected = await ctx.ui.select('OptChat profile', [...names, '+ Create profile']);
+    const selected = await pickProfile(ctx, [...names, '+ Create profile']);
     if (project && selected === projectLabel) return existing ?? createProjectProfile(ctx.cwd);
     if (selected !== '+ Create profile') return selected;
     const name = (await ctx.ui.input('New profile name', 'work or personal'))?.trim();
@@ -285,7 +286,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (names.includes(env)) return env;
       ctx.ui.notify(`OPTCHAT_PROFILE: no profile named ${env}.`, 'warning');
     }
-    return names.length === 1 ? names[0] : undefined;
+    return preferredProfile(ctx) ?? (names.length === 1 ? names[0] : undefined);
   };
   const openProfile = async (profile: ProfileSelection, ctx: ExtensionContext) => {
     prepareProjectProfile(profile);
