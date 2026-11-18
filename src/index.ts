@@ -301,7 +301,8 @@ export default function optchat(pi: ExtensionAPI) {
       if (names.includes(env)) return env;
       ctx.ui.notify(`OPTCHAT_PROFILE: no profile named ${env}.`, 'warning');
     }
-    return preferredProfile(ctx);
+    // No saved default asks the user. Only an explicit picker/session choice of none is plain Pi.
+    return preferredProfile(ctx) ?? undefined;
   };
   const openProfile = async (profile: ProfileSelection, ctx: ExtensionContext) => {
     prepareProjectProfile(profile);

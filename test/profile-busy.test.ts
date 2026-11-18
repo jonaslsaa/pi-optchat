@@ -245,11 +245,14 @@ async function withHome(prefix: string, body: (dir: string, sessions: Session[])
   }
 }
 
-test('none is the default even when only one global profile exists', () => withHome('optchat-solo-', async (dir, sessions) => {
-  createProfile('solo');
-  const { session, titles, errors } = await start(dir, noPicker); sessions.push(session);
-  assert.deepEqual(errors, []);
-  assert.deepEqual(titles, []);
+for (const names of [[], ['solo'], ['work', 'personal']]) test(`an unset default opens the startup picker with ${names.length} global profiles`, () => withHome('optchat-unset-', async (dir, sessions) => {
+  for (const name of names) createProfile(name);
+  const asked: string[][] = [];
+  const { session, titles, errors, manager } = await start(dir, { select: async (_title, choices) => { asked.push(choices); return 'none'; } }); sessions.push(session);
+  assert.deepEqual(errors, []); assert.deepEqual(titles, []);
+  assert.equal(asked.length, 1); assert.equal(asked[0].at(-1), 'none');
+  assert.deepEqual(manager.getEntries().flatMap(e => e.type === 'custom' && e.customType === 'optchat.profile' ? [e.data] : []), [{ kind: 'none' }]);
+  assert.deepEqual(session.getActiveToolNames(), [], 'selecting none disables memory tools');
 }));
 
 test('/new keeps the profile of the session it replaces', () => withHome('optchat-new-', async (dir, sessions) => {
@@ -263,7 +266,7 @@ test('/new keeps the profile of the session it replaces', () => withHome('optcha
   assert.equal(titles[0], 'π work');
 }));
 
-test('OPTCHAT_PROFILE picks among several profiles, and a missing one warns and falls back to none', () => withHome('optchat-env-', async (dir, sessions) => {
+test('OPTCHAT_PROFILE picks among several profiles, and a missing one warns and falls back to the picker', () => withHome('optchat-env-', async (dir, sessions) => {
   createProfile('work'); createProfile('personal');
   process.env.OPTCHAT_PROFILE = 'personal';
   const chosen = await start(dir, noPicker); sessions.push(chosen.session);
@@ -276,8 +279,8 @@ test('OPTCHAT_PROFILE picks among several profiles, and a missing one warns and 
     select: async title => { asked.push(title); return 'work'; } });
   sessions.push(fallback.session);
   assert.deepEqual(warnings, ['OPTCHAT_PROFILE: no profile named nope.']);
-  assert.deepEqual(asked, []);
-  assert.deepEqual(fallback.titles, []);
+  assert.deepEqual(asked, ['OptChat profile']);
+  assert.equal(fallback.titles[0], 'π work');
 }));
 
 test('Back from an explicitly chosen busy profile shows the picker instead of retrying it', () => withHome('optchat-lone-busy-', async (dir, sessions) => {
@@ -305,6 +308,10 @@ test('the picker saves and clears a default without switching the current conver
   await opened.session.prompt('/optchat profile');
   assert.equal(readDefaultProfile(), undefined);
   assert.deepEqual(opened.errors, []);
+  let asked = 0;
+  const fresh = await start(dir, { select: async () => { asked++; return 'none'; } }); sessions.push(fresh.session);
+  assert.equal(asked, 1, 'clearing the saved default restores the startup picker');
+  assert.deepEqual(fresh.errors, []);
 }));
 
 test('a saved default opens fresh interactive sessions, below explicit choices and never in headless runs', () => withHome('oc-default-', async (dir, sessions) => {
@@ -326,10 +333,12 @@ test('a saved default opens fresh interactive sessions, below explicit choices a
   }
 }));
 
-test('an unavailable saved default falls back to none and invalid choices preserve the preference', () => withHome('oc-default-', async (dir, sessions) => {
+test('an unavailable saved default opens the picker and invalid choices preserve the preference', () => withHome('oc-default-', async (dir, sessions) => {
   createProfile('work'); createProfile('personal');
   writeFileSync(join(process.env.OPTCHAT_HOME!, 'default-profile'), 'removed-profile\n');
-  const selected = await start(dir, noPicker); sessions.push(selected.session);
+  let asked = 0;
+  const selected = await start(dir, { select: async () => { asked++; return 'none'; } }); sessions.push(selected.session);
+  assert.equal(asked, 1);
   assert.deepEqual(selected.titles, []);
   assert.throws(() => saveDefaultProfile('missing'), /No profile/);
   assert.equal(readDefaultProfile(), 'removed-profile', 'a failed selection does not replace the preference');

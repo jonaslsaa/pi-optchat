@@ -33,11 +33,11 @@ To uninstall, run `pi remove git:github.com/jonaslsaa/pi-optchat`. Profile data 
 2. Run `/optchat profile`, choose **+ Create profile**, and name it, for example `work`.
 3. Chat normally.
 
-The footer shows the active profile. Memory follows the profile across directories and Pi sessions. Resumed sessions restore their profile, and `/new` keeps the window's choice once its session has a message. Fresh launches open the project profile when one exists; otherwise interactive Pi uses `OPTCHAT_PROFILE` if set, then your saved default. Startup does not open the profile picker.
+The footer shows the active profile. Memory follows the profile across directories and Pi sessions. Resumed sessions restore their profile, and `/new` keeps the window's choice once its session has a message. Fresh launches open the project profile when one exists; otherwise interactive Pi uses `OPTCHAT_PROFILE` if set, then your saved default. When no project, environment override or saved default applies, startup opens the profile picker.
 
 Run `/optchat profile` to switch or create a profile. Highlight a profile and press uppercase **D** to make it the default for future interactive sessions; its name gains **(default)** immediately, without switching the current conversation. Profiles held by another Pi show **(in-use)**. There is no separate default settings menu. The preference is saved under `OPTCHAT_HOME` (normally `~/.optchat`) separately from the last-used profile.
 
-The bottom entry, **none**, is the initial default. Select it to start a fresh plain Pi session with native tools, prompts, caching and compaction, and no OptChat memory or footer. Press **D** on it to clear the saved default. An existing global profile named `none` is shown as **none (global)**. A lone global profile is not automatically selected unless you make it the default. Existing session bindings, `--optchat-profile`, `/new` continuation, and project profiles take precedence over the saved default.
+The bottom entry, **none**, initially carries **(default)** to indicate that no automatic default has been set. Startup still opens the picker in that case. Select it to start a fresh plain Pi session with native tools, prompts, caching and compaction, and no OptChat memory or footer. Press **D** on it to clear the saved default and restore the startup picker. An existing global profile named `none` is shown as **none (global)**. A lone global profile is not automatically selected unless you make it the default. Existing session bindings, `--optchat-profile`, `/new` continuation, and project profiles take precedence over the saved default.
 
 ### Headless and RPC
 
