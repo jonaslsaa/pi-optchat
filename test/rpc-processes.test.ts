@@ -1,14 +1,16 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
+import { promisify } from 'node:util';
+import { createProfile, loadConfig, profileOwner, profilePath, saveConfig } from '../src/profiles.ts';
 import { ROLE_STATUS } from '../src/rpc-window.ts';
 import { readRun } from '../src/run-record.ts';
 import { resumeCutOff } from '../src/window-client.ts';
+import { createProjectProfile } from '../src/project-profiles.ts';
 import { removeDir } from './support.ts';
 
 // Real `pi --mode rpc` processes, as T3 Code or the OptChat app start one per thread or window, on a throwaway profile.
@@ -26,11 +28,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(dirname(fileURLToPath(import.meta.resolve('@earendil-works/pi-coding-agent'))), 'bundle', 'cli.js');
 
 type Event = Record<string, unknown>;
-function pi(profile: string) {
-  const cwd = mkdtempSync(join(root, 'cwd-'));
+function pi(profile?: string, options: { cwd?: string; disabled?: boolean } = {}) {
+  const cwd = options.cwd ?? mkdtempSync(join(root, 'cwd-'));
   const child = spawn(process.execPath, [cli, '--mode', 'rpc', '-ne', '-ns', '-np', '-nc', '--no-themes', '--no-tools',
     '-e', join(here, '..', 'src', 'index.ts'), '-e', join(here, 'fixtures', 'rpc-provider.ts'),
-    '--provider', 'fixture', '--model', 'fixture', '--session-dir', join(cwd, 'sessions'), '--optchat-profile', profile], { cwd, env, stdio: ['pipe', 'pipe', 'inherit'] });
+    '--provider', 'fixture', '--model', 'fixture', '--session-dir', join(cwd, 'sessions'),
+    ...profile ? ['--optchat-profile', profile] : [], ...options.disabled ? ['--no-optchat'] : []], { cwd, env, stdio: ['pipe', 'pipe', 'inherit'] });
   started.push(child);
   // Sent at once: Pi reads commands only after session_start, so a host's first answer already follows the role.
   child.stdin!.write(`${JSON.stringify({ id: 'first', type: 'get_state' })}\n`);
@@ -58,6 +61,78 @@ async function until(what: string, predicate: () => boolean, ms = 30_000) {
   const deadline = Date.now() + ms;
   while (!predicate()) { if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`); await new Promise(resolve => setTimeout(resolve, 25)); }
 }
+
+test('real Pi subprocesses can disable OptChat in a busy project, including RPC new_session', { timeout: 120_000 }, async () => {
+  const cwd = mkdtempSync(join(root, 'project-'));
+  execFileSync('git', ['init', '-q', cwd]);
+  const profile = createProjectProfile(cwd);
+  saveConfig(profile.dir, { ...loadConfig(profile.dir), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' }, subagent: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+  const owner = pi(undefined, { cwd });
+  let plain: ReturnType<typeof pi> | undefined;
+  try {
+    await until('the project owner', () => owner.role()?.role === 'owner');
+    const printing = promisify(execFile)(process.execPath, [cli, '--no-optchat', '-p', '-ne', '-ns', '-np', '-nc', '--no-themes', '--no-tools',
+      '-e', join(here, '..', 'src', 'index.ts'), '-e', join(here, 'fixtures', 'rpc-provider.ts'),
+      '--provider', 'fixture', '--model', 'fixture', '--no-session', 'Independent print task'], { cwd, env, timeout: 45_000 });
+    printing.child.stdin?.end(); // Print mode reads redirected stdin before submitting its prompt.
+    const printed = await printing;
+    assert.match(printed.stdout, /Reply: Independent print task/);
+    assert.doesNotMatch(printed.stderr, /OptChat|Profile already running/);
+    plain = pi(undefined, { cwd, disabled: true });
+    const child = plain;
+    await until('the plain RPC startup', () => child.events.some(e => e.type === 'response' && e.id === 'first'));
+    assert.equal(child.role(), undefined);
+    child.prompt('Independent RPC task');
+    await until('the plain RPC reply', () => child.text().includes('Reply: Independent RPC task') && child.events.some(e => e.type === 'agent_end'));
+    child.child.stdin!.write(`${JSON.stringify({ id: 'next', type: 'new_session' })}\n`);
+    await until('the next plain session', () => child.events.some(e => e.type === 'response' && e.id === 'next' && e.success));
+    child.prompt('Still independent');
+    await until('the next plain reply', () => child.text().includes('Reply: Still independent'));
+    assert.equal(child.role(), undefined);
+    assert.doesNotMatch(child.text(), /extension_error|Profile already running/);
+    assert.doesNotMatch(owner.text(), /Independent|Still independent|connected conversation/);
+  } finally {
+    for (const process of [plain?.child, owner.child]) if (process) {
+      process.kill('SIGKILL');
+      await until('subprocess exit', () => process.exitCode !== null || process.signalCode !== null);
+    }
+  }
+});
+
+test('an orchestrator and two nested projects concurrently own separate profiles and memories', { timeout: 120_000 }, async () => {
+  const orchestrator = mkdtempSync(join(root, 'orch-'));
+  const projects = [orchestrator, join(orchestrator, 'first'), join(orchestrator, 'second')].map((cwd, i) => {
+    mkdirSync(cwd, { recursive: true }); execFileSync('git', ['init', '-q', cwd]);
+    const profile = createProjectProfile(cwd);
+    saveConfig(profile.dir, { ...loadConfig(profile.dir), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' }, subagent: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    return { cwd, profile, task: `Only project ${i} remembers this task` };
+  });
+  const running: ReturnType<typeof pi>[] = [];
+  try {
+    running.push(pi(undefined, { cwd: orchestrator }));
+    await until('the orchestrator owner', () => running[0].role()?.role === 'owner');
+    for (const project of projects.slice(1)) running.push(pi(undefined, { cwd: project.cwd }));
+    await until('both project owners', () => running.every(child => child.role()?.role === 'owner'));
+    for (const [i, child] of running.entries()) {
+      assert.equal((await profileOwner(projects[i].profile.dir))?.pid, child.child.pid, 'each process owns its own project profile');
+      child.prompt(projects[i].task);
+    }
+    await until('all project replies', () => running.every((child, i) => child.text().includes(`Reply: ${projects[i].task}`)
+      && child.events.some(e => e.type === 'agent_end')));
+    for (const [i, project] of projects.entries()) {
+      const main = join(project.profile.dir, 'main');
+      const memory = readdirSync(main).filter(file => file.endsWith('.jsonl')).map(file => readFileSync(join(main, file), 'utf8')).join('\n');
+      assert.ok(memory.includes(project.task), 'each project records its own conversation');
+      for (const other of projects.filter(other => other !== project)) assert.ok(!memory.includes(other.task), 'other projects do not leak into its memory');
+      assert.doesNotMatch(running[i].text(), /extension_error|Profile already running|connected conversation/);
+    }
+  } finally {
+    for (const { child } of running) {
+      child.kill('SIGKILL');
+      await until('project process exit', () => child.exitCode !== null || child.signalCode !== null);
+    }
+  }
+});
 
 test('two real pi --mode rpc processes on one profile: the second is a window, /complete and a hard kill both reach the owner', { timeout: 120_000 }, async () => {
   mkdirSync(env.OPTCHAT_HOME, { recursive: true });

@@ -50,7 +50,10 @@ export function memoryDirectory(dir: string): string {
   return path;
 }
 export function createProfile(name: string, home = dataHome()) {
-  const dir = profilePath(name, home);
+  createProfileDirectory(profilePath(name, home), name);
+}
+/** Initialize a new profile at an explicitly selected location. */
+export function createProfileDirectory(dir: string, name: string) {
   if (existsSync(dir)) throw new Error(`Profile already exists: ${name}`);
   mkdirSync(resolve(dir, '..'), { recursive: true, mode: 0o700 });
   // Claim the directory exclusively, so a competing creator cannot have its
@@ -157,10 +160,9 @@ function readOwner(path: string) {
 
 /** The Pi holding a profile. */
 export interface Owner { profile: string; pid: number; host: string; cwd: string }
-/** How Pi describes itself on the lock, which "Profile already running: …" shows. A profile name and a host name can't contain
- * " · ", so `OWNER` reads it back even when the cwd does. */
+/** How Pi describes itself on the lock, which "Profile already running: …" shows. Project display names can contain spaces. */
 export const describeOwner = ({ profile, pid, host, cwd }: Owner) => `${profile} · PID ${pid} · ${host} · ${cwd}`;
-const OWNER = /^([a-z0-9_-]+) · PID (\d+) · (.*?) · ([\s\S]*)$/;
+const OWNER = /^(.+?) · PID (\d+) · (.*?) · ([\s\S]*)$/;
 /** Who holds the profile in `dir`, without taking it; undefined when nobody does. Rejects when the holder doesn't answer within
  * 1.5 seconds or describes itself some other way, so either still counts as busy. */
 export async function profileOwner(dir: string): Promise<Owner | undefined> {

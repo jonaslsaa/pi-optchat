@@ -30,18 +30,36 @@ To uninstall, run `pi remove git:github.com/jonaslsaa/pi-optchat`. Profile data 
 ## Quick start
 
 1. Restart Pi.
-2. Choose **+ Create profile** and name it, for example `work`.
+2. Run `/optchat profile`, choose **+ Create profile**, and name it, for example `work`.
 3. Chat normally.
 
-The footer shows the active profile. Memory follows the profile across directories and Pi sessions. Resumed sessions restore their profile, and `/new` keeps the window's once its session has a message. Other new sessions open `OPTCHAT_PROFILE` if set (`OPTCHAT_PROFILE=work pi`, interactive Pi only), or your only profile, else show the picker with the last-used profile first. `/optchat profile` always shows the picker.
+The footer shows the active profile. Memory follows the profile across directories and Pi sessions. Resumed sessions restore their profile, and `/new` keeps the window's choice once its session has a message. Fresh launches open the project profile when one exists; otherwise interactive Pi uses `OPTCHAT_PROFILE` if set, then your saved default. When no project, environment override or saved default applies, startup opens the profile picker.
+
+Run `/optchat profile` to switch or create a profile. Highlight a global profile and press uppercase **D** to make it the default for future interactive sessions; its name gains **(default)** immediately, without switching the current conversation. Profiles held by another Pi show **(in-use)**. There is no separate default settings menu. The preference is saved under `OPTCHAT_HOME` (normally `~/.optchat`) separately from the last-used profile.
+
+The bottom entry, **none**, initially carries **(default)** to indicate that no automatic default has been set. Startup still opens the picker in that case. Select it to start a fresh plain Pi session with native tools, prompts, caching and compaction, and no OptChat memory or footer. **Esc** also selects **none** when no profile is loaded; otherwise it closes the picker and keeps the current profile. Press **D** on **none** to clear the saved default and restore the startup picker. An existing global profile named `none` is shown as **none (global)**. A lone global profile is not automatically selected unless you make it the default. Existing session bindings, `--optchat-profile`, `/new` continuation, and project profiles take precedence over the saved default.
+
+Use `pi --no-optchat` (for example, `pi --no-optchat -p "your task"`) to run plain Pi without a picker, project autoload or connection to another instance. This applies to interactive, print and RPC modes for the whole process, including `/new`, and takes precedence over saved bindings and other OptChat flags. It leaves saved profile choices unchanged. Agents receive five sentences distinguishing unattended launch modes, plain Pi, intentionally sharing an occupied profile, and children with their own project profiles. Print/RPC avoid interactive pickers but do not disable OptChat: by default an occupied profile is joined, its memory is available to the child, and the owner receives the child's handoff. Joined `-p` tasks run as the owner's configured subagents; RPC runs connected agents in their own processes.
+
+An orchestrator can launch multiple Pi children in their own project directories without `--no-optchat`: each loads its own project profile and keeps separate memory. Each project must be a separate Git repository or worktree (nested repositories work); ordinary subdirectories of one worktree share its project profile.
 
 ### Headless and RPC
 
-- `pi -p`, `--mode rpc` and other extensions' runners need `--optchat-profile work`; `OPTCHAT_PROFILE` and a lone profile apply to interactive Pi only. Without it (and without a saved profile in a resumed session) the run is plain Pi with no OptChat memory.
+- `pi -p`, `--mode rpc` and other extensions' runners can use an existing project profile, `--optchat-profile work`, or a saved session binding. `OPTCHAT_PROFILE` and the saved default apply to interactive Pi only. Without a selected profile, the run is plain Pi with no OptChat memory.
 - In hosts that create sessions themselves (Pi Web), send `/optchat profile work` as the first message of a new session.
 - If the profile is open in another Pi, `pi -p` joins it as a connected window by default, and so does an RPC session (one T3 Code thread or OptChat app window per process), with its agent running in its own process; `--optchat-connect auto|join|off` controls this.
 
 Details, errors and join rules: [docs/connected-windows.md](docs/connected-windows.md#headless-and-rpc-runs).
+
+### Project profiles
+
+Inside a Git repository, `/optchat profile` offers **+ Create project profile**. It creates one memory at the Git worktree root's `.pi/optchat/` and switches to it in a fresh session. The footer uses the worktree directory's name; the picker marks it **(this project)** to distinguish it from a same-named global profile.
+
+Subsequent fresh launches anywhere in that worktree open the project profile automatically, without a picker. This includes print and RPC modes. Separate worktrees and nested repositories have separate project memories. Startup never creates a profile. Outside Git, or when no project profile exists, the saved interactive default applies. Project profiles cannot be saved as the default for other directories; project defaults saved by earlier builds are ignored.
+
+Use `/optchat profile` to switch to a global profile or **none** for a session. `/new` keeps your selection, and resumed sessions retain their original profile directory even when launched elsewhere. The next fresh launch in the project loads its project profile again. `--optchat-profile` still explicitly selects a named global profile; `--no-optchat` disables OptChat for that process. `OPTCHAT_HOME` continues to control global storage and does not move project memory.
+
+Creation adds `/.pi/optchat/` to Git's local exclude file when needed, without modifying tracked source files. Tracked profile data or conflicting `.gitignore` rules must be resolved before the profile opens. `.pi`, `.pi/optchat`, and any checkpoint `.git` must be real directories. If a fresh interactive launch finds its project or default profile busy, it opens the picker with that profile marked **(in-use)**. Select it to see the connection options, choose another profile, or choose **none** (also **Esc**) for plain Pi. A resumed conversation with messages keeps its original binding and reports the conflict; use `/optchat profile` to start a new session with another choice. Missing or invalid project data still reports an error instead of silently selecting another memory. Print/RPC runs retain their existing `--optchat-connect` join behavior.
 
 ## How it works
 

@@ -1,6 +1,32 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import type { ExtensionUIContext, Theme } from '@earendil-works/pi-coding-agent';
+
+/** Drive the real custom profile picker through its keyboard interface. */
+export function profilePickerUI(select: ExtensionUIContext['select']): ExtensionUIContext['custom'] {
+  return async factory => {
+    let result: unknown, closed = false;
+    const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Theme;
+    const page = await factory({ requestRender() {} } as never, theme, {} as never, value => { result = value; closed = true; });
+    const selected = () => page.render(500).map(line => line.trim()).find(line => line.startsWith('→ '))?.slice(2).replace(/ \(default\)$/, '').replace(/ \(in-use\)$/, '');
+    const choices: string[] = [];
+    for (let i = 0; i < 1000; i++) {
+      const label = selected();
+      if (!label || choices.at(-1) === label) break;
+      choices.push(label); page.handleInput?.('j');
+    }
+    while (!closed) {
+      const answer = await select('OptChat profile', choices);
+      for (let i = 0; i < choices.length; i++) page.handleInput?.('k');
+      const label = answer?.replace(/^D:/, ''), index = choices.indexOf(label ?? '');
+      if (answer !== undefined && index < 0) throw new Error(`Profile picker has no ${answer}: ${choices.join(', ')}`);
+      for (let i = 0; i < index; i++) page.handleInput?.('j');
+      page.handleInput?.(answer === undefined ? '\x1b' : answer.startsWith('D:') ? 'D' : '\r');
+    }
+    return result as never;
+  };
+}
 
 // Every temp dir made through os.tmpdir() lands in this root, removed at exit. It also takes what a test's own cleanup misses: Pi rewrites auth.json after a test removed its dir, and a worker thread loads this file again but is terminated before 'exit'.
 // macOS's default tmpdir is ~49 chars, and the extra level would push profile lock-socket paths past the 103-byte limit, so the outermost root goes under /tmp there. A child process or worker thread nests inside its parent's root, so it goes away with it even if it never reaches 'exit'.
