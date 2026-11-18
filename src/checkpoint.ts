@@ -26,10 +26,11 @@ function validateCheckpointRepository(directory: string, env: NodeJS.ProcessEnv)
   if (!entry.isDirectory()) throw invalid('.git must be a real directory, not a symlink or file.');
   const probe = spawnSync('git', ['-C', directory, 'rev-parse', '--path-format=absolute', '--absolute-git-dir', '--git-common-dir', '--show-toplevel', '--is-bare-repository'], { encoding: 'utf8', env });
   if (probe.status !== 0) throw invalid(probe.error?.message ?? probe.stderr.trim());
-  const paths = probe.stdout.split('\n'), profile = realpathSync(directory), repository = join(profile, '.git');
+  const paths = probe.stdout.split('\n');
   if (paths.length !== 5 || paths[3] !== 'false' || paths[4] !== '') throw invalid('Expected a non-bare profile-local repository.');
-  const expected = [repository, repository, profile];
-  if (!paths.slice(0, 3).every((path, index) => realpathSync(path) === expected[index]))
+  // Windows can name the same directory with different casing or an 8.3 alias (RUNNER~1). Normalize both sides natively.
+  const expected = [metadata, metadata, directory].map(path => realpathSync.native(path));
+  if (!paths.slice(0, 3).every((path, index) => realpathSync.native(path) === expected[index]))
     throw invalid('Git directory, common directory and worktree must match the selected profile.');
 }
 

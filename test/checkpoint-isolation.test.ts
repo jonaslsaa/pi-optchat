@@ -61,12 +61,22 @@ for (const alias of [false, true]) test(`a nested profile gets its own checkpoin
   const cwd = application(), before = snapshot(join(cwd, '.git')), physical = profile(cwd), dir = alias ? join(sandbox(), 'alias') : physical;
   if (alias) symlinkSync(physical, dir, process.platform === 'win32' ? 'junction' : 'dir');
   await checkpoint(dir);
-  assert.equal(realpathSync(git(dir, 'rev-parse', '--show-toplevel').trim()), realpathSync(dir));
+  assert.equal(realpathSync.native(git(dir, 'rev-parse', '--show-toplevel').trim()), realpathSync.native(dir));
   appendFileSync(join(dir, 'notes.txt'), '\nsecond checkpoint'); await checkpoint(dir);
   assert.equal(git(dir, 'rev-list', '--count', 'HEAD').trim(), '2');
   assert.equal(git(dir, 'show', 'HEAD:notes.txt'), 'first checkpoint\nsecond checkpoint');
   assert.deepEqual(snapshot(join(cwd, '.git')), before);
   assert.equal(readFileSync(join(cwd, 'application.txt'), 'utf8'), 'unstaged application');
+});
+
+test('a Windows profile can be checkpointed through a differently cased path', { skip: process.platform !== 'win32' }, async () => {
+  const dir = profile(application()), alias = dir.toUpperCase();
+  assert.notEqual(alias, dir);
+  assert.equal(realpathSync.native(alias), realpathSync.native(dir), 'both names address the same directory');
+  await checkpoint(alias);
+  appendFileSync(join(dir, 'notes.txt'), '\nsecond checkpoint'); await checkpoint(dir);
+  assert.equal(git(dir, 'rev-list', '--count', 'HEAD').trim(), '2');
+  assert.equal(git(dir, 'show', 'HEAD:notes.txt'), 'first checkpoint\nsecond checkpoint');
 });
 
 for (const routing of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS'] as const)
@@ -86,7 +96,7 @@ for (const routing of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_
       await checkpoint(dir);
       appendFileSync(join(dir, 'notes.txt'), '\nsecond checkpoint'); await checkpoint(dir);
     } finally { for (const [key, value] of saved) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } }
-    assert.equal(realpathSync(git(dir, 'rev-parse', '--show-toplevel').trim()), realpathSync(dir));
+    assert.equal(realpathSync.native(git(dir, 'rev-parse', '--show-toplevel').trim()), realpathSync.native(dir));
     assert.equal(git(dir, 'rev-list', '--count', 'HEAD').trim(), '2');
     assert.equal(git(dir, 'show', 'HEAD:notes.txt'), 'first checkpoint\nsecond checkpoint');
     assert.deepEqual([snapshot(join(cwd, '.git')), snapshot(outside)], before, 'other repositories keep their index, refs, objects and contents');
