@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
+import { createAssistantMessageEventStream, getCurrentSystemMessage, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionFactory, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { readLimits } from '../src/limits.ts';
@@ -28,7 +28,7 @@ for (const name of ['work', 'personal']) {
 rememberProfile('personal');
 
 /** A headless Pi (print or RPC) whose model answers "OK to: <prompt>" and records what each call was sent. */
-async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?: string; connect?: string; agent?: string; hold?: Promise<void>; later?: ExtensionFactory; headers?: Record<string, string>; error?: string } = {}) {
+async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?: string; connect?: string; agent?: string; hold?: Promise<void>; earlier?: ExtensionFactory; later?: ExtensionFactory; tools?: string[]; answer?: string; headers?: Record<string, string>; error?: string } = {}) {
   const dir = mkdtempSync(join(root, 's-'));
   const sent: string[] = [], errors: string[] = [];
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
@@ -39,7 +39,7 @@ async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?:
       sent.push(JSON.stringify(context.messages));
       const last = context.messages.at(-1);
       const prompt = textContent(last && 'content' in last ? last.content : '');
-      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: `OK to: ${prompt}` }],
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: options.answer ?? `OK to: ${prompt}` }],
         api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
       const stream = createAssistantMessageEventStream();
       // An answer comes with the provider's headers, as Pi's own providers hand them over; one that is refused comes with none.
@@ -53,11 +53,11 @@ async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?:
   });
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
   const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
-    noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat, ...options.later ? [options.later] : []] });
+    noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [...options.earlier ? [options.earlier] : [], optchat, ...options.later ? [options.later] : []] });
   await loader.reload();
   const manager = SessionManager.create(dir, join(dir, 'sessions'));
   if (options.bound) manager.appendCustomEntry('optchat.profile', { name: options.bound });
-  const { session } = await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: [] });
+  const { session } = await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: options.tools ?? [] });
   if (options.flag) session.extensionRunner.setFlagValue('optchat-profile', options.flag);
   if (options.agent !== undefined) session.extensionRunner.setFlagValue('optchat-agent', options.agent);
   if (options.connect) session.extensionRunner.setFlagValue('optchat-connect', options.connect);
@@ -73,7 +73,7 @@ async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?:
   };
   const bindings = () => manager.getEntries().flatMap(e => e.type === 'custom' && e.customType === 'optchat.profile' ? [e.data] : []);
   const close = async () => { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); };
-  return { ask, bindings, close, errors, notes, sent };
+  return { ask, bindings, close, errors, notes, sent, entries: () => manager.getEntries() };
 }
 
 test('a headless run without a binding or --optchat-profile is plain Pi: it answers, and no profile is picked or created', async () => {
@@ -158,6 +158,51 @@ test('the model gets the system prompt Pi has now, with sections extensions load
     assert.match(pi.sent[0], /You are OptChat/);
     assert.match(pi.sent[0], /SECTION-FROM-LATER-EXTENSION/);
   } finally { await pi.close(); }
+});
+
+for (const order of ['earlier', 'later'] as const) test(`request-only prompt and tool changes survive extensions loaded ${order} without persisting`, async t => {
+  for (const change of ['append', 'prepend', 'replace', 'clear', 'sections'] as const) await t.test(change, async () => {
+    let revision = 1;
+    const extension: ExtensionFactory = pi => {
+      pi.on('before_agent_start', event => { event.systemPromptOptions.sections.fixture = 'BASELINE_SECTION'; });
+      pi.on('context_with_system', event => {
+        if (!revision) return;
+        const marker = `REQUEST_PROMPT_${revision}`;
+        if (change === 'sections') return { messages: [...event.messages, { role: 'system', content: '', timestamp: 0,
+          sections: { fixture: null, request: marker }, toolsRemoved: [{ name: 'date' }] }] };
+        const prompt = getCurrentSystemPrompt(event.messages), head = getCurrentSystemMessage(event.messages)!;
+        const content = change === 'append' ? `${prompt}\n${marker}` : change === 'prepend' ? `${marker}\n${prompt}` : change === 'clear' ? '' : marker;
+        return { messages: [{ role: 'system', timestamp: 0, content, toolsAdded: head.toolsAdded?.filter(tool => tool.name !== 'date') },
+          ...event.messages.filter(message => message.role !== 'system')] };
+      });
+    };
+    const name = `request-${order}-${change}`;
+    createProfile(name); saveConfig(profilePath(name), loadConfig(profilePath('work')));
+    const pi = await headless('print', { flag: name, tools: ['zoom', 'date'], answer: 'OK', [order]: extension });
+    try {
+      for (revision = 1; revision <= 2; revision++) {
+        await pi.ask(`Request ${revision}.`);
+        const messages = JSON.parse(pi.sent.at(-1)!), prompt = getCurrentSystemPrompt(messages);
+        if (change === 'clear') assert.equal(prompt, '', 'an explicitly empty prompt stays empty');
+        else {
+          assert.deepEqual(prompt.match(/REQUEST_PROMPT_\d+/g), [`REQUEST_PROMPT_${revision}`], 'only the current revision is sent');
+          if (change === 'prepend' || change === 'replace') assert.ok(prompt.startsWith(`REQUEST_PROMPT_${revision}`));
+          if (change === 'replace') assert.equal(prompt, `REQUEST_PROMPT_${revision}`);
+          else assert.match(prompt, /You are OptChat/, 'additive edits preserve OptChat instructions');
+          if (change === 'append' || change === 'prepend') assert.match(prompt, /BASELINE_SECTION/);
+          if (change === 'sections') assert.ok(!prompt.includes('BASELINE_SECTION'), 'a deleted section is not restored');
+        }
+        assert.deepEqual(getCurrentTools(messages).map(tool => tool.name), ['zoom'], 'the prompt and tools describe the same request');
+      }
+      revision = 0; await pi.ask('The extension no longer edits the request.');
+      const messages = JSON.parse(pi.sent.at(-1)!), prompt = getCurrentSystemPrompt(messages);
+      assert.doesNotMatch(prompt, /REQUEST_PROMPT_/);
+      assert.match(prompt, /You are OptChat/); assert.match(prompt, /BASELINE_SECTION/);
+      assert.deepEqual(getCurrentTools(messages).map(tool => tool.name), ['zoom', 'date']);
+      assert.doesNotMatch(JSON.stringify(pi.entries()), /REQUEST_PROMPT_/, 'request-time changes do not rewrite session history');
+      assert.deepEqual(pi.errors, []);
+    } finally { await pi.close(); }
+  });
 });
 
 test('a requested profile that cannot open fails visibly and does not run without memory', async () => {

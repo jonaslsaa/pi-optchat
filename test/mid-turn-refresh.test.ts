@@ -4,7 +4,7 @@ import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { createAssistantMessageEventStream, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
+import { createAssistantMessageEventStream, getCurrentSystemPrompt, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
@@ -67,6 +67,8 @@ test('a turn past its threshold is sent as the refreshed view, its task verbatim
   process.env.OPTCHAT_REFRESH_AT = '1';
   const task = `Zoom message 0 eight times, then answer. ${'Context for the task. '.repeat(38)}`;
   const captured: Context[] = [];
+  const prompts: string[] = [];
+  let requests = 0;
   let calls = 0;
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
   try {
@@ -79,7 +81,10 @@ test('a turn past its threshold is sent as the refreshed view, its task verbatim
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000, maxTokens: 1000 }],
       streamSimple(model, context) {
         const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
-        if (!compression) captured.push(structuredClone({ ...context, messages: context.messages.filter(m => m.role !== 'system') }));
+        if (!compression) {
+          captured.push(structuredClone({ ...context, messages: context.messages.filter(m => m.role !== 'system') }));
+          prompts.push(getCurrentSystemPrompt(context.messages));
+        }
         const step = compression ? 0 : ++calls;
         const message = compression ? reply([{ type: 'text', text: 'Summary.' }], 'stop')
           : step <= 8 ? reply([{ type: 'toolCall', id: `zoom-${step}`, name: 'zoom', arguments: { id: 0, n: 1 } }], 'toolUse')
@@ -92,7 +97,10 @@ test('a turn past its threshold is sent as the refreshed view, its task verbatim
     });
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
     const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
-      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [pi => {
+        pi.on('context_with_system', event => ({ messages: [...event.messages,
+          { role: 'system', content: '', sections: { request: `REQUEST_PROMPT_${++requests}` }, timestamp: 0 }] }));
+      }, optchat] });
     await loader.reload();
     const manager = SessionManager.inMemory(dir); manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
     session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom'] })).session;
@@ -100,6 +108,8 @@ test('a turn past its threshold is sent as the refreshed view, its task verbatim
     await session.bindExtensions({ onError: error => errors.push(error.error) });
     await session.prompt(task);
     assert.equal(session.getLastAssistantText(), 'Done.');
+    assert.deepEqual(prompts.map(prompt => prompt.match(/REQUEST_PROMPT_\d+/g)),
+      Array.from({ length: 9 }, (_, i) => [`REQUEST_PROMPT_${i + 1}`]), 'each tool continuation and refreshed view keeps only its current prompt patch');
     assert.deepEqual(captured.map(c => c.messages.map(m => m.role).join(' ')), [
       'user', 'user assistant toolResult', 'user assistant toolResult assistant toolResult', 'user assistant toolResult assistant toolResult assistant toolResult',
       // Over the threshold: the view now has the turn so far as lines, and the request only the task and the fourth step verbatim.

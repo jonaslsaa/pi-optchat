@@ -132,8 +132,8 @@ export function atWork(runs: readonly { id: string; task: string; title?: string
  * (the user, a report, a restart note): a call that follows a tool result is the same turn, which already had it. */
 export function buildContext(canonical: AgentMessage[], run: AgentMessage[], view: string, prompt: string,
   previous: readonly AgentMessage[] = [], status?: string): AgentMessage[] {
-  const system = getCurrentSystemMessage(canonical);
-  const head: SystemMessage = { role: 'system', content: prompt, toolsAdded: system?.toolsAdded, timestamp: 0 };
+  // Keep request-time prompt/tool edits and named sections, so later extensions can still update or remove a section.
+  const head: SystemMessage = getCurrentSystemMessage(canonical) ?? { role: 'system', content: prompt, timestamp: 0 };
   if (!run.some(m => m.role === 'user')) throw new Error('OptChat has no current user message; refusing to send historical context.');
   const messages = withView([...previous, ...run].filter(m => m.role !== 'system'), view);
   return [head, ...messages, ...status && messages.at(-1)?.role !== 'toolResult' ? [{ role: 'user' as const, content: [{ type: 'text' as const, text: status }], timestamp: 0 }] : []];

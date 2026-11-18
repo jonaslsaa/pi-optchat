@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createAssistantMessageEventStream, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
+import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext, type Theme } from '@earendil-works/pi-coding-agent';
 import type { Component } from '@earendil-works/pi-tui';
 import optchat from '../src/index.ts';
@@ -295,8 +295,10 @@ test('Memory search turned on and off in /optchat settings adds and removes the 
     }) as unknown as ExtensionUIContext['custom'];
     await session.bindExtensions({ uiContext: { ...session.extensionRunner.getUIContext(), custom }, mode: 'tui' });
     // Pi declares the tools on the leading system message, next to the prompt.
-    const search = ({ messages: [system] }: Context) => system.role === 'system'
-      ? [!!system.toolsAdded?.some(t => t.name === 'search'), JSON.stringify(system.content).includes('search(text)'), JSON.stringify(system.content).includes('zoom and search are')] : [];
+    const search = ({ messages }: Context) => {
+      const prompt = getCurrentSystemPrompt(messages);
+      return [getCurrentTools(messages).some(t => t.name === 'search'), prompt.includes('search(text)'), prompt.includes('zoom and search are')];
+    };
     await session.prompt('Hello.');
     assert.deepEqual(search(turns.at(-1)!), [false, false, false], 'off by default');
     await session.prompt('/optchat settings');
