@@ -9,7 +9,7 @@ import { Type } from 'typebox';
 import { Memory } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
 import { createCompressor } from './compactor.ts';
-import { applyConfig, createProfile, describeOwner, holdProfile, isWindows, lastProfile, listProfiles, loadConfig, memoryDirectory, readInstructions, type ModelChoice, rememberProfile, saveInstructions, ProfileBusyError, type ConfigPatch, type ProfileConfig } from './profiles.ts';
+import { applyConfig, createProfile, describeOwner, holdProfile, isWindows, lastProfile, listProfiles, loadConfig, memoryDirectory, profileOwner, readInstructions, type ModelChoice, rememberProfile, saveInstructions, ProfileBusyError, type ConfigPatch, type ProfileConfig } from './profiles.ts';
 import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC } from './core/prompts.ts';
 import { MASTER, modelsHint } from './prompts.ts';
 import { cachePayload, record } from './core/cache.ts';
@@ -38,10 +38,10 @@ import { openConnectedWindow, registerConnectedRenderer } from './connected-wind
 import { openRemoteWindow, ROLE_STATUS, type Role } from './rpc-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
-import { pickProfile, preferredProfile } from './profile-picker.ts';
+import { pickProfile, preferredProfile, type ProfileOption } from './profile-picker.ts';
 import { showModelPicker, showSettings } from './settings-page.ts';
 import { showMenu } from './menu.ts';
-import { createProjectProfile, discoverProjectProfile, parseProfileBinding, prepareProjectProfile, profileBinding, projectLocation, resolveProfile, sameProfile, type ProfileSelection } from './project-profiles.ts';
+import { createProjectProfile, discoverProjectProfile, parseProfileBinding, prepareProjectProfile, profileBinding, projectLocation, resolveProfile, sameProfile, type ProfileChoice, type ProfileSelection } from './project-profiles.ts';
 
 const binding = 'optchat.profile';
 /** The profile a session is bound to; the latest binding wins. */
@@ -71,6 +71,11 @@ const brand = version ? `OptChat v${version}` : 'OptChat';
 
 export default function optchat(pi: ExtensionAPI) {
   let active: Active | undefined;
+  let suspendedTools: string[] = [];
+  const restoreTools = () => {
+    if (suspendedTools.length) pi.setActiveTools([...new Set([...pi.getActiveTools(), ...suspendedTools])]);
+    suspendedTools = [];
+  };
   let remote: Awaited<ReturnType<typeof openConnectedWindow>> | undefined;
   /** `pi -p` on a profile another Pi owns: the prompt goes to a subagent in that Pi (--optchat-connect). */
   let joined: Awaited<ReturnType<typeof joinHeadless>> | undefined;
@@ -188,7 +193,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (rpcWindow) return;
     const a = active;
     if (ctx.mode === 'rpc') ctx.ui.setStatus(ROLE_STATUS, a ? JSON.stringify({ role: 'owner', profile: a.name } satisfies Role) : undefined);
-    if (!a) { ctx.ui.setStatus('optchat', 'OptChat: choose profile'); return; }
+    if (!a) { ctx.ui.setStatus('optchat', undefined); return; }
     // A display only: a broken import journal is refused where it matters, never here.
     let note = '';
     try { note = importing ? ' · importing' : pendingImport(a.dir) ? ' · import paused: /optchat import' : ''; }
@@ -253,30 +258,40 @@ export default function optchat(pi: ExtensionAPI) {
     }
   };
   const CONNECT = 'Start a connected subagent conversation here', BACK = 'Back';
-  const chooseProfile = async (ctx: ExtensionContext): Promise<ProfileSelection | undefined> => {
-    // Outside the TUI (print, json, RPC hosts) never pick or create a profile: a dialog would hang the host, and a guess could write into the wrong memory.
+  const chooseProfile = async (ctx: ExtensionContext): Promise<ProfileChoice | undefined> => {
     if (ctx.mode !== 'tui') return undefined;
     const names = listProfiles(), last = lastProfile();
     if (last) names.sort((a, b) => Number(b === last) - Number(a === last));
     const project = projectLocation(ctx.cwd), existing = project && discoverProjectProfile(ctx.cwd);
-    const projectLabel = project ? existing ? `${resolveProfile(project).name} (this project)` : '+ Create project profile' : undefined;
-    if (projectLabel) names.push(projectLabel);
-    const selected = await pickProfile(ctx, [...names, '+ Create profile']);
-    if (project && selected === projectLabel) return existing ?? createProjectProfile(ctx.cwd);
-    if (selected !== '+ Create profile') return selected;
+    const choices: ProfileOption[] = names.map(profile => ({ label: profile === 'none' ? 'none (global)' : profile, profile }));
+    if (project) choices.push(existing ? { label: `${resolveProfile(existing).name} (this project)`, profile: existing }
+      : { label: '+ Create project profile', create: 'project' });
+    const saved = preferredProfile(ctx);
+    if (saved && typeof saved !== 'string' && !sameProfile(existing, saved))
+      choices.push({ label: `${resolveProfile(saved).name} (project)`, profile: saved });
+    await Promise.all(choices.map(async choice => {
+      if (!('profile' in choice) || !choice.profile || sameProfile(active?.profile, choice.profile)) return;
+      // An unresponsive lock is still occupied; opening the selection reports the underlying error.
+      if (await profileOwner(resolveProfile(choice.profile).dir).then(owner => !!owner, () => true)) choice.label += ' (in-use)';
+    }));
+    choices.push({ label: '+ Create profile', create: 'global' }, { label: 'none', profile: null });
+    const selected = await pickProfile(ctx, choices);
+    if (!selected) return undefined;
+    if ('profile' in selected) return selected.profile;
+    if (selected.create === 'project') return createProjectProfile(ctx.cwd);
     const name = (await ctx.ui.input('New profile name', 'work or personal'))?.trim();
     if (!name) return undefined;
     createProfile(name); return name;
   };
   // An unbound session selects its profile before falling back to the interactive picker.
-  const defaultProfile = (ctx: ExtensionContext, event: SessionStartEvent): ProfileSelection | undefined => {
+  const defaultProfile = (ctx: ExtensionContext, event: SessionStartEvent): ProfileChoice | undefined => {
     if (ctx.mode !== 'tui') return discoverProjectProfile(ctx.cwd);
     const names = listProfiles();
     // Pi reloads extensions on /new, so the window's profile is only in the previous session's file (written once it has a message).
     if (event.reason === 'new' && event.previousSessionFile) {
       try {
         const kept = boundProfile(parseSessionEntries(readFileSync(event.previousSessionFile, 'utf8')));
-        if (kept && (typeof kept !== 'string' || names.includes(kept))) return kept;
+        if (kept !== undefined && (typeof kept !== 'string' || names.includes(kept))) return kept;
       } catch {}
     }
     const project = discoverProjectProfile(ctx.cwd);
@@ -286,7 +301,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (names.includes(env)) return env;
       ctx.ui.notify(`OPTCHAT_PROFILE: no profile named ${env}.`, 'warning');
     }
-    return preferredProfile(ctx) ?? (names.length === 1 ? names[0] : undefined);
+    return preferredProfile(ctx);
   };
   const openProfile = async (profile: ProfileSelection, ctx: ExtensionContext) => {
     prepareProjectProfile(profile);
@@ -324,6 +339,7 @@ export default function optchat(pi: ExtensionAPI) {
       atomicWrite(pending, JSON.stringify(reports));
       if (typeof profile === 'string') rememberProfile(profile);
       active = { profile, name, session: sessionId, dir, config, memory, inbox, children, usage, unlock }; fault = undefined; idle = () => ctx.isIdle();
+      restoreTools();
       await restoreMain(ctx, active);
       if (ctx.mode === 'tui') unmountNavigation = mountNavigation(ctx, children, memory, shortcut, page => { void inspect(ctx, page); });
       // A one-shot run (`pi -p`, JSON) exits after its own prompt, which would end every conversation connected to it.
@@ -361,6 +377,7 @@ export default function optchat(pi: ExtensionAPI) {
     prepareProjectProfile(name);
     if (ctx.mode !== 'rpc') { joined = await joinProfile(name); return; }
     const old = rpcWindow; rpcWindow = undefined; await old?.close();
+    restoreTools();
     rpcWindow = await openRemoteWindow(pi, ctx, name, options); fault = undefined;
   };
   /** Opens `name` here, or joins it where --optchat-connect says to; a busy profile it may not join throws ProfileBusyError. */
@@ -376,14 +393,14 @@ export default function optchat(pi: ExtensionAPI) {
   pi.on('session_start', async (event, ctx) => {
     stopping = false;
     const entries = ctx.sessionManager.getEntries();
-    let boundName: ProfileSelection | undefined;
+    let boundName: ProfileChoice | undefined;
     // A session with conversation in it belongs to its profile. One that is only bound (a fresh `/optchat profile` session) may still pick another.
     let settled = false;
     const flag = pi.getFlag('optchat-profile');
     try {
       boundName = boundProfile(entries);
       settled = boundName !== undefined && entries.some(e => e.type === 'message' || e.type === 'custom_message');
-      if (boundName !== undefined && typeof flag === 'string' && flag !== boundName) throw new Error(`Session belongs to ${resolveProfile(boundName).name}; cannot resume it as ${flag}.`);
+      if (boundName !== undefined && typeof flag === 'string' && flag !== boundName) throw new Error(`Session belongs to ${boundName === null ? 'none' : resolveProfile(boundName).name}; cannot resume it as ${flag}.`);
       // RPC binds extensions twice after new_session and the like (see openProfile): the window already serves this session.
       if (rpcWindow?.session === ctx.sessionManager.getSessionId()) return;
       const agentId = pi.getFlag('optchat-agent');
@@ -399,18 +416,25 @@ export default function optchat(pi: ExtensionAPI) {
         for (const ms of [0, 250, 1000]) setTimeout(() => title.reapply(), ms).unref();
         return;
       }
-      const automatic = boundName ?? (typeof flag === 'string' ? flag : defaultProfile(ctx, event));
+      const automatic = boundName !== undefined ? boundName : typeof flag === 'string' ? flag : defaultProfile(ctx, event);
       // /optchat profile creates an empty, pre-bound session. Its explicit choice may offer Connect/Back;
       // automatic project startup (including /new and resume) must not open an unsolicited dialog.
       const picked = event.reason === 'new' && boundName !== undefined && !settled;
-      let name = automatic ?? await chooseProfile(ctx);
+      let name = automatic !== undefined ? automatic : await chooseProfile(ctx);
       if (connectFor(ctx) === 'join' && !name) { process.exitCode = 1; throw new Error('--optchat-connect join needs a profile: pass --optchat-profile'); }
       for (;;) {
-        if (!name) { status(ctx); return; }
+        if (!name) {
+          if (name === null && boundName !== null) pi.appendEntry(binding, profileBinding(null));
+          fault = undefined;
+          const tools = pi.getActiveTools(), memoryTools = ['zoom', 'date', 'search', 'spawn', 'models', 'tell'];
+          suspendedTools = [...new Set([...suspendedTools, ...tools.filter(tool => memoryTools.includes(tool))])];
+          pi.setActiveTools(tools.filter(tool => !memoryTools.includes(tool)));
+          status(ctx); return;
+        }
         try { await openOrJoin(name, ctx); break; }
         catch (error) {
           if (!(error instanceof ProfileBusyError) || ctx.mode !== 'tui') throw error;
-          if (typeof automatic === 'object' && !picked)
+          if (automatic !== undefined && !picked && (typeof automatic === 'object' || boundName === undefined && typeof flag !== 'string'))
             throw new Error(`${error.message}\nUse /optchat profile to connect or choose another profile.`);
           // A resumed conversation already belongs to this profile, so another profile needs a new session (/optchat profile).
           // Older owners have no listing protocol. Keep their existing Connect/Back menu rather than failing startup.
@@ -498,9 +522,9 @@ export default function optchat(pi: ExtensionAPI) {
       return { action: 'handled' };
     }
     if (!active) {
-      // Without a profile or flag, a headless run is plain Pi. A requested profile that failed to open refuses instead of running without memory.
-      if (ctx.mode !== 'tui' && !fault) return { action: 'continue' };
-      ctx.ui.notify(fault ?? 'Select a profile with /optchat profile before chatting.', 'error'); return { action: 'handled' };
+      // None is plain Pi. A requested profile that failed to open still refuses to run without its memory.
+      if (!fault) return { action: 'continue' };
+      ctx.ui.notify(fault, 'error'); return { action: 'handled' };
     }
     if (importing || pendingImport(active.dir)) { ctx.ui.notify('This profile has an import in progress. Use /optchat import to resume or discard it, or switch profiles.', 'info'); return { action: 'handled' }; }
     if (event.source !== 'extension') {
@@ -805,7 +829,7 @@ export default function optchat(pi: ExtensionAPI) {
     if (action === 'profile') {
       if (!ctx.isIdle() || active?.children.active) throw new Error('Finish or stop active work before switching profiles.');
       const selected = await chooseProfile(ctx);
-      if (!selected || sameProfile(active?.profile, selected)) return;
+      if (selected === undefined || sameProfile(active?.profile, selected)) return;
       await ctx.newSession({ setup: async manager => { manager.appendCustomEntry(binding, profileBinding(selected)); } });
       return;
     }

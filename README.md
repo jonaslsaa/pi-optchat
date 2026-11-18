@@ -30,16 +30,18 @@ To uninstall, run `pi remove git:github.com/jonaslsaa/pi-optchat`. Profile data 
 ## Quick start
 
 1. Restart Pi.
-2. Choose **+ Create profile** and name it, for example `work`.
+2. Run `/optchat profile`, choose **+ Create profile**, and name it, for example `work`.
 3. Chat normally.
 
-The footer shows the active profile. Memory follows the profile across directories and Pi sessions. Resumed sessions restore their profile, and `/new` keeps the window's once its session has a message. Other new sessions open `OPTCHAT_PROFILE` if set (`OPTCHAT_PROFILE=work pi`, interactive Pi only), then your saved default, then your only profile, else show the picker with the last-used profile first. `/optchat profile` always shows the picker.
+The footer shows the active profile. Memory follows the profile across directories and Pi sessions. Resumed sessions restore their profile, and `/new` keeps the window's choice once its session has a message. Fresh launches open the project profile when one exists; otherwise interactive Pi uses `OPTCHAT_PROFILE` if set, then your saved default. Startup does not open the profile picker.
 
-To choose a default without setting an environment variable, open `/optchat profile`, select **Default profile**, then a profile. It is used for new interactive sessions after `OPTCHAT_PROFILE` and before the single-profile fallback. Choosing **No saved default** restores automatic selection. This preference is saved in `~/.optchat/default-profile` (under `OPTCHAT_HOME` when set); choosing another profile normally does not change it. Explicit flags, resumed sessions, `/new`, print and RPC behavior stay the same. A default whose profile has been removed is ignored.
+Run `/optchat profile` to switch or create a profile. Highlight a profile and press uppercase **D** to make it the default for future interactive sessions; its name gains **(default)** immediately, without switching the current conversation. Profiles held by another Pi show **(in-use)**. There is no separate default settings menu. The preference is saved under `OPTCHAT_HOME` (normally `~/.optchat`) separately from the last-used profile.
+
+The bottom entry, **none**, is the initial default. Select it to start a fresh plain Pi session with native tools, prompts, caching and compaction, and no OptChat memory or footer. Press **D** on it to clear the saved default. An existing global profile named `none` is shown as **none (global)**. A lone global profile is not automatically selected unless you make it the default. Existing session bindings, `--optchat-profile`, `/new` continuation, and project profiles take precedence over the saved default.
 
 ### Headless and RPC
 
-- `pi -p`, `--mode rpc` and other extensions' runners can use an existing project profile, `--optchat-profile work`, or a saved session binding. `OPTCHAT_PROFILE` and a lone global profile apply to interactive Pi only. Without a selected profile, the run is plain Pi with no OptChat memory.
+- `pi -p`, `--mode rpc` and other extensions' runners can use an existing project profile, `--optchat-profile work`, or a saved session binding. `OPTCHAT_PROFILE` and the saved default apply to interactive Pi only. Without a selected profile, the run is plain Pi with no OptChat memory.
 - In hosts that create sessions themselves (Pi Web), send `/optchat profile work` as the first message of a new session.
 - If the profile is open in another Pi, `pi -p` joins it as a connected window by default, and so does an RPC session (one T3 Code thread or OptChat app window per process), with its agent running in its own process; `--optchat-connect auto|join|off` controls this.
 
@@ -49,9 +51,9 @@ Details, errors and join rules: [docs/connected-windows.md](docs/connected-windo
 
 Inside a Git repository, `/optchat profile` offers **+ Create project profile**. It creates one memory at the Git worktree root's `.pi/optchat/` and switches to it in a fresh session. The footer uses the worktree directory's name; the picker marks it **(this project)** to distinguish it from a same-named global profile.
 
-Subsequent fresh launches anywhere in that worktree open the project profile automatically, without a picker. This includes print and RPC modes. Separate worktrees and nested repositories have separate project memories. Startup never creates a profile. Outside Git, or when no project profile exists, normal global-profile selection applies.
+Subsequent fresh launches anywhere in that worktree open the project profile automatically, without a picker. This includes print and RPC modes. Separate worktrees and nested repositories have separate project memories. Startup never creates a profile. Outside Git, or when no project profile exists, the saved interactive default applies. You can also press **D** on a project profile to use it as the fallback in other directories.
 
-Use `/optchat profile` to switch to a global profile for a session. `/new` keeps your selection, and resumed sessions retain their original profile directory even when launched elsewhere. The next fresh launch in the project loads its project profile again. `--optchat-profile` still explicitly selects a named global profile; there is no project enable/disable setting. `OPTCHAT_HOME` continues to control global storage and does not move project memory.
+Use `/optchat profile` to switch to a global profile or **none** for a session. `/new` keeps your selection, and resumed sessions retain their original profile directory even when launched elsewhere. The next fresh launch in the project loads its project profile again. `--optchat-profile` still explicitly selects a named global profile; there is no project enable/disable setting. `OPTCHAT_HOME` continues to control global storage and does not move project memory.
 
 Creation adds `/.pi/optchat/` to Git's local exclude file when needed, without modifying tracked source files. Tracked profile data or conflicting `.gitignore` rules must be resolved before the profile opens. `.pi`, `.pi/optchat`, and any checkpoint `.git` must be real directories. A missing, invalid or busy automatically selected project profile reports an error instead of silently selecting another memory or opening a picker. To connect to a busy project, select it explicitly in `/optchat profile`: the usual connection options appear, including **Back** to choose another profile. Print/RPC runs retain their existing `--optchat-connect` join behavior.
 

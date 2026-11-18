@@ -6,6 +6,8 @@ import { checkSocketPath, createProfileDirectory, profilePath, profileSocket } f
 
 export interface ProjectProfile { kind: 'project'; dir: string }
 export type ProfileSelection = string | ProjectProfile;
+/** null explicitly keeps a session in plain Pi, even inside a project. */
+export type ProfileChoice = ProfileSelection | null;
 const relative = '.pi/optchat';
 const outputLine = (text: string) => text.replace(/\r?\n$/, '');
 const environment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith('GIT_')));
@@ -32,17 +34,18 @@ export function resolveProfile(profile: ProfileSelection) {
   const root = projectRoot(profile);
   return { name: basename(root).replace(/[\x00-\x1f\x7f-\x9f]/g, '?') || root, dir: profile.dir };
 }
-export const profileBinding = (profile: ProfileSelection) => typeof profile === 'string' ? { name: profile } : profile;
-export function parseProfileBinding(value: unknown): ProfileSelection | undefined {
+export const profileBinding = (profile: ProfileChoice) => profile === null ? { kind: 'none' } : typeof profile === 'string' ? { name: profile } : profile;
+export function parseProfileBinding(value: unknown): ProfileChoice | undefined {
   if (!record(value)) return undefined;
+  if (value.kind === 'none') return null;
   if (value.kind === 'project') {
     if (typeof value.dir !== 'string') throw new Error('Invalid project profile binding.');
     const profile: ProjectProfile = { kind: 'project', dir: value.dir }; projectRoot(profile); return profile;
   }
   return typeof value.name === 'string' ? value.name : undefined;
 }
-export const sameProfile = (a: ProfileSelection | undefined, b: ProfileSelection) => a !== undefined
-  && (typeof a === 'string' || typeof b === 'string' ? a === b : a.dir === b.dir);
+export const sameProfile = (a: ProfileChoice | undefined, b: ProfileChoice) => a !== undefined
+  && (a === null || b === null || typeof a === 'string' || typeof b === 'string' ? a === b : a.dir === b.dir);
 
 function directory(path: string) {
   const entry = lstatSync(path, { throwIfNoEntry: false });
