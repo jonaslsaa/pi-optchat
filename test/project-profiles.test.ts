@@ -1,7 +1,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAssistantMessageEventStream, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
@@ -75,14 +75,18 @@ async function start(dir: string, options: { mode?: 'tui' | 'rpc' | 'print'; bou
 
 
 
-test('discovery is read-only; explicit creation is shared by subdirectories and leaves the source tree untouched', () => {
-  const dir = repository(), child = join(dir, 'src'); mkdirSync(child);
+for (const alias of [false, true]) test(`discovery is read-only; explicit creation is shared by subdirectories and leaves the source tree untouched (directory alias ${alias})`, () => {
+  const physical = repository(), dir = alias ? join(sandbox(), 'alias') : physical;
+  if (alias) symlinkSync(physical, dir, process.platform === 'win32' ? 'junction' : 'dir');
+  const child = join(dir, 'src'); mkdirSync(child);
   assert.equal(discoverProjectProfile(child), undefined);
   assert.ok(!existsSync(join(dir, '.pi')));
   const ref = project(child);
-  assert.equal(ref.dir, join(dir, '.pi', 'optchat'));
+  // Git may expand Windows 8.3 names (RUNNER~1) or directory aliases; compare the actual locations.
+  assert.equal(realpathSync.native(ref.dir), realpathSync.native(join(dir, '.pi', 'optchat')));
   assert.deepEqual(discoverProjectProfile(dir), ref);
   assert.deepEqual(discoverProjectProfile(child), ref);
+  assert.deepEqual(discoverProjectProfile(physical), ref, 'directory aliases select the same project profile');
   assert.equal(git(dir, 'status', '--porcelain'), '');
   assert.ok(!existsSync(join(dir, '.gitignore')), 'the source project needs no tracked ignore edit');
   assert.ok(!existsSync(join(ref.dir, 'profiles')));
