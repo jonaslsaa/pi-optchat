@@ -38,6 +38,15 @@ test('a failed default write keeps the old marker and displays the failure; Esca
   picker.handleInput('\x1b'); assert.deepEqual(opened, [undefined]);
 });
 
+test('Escape offers none when no profile is loaded, without changing the saved default', () => {
+  const opened: (ProfileOption | undefined)[] = [], saved: ProfileChoice[] = [];
+  const picker = profilePicker(plain, choices, 'work', value => opened.push(value), value => saved.push(value), () => {}, true);
+  assert.match(picker.render(100).join('\n'), /Esc none/);
+  picker.handleInput('\x1b');
+  assert.deepEqual(opened, [{ label: 'none', profile: null }]);
+  assert.deepEqual(saved, []);
+});
+
 test('project defaults use their directory identity, and selection scrolls beyond ten entries', () => {
   const project = { kind: 'project', dir: '/repo/.pi/optchat' } as const;
   const entries: ProfileOption[] = [...Array.from({ length: 12 }, (_, i) => ({ label: `p${i}`, profile: `p${i}` })),

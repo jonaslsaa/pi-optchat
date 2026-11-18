@@ -47,7 +47,7 @@ export type ProfileOption = { label: string; profile: ProfileChoice } | { label:
 
 /** D changes future startups without closing the picker or changing the current session. */
 export function profilePicker(theme: Theme, choices: ProfileOption[], current: ProfileChoice, close: (choice?: ProfileOption) => void,
-  save: (profile: ProfileChoice) => void, redraw = () => {}) {
+  save: (profile: ProfileChoice) => void, redraw = () => {}, plainOnCancel = false) {
   const items = choices.map((choice, index) => ({ value: String(index), label: choice.label }));
   const labels = () => { for (const [index, choice] of choices.entries()) items[index].label = `${choice.label}${'profile' in choice && sameProfile(current, choice.profile) ? ' (default)' : ''}`; };
   labels();
@@ -56,11 +56,11 @@ export function profilePicker(theme: Theme, choices: ProfileOption[], current: P
     description: t => theme.fg('muted', t), scrollInfo: t => theme.fg('muted', t), noMatch: t => theme.fg('muted', t),
   });
   list.onSelect = item => close(choices[Number(item.value)]);
-  list.onCancel = () => close();
+  list.onCancel = () => close(plainOnCancel ? { label: 'none', profile: null } : undefined);
   const box = new Box(1, 0); box.addChild(list);
   const error = new Text('', 1, 0);
   const page = frame(theme, 'OptChat profile', undefined, [new Spacer(1), box, error, new Spacer(1),
-    new Text(theme.fg('dim', '↑↓ select · Enter open · D set default · Esc cancel'), 1, 0)]);
+    new Text(theme.fg('dim', `↑↓ select · Enter open · D set default · Esc ${plainOnCancel ? 'none' : 'cancel'}`), 1, 0)]);
   return Object.assign(page, { handleInput: (data: string) => {
     const at = Number(list.getSelectedItem()?.value), choice = choices[at];
     if (data === 'D' || matchesKey(data, 'shift+d')) {
@@ -73,7 +73,7 @@ export function profilePicker(theme: Theme, choices: ProfileOption[], current: P
     redraw();
   } });
 }
-export function pickProfile(ctx: ExtensionContext, choices: ProfileOption[]) {
+export function pickProfile(ctx: ExtensionContext, choices: ProfileOption[], plainOnCancel = false) {
   return ctx.ui.custom<ProfileOption | undefined>((tui, theme, _keys, done) =>
-    profilePicker(theme, choices, preferredProfile(ctx), done, saveDefaultProfile, () => tui.requestRender()));
+    profilePicker(theme, choices, preferredProfile(ctx), done, saveDefaultProfile, () => tui.requestRender(), plainOnCancel));
 }

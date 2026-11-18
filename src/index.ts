@@ -275,7 +275,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (await profileOwner(resolveProfile(choice.profile).dir).then(owner => !!owner, () => true)) choice.label += ' (in-use)';
     }));
     choices.push({ label: '+ Create profile', create: 'global' }, { label: 'none', profile: null });
-    const selected = await pickProfile(ctx, choices);
+    const selected = await pickProfile(ctx, choices, !(active || remote || rpcWindow || joined));
     if (!selected) return undefined;
     if ('profile' in selected) return selected.profile;
     if (selected.create === 'project') return createProjectProfile(ctx.cwd);

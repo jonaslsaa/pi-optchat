@@ -10,7 +10,7 @@ import { AgentSessionRuntime, createAgentSession, DefaultResourceLoader, ModelRu
 import optchat from '../src/index.ts';
 import { createProfile, lastProfile, loadConfig, profilePath, profileOwner, saveConfig } from '../src/profiles.ts';
 import { createProjectProfile, discoverProjectProfile, resolveProfile } from '../src/project-profiles.ts';
-import { saveDefaultProfile } from '../src/profile-picker.ts';
+import { readDefaultProfile, saveDefaultProfile } from '../src/profile-picker.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { profilePickerUI, removeDir } from './support.ts';
 
@@ -342,6 +342,41 @@ test('none survives /new and resume inside a project, and restores Pi tools, cac
   finally { await resumed.close(); }
 });
 
+test('Escape at startup binds plain Pi through /new and resume, even if a project profile appears later', async () => {
+  const dir = repository(), pi = await start(dir, { mode: 'tui', lifecycle: true });
+  let file: string;
+  try {
+    assert.equal(pi.picks.length, 1, 'the fixture presses Escape in the startup picker');
+    assert.deepEqual(pi.bindings(), [{ kind: 'none' }]);
+    assert.deepEqual(pi.session.getActiveToolNames(), []);
+    await pi.session.prompt('Plain Pi after Escape');
+    assert.equal(pi.sent.length, 1);
+    assert.doesNotMatch(JSON.stringify(pi.sent), /You are OptChat/);
+    file = pi.manager.getSessionFile()!;
+    project(dir);
+    await pi.host!.newSession();
+    assert.deepEqual(pi.bindings(), [{ kind: 'none' }]);
+    assert.equal(pi.picks.length, 1);
+    assert.deepEqual(pi.errors, []);
+  } finally { await pi.close(); }
+  const resumed = await start(dir, { mode: 'tui', manager: SessionManager.open(file!) });
+  try { assert.deepEqual(resumed.bindings(), [{ kind: 'none' }]); assert.deepEqual(resumed.picks, []); }
+  finally { await resumed.close(); }
+});
+
+test('Escape with a loaded project keeps its session, binding and tools', async () => {
+  const dir = repository(), ref = project(dir), pi = await start(dir, { mode: 'tui', lifecycle: true });
+  try {
+    const sessionId = pi.manager.getSessionId(), tools = pi.session.getActiveToolNames();
+    await pi.session.prompt('/optchat profile');
+    assert.equal(pi.manager.getSessionId(), sessionId);
+    assert.deepEqual(pi.bindings(), [ref]);
+    assert.deepEqual(pi.session.getActiveToolNames(), tools);
+    assert.ok(await profileOwner(ref.dir), 'the current profile remains open');
+    assert.deepEqual(pi.errors, []);
+  } finally { await pi.close(); }
+});
+
 test('a saved default loads quietly outside projects; a project overrides it and can itself be saved as default', async () => {
   const dir = repository(), ref = project(dir); global('preferred');
   saveDefaultProfile('preferred');
@@ -365,12 +400,18 @@ test('a busy saved default stays quiet at startup and marks only the other insta
     const page = await factory(...args); screen = page.render(500).join('\n'); return page;
   }, options);
   const owner = await start(dir, { mode: 'tui', ui: { custom: inspect } });
-  const second = await start(dir, { mode: 'tui', ui: { custom: inspect } });
+  const second = await start(dir, { mode: 'tui', lifecycle: true, ui: { custom: inspect } });
   try {
     assert.deepEqual(second.picks, []); assert.equal(screen, '');
     assert.match(second.notes.join('\n'), /Profile already running/);
     await second.session.prompt('/optchat profile');
     assert.match(screen, /busy-default \(in-use\) \(default\)/);
+    assert.deepEqual(second.bindings(), [{ kind: 'none' }], 'Escape after a failed autoload selects plain Pi');
+    await second.session.prompt('Plain Pi after leaving the busy profile picker');
+    assert.equal(second.sent.length, 1);
+    assert.doesNotMatch(JSON.stringify(second.sent), /You are OptChat/);
+    assert.equal(readDefaultProfile(), 'busy-default');
+    assert.deepEqual(second.errors, []);
     await owner.session.prompt('/optchat profile');
     assert.match(screen, /busy-default \(default\)/);
     assert.doesNotMatch(screen, /busy-default \(in-use\)/);
