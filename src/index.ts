@@ -266,9 +266,6 @@ export default function optchat(pi: ExtensionAPI) {
     const choices: ProfileOption[] = names.map(profile => ({ label: profile === 'none' ? 'none (global)' : profile, profile }));
     if (project) choices.push(existing ? { label: `${resolveProfile(existing).name} (this project)`, profile: existing }
       : { label: '+ Create project profile', create: 'project' });
-    const saved = preferredProfile(ctx);
-    if (saved && typeof saved !== 'string' && !sameProfile(existing, saved))
-      choices.push({ label: `${resolveProfile(saved).name} (project)`, profile: saved });
     await Promise.all(choices.map(async choice => {
       if (!('profile' in choice) || !choice.profile || sameProfile(active?.profile, choice.profile)) return;
       // An unresponsive lock is still occupied; opening the selection reports the underlying error.

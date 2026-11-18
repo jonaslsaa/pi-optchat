@@ -377,7 +377,7 @@ test('Escape with a loaded project keeps its session, binding and tools', async 
   } finally { await pi.close(); }
 });
 
-test('a saved default loads quietly outside projects; a project overrides it and can itself be saved as default', async () => {
+test('a global default loads quietly outside projects; a project overrides it but cannot replace the default', async () => {
   const dir = repository(), ref = project(dir); global('preferred');
   saveDefaultProfile('preferred');
   try {
@@ -386,10 +386,41 @@ test('a saved default loads quietly outside projects; a project overrides it and
       try { assert.deepEqual(pi.bindings(), [expected]); assert.deepEqual(pi.picks, []); assert.deepEqual(pi.errors, []); }
       finally { await pi.close(); }
     }
-    saveDefaultProfile(ref);
-    const pi = await start(sandbox(), { mode: 'tui' });
-    try { assert.deepEqual(pi.bindings(), [ref]); assert.deepEqual(pi.picks, []); assert.deepEqual(pi.errors, []); }
-    finally { await pi.close(); }
+    assert.throws(() => Reflect.apply(saveDefaultProfile, undefined, [ref]), /Only global profiles/);
+    assert.equal(readDefaultProfile(), 'preferred');
+    const picks = [`D:${resolveProfile(ref).name} (this project)`, undefined];
+    const pi = await start(dir, { mode: 'tui', ui: { select: async () => picks.shift() } });
+    try {
+      const sessionId = pi.manager.getSessionId();
+      await pi.session.prompt('/optchat profile');
+      assert.deepEqual(picks, []);
+      assert.equal(readDefaultProfile(), 'preferred');
+      assert.equal(pi.manager.getSessionId(), sessionId);
+      assert.deepEqual(pi.bindings(), [ref]); assert.deepEqual(pi.errors, []);
+    } finally { await pi.close(); }
+  } finally { saveDefaultProfile(null); }
+});
+
+test('project defaults saved by older builds are ignored outside their worktree, without deleting project data', async () => {
+  const dir = repository(), ref = project(dir);
+  const path = join(process.env.OPTCHAT_HOME!, 'default-profile'), saved = `${JSON.stringify(ref)}\n`;
+  writeFileSync(path, saved);
+  try {
+    assert.equal(readDefaultProfile(), undefined);
+    const elsewhere = await start(sandbox(), { mode: 'tui' });
+    try {
+      assert.equal(elsewhere.picks.length, 1);
+      assert.ok(elsewhere.picks[0].every(label => !label.includes('(project)') && !label.includes('(this project)')));
+      assert.deepEqual(elsewhere.bindings(), [{ kind: 'none' }]);
+      assert.deepEqual(elsewhere.errors, []);
+      assert.equal(await profileOwner(ref.dir), undefined, 'the old default did not open the project');
+    } finally { await elsewhere.close(); }
+    const local = await start(dir, { mode: 'tui' });
+    try {
+      assert.deepEqual(local.picks, []); assert.deepEqual(local.bindings(), [ref]); assert.deepEqual(local.errors, []);
+    } finally { await local.close(); }
+    assert.equal(readFileSync(path, 'utf8'), saved, 'discovery does not rewrite the old preference');
+    assert.ok(existsSync(join(ref.dir, 'config.json')));
   } finally { saveDefaultProfile(null); }
 });
 

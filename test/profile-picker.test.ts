@@ -47,13 +47,20 @@ test('Escape offers none when no profile is loaded, without changing the saved d
   assert.deepEqual(saved, []);
 });
 
-test('project defaults use their directory identity, and selection scrolls beyond ten entries', () => {
+test('project profiles can be opened but not made default, including after scrolling beyond ten entries', () => {
   const project = { kind: 'project', dir: '/repo/.pi/optchat' } as const;
   const entries: ProfileOption[] = [...Array.from({ length: 12 }, (_, i) => ({ label: `p${i}`, profile: `p${i}` })),
     { label: 'repo (this project)', profile: project }, { label: 'none', profile: null }];
   let opened: ProfileOption | undefined;
-  const picker = profilePicker(plain, entries, { ...project }, choice => { opened = choice; }, () => {});
+  const saved: ProfileChoice[] = [];
+  const picker = profilePicker(plain, entries, 'p0', choice => { opened = choice; }, profile => saved.push(profile));
   for (let i = 0; i < 12; i++) picker.handleInput('j');
-  assert.match(picker.render(100).join('\n'), /repo \(this project\) \(default\)/);
+  const screen = () => picker.render(100).join('\n');
+  assert.match(screen(), /repo \(this project\)/);
+  assert.doesNotMatch(screen(), /repo \(this project\) \(default\)|D set default/);
+  picker.handleInput('D'); picker.handleInput('\x1b[100;2u');
+  assert.deepEqual(saved, []);
+  picker.handleInput('k'); assert.match(screen(), /D set default/);
+  picker.handleInput('j');
   picker.handleInput('\r'); assert.deepEqual(opened, entries[12]);
 });
