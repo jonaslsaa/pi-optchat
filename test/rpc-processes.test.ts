@@ -1,12 +1,12 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
+import { createProfile, loadConfig, profileOwner, profilePath, saveConfig } from '../src/profiles.ts';
 import { ROLE_STATUS } from '../src/rpc-window.ts';
 import { readRun } from '../src/run-record.ts';
 import { resumeCutOff } from '../src/window-client.ts';
@@ -95,6 +95,41 @@ test('real Pi subprocesses can disable OptChat in a busy project, including RPC 
     for (const process of [plain?.child, owner.child]) if (process) {
       process.kill('SIGKILL');
       await until('subprocess exit', () => process.exitCode !== null || process.signalCode !== null);
+    }
+  }
+});
+
+test('an orchestrator and two nested projects concurrently own separate profiles and memories', { timeout: 120_000 }, async () => {
+  const orchestrator = mkdtempSync(join(root, 'orch-'));
+  const projects = [orchestrator, join(orchestrator, 'first'), join(orchestrator, 'second')].map((cwd, i) => {
+    mkdirSync(cwd, { recursive: true }); execFileSync('git', ['init', '-q', cwd]);
+    const profile = createProjectProfile(cwd);
+    saveConfig(profile.dir, { ...loadConfig(profile.dir), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' }, subagent: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    return { cwd, profile, task: `Only project ${i} remembers this task` };
+  });
+  const running: ReturnType<typeof pi>[] = [];
+  try {
+    running.push(pi(undefined, { cwd: orchestrator }));
+    await until('the orchestrator owner', () => running[0].role()?.role === 'owner');
+    for (const project of projects.slice(1)) running.push(pi(undefined, { cwd: project.cwd }));
+    await until('both project owners', () => running.every(child => child.role()?.role === 'owner'));
+    for (const [i, child] of running.entries()) {
+      assert.equal((await profileOwner(projects[i].profile.dir))?.pid, child.child.pid, 'each process owns its own project profile');
+      child.prompt(projects[i].task);
+    }
+    await until('all project replies', () => running.every((child, i) => child.text().includes(`Reply: ${projects[i].task}`)
+      && child.events.some(e => e.type === 'agent_end')));
+    for (const [i, project] of projects.entries()) {
+      const main = join(project.profile.dir, 'main');
+      const memory = readdirSync(main).filter(file => file.endsWith('.jsonl')).map(file => readFileSync(join(main, file), 'utf8')).join('\n');
+      assert.ok(memory.includes(project.task), 'each project records its own conversation');
+      for (const other of projects.filter(other => other !== project)) assert.ok(!memory.includes(other.task), 'other projects do not leak into its memory');
+      assert.doesNotMatch(running[i].text(), /extension_error|Profile already running|connected conversation/);
+    }
+  } finally {
+    for (const { child } of running) {
+      child.kill('SIGKILL');
+      await until('project process exit', () => child.exitCode !== null || child.signalCode !== null);
     }
   }
 });
