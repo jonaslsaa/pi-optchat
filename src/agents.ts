@@ -410,11 +410,12 @@ export class Children {
     void this.cutOffUnder(id, true).catch(error => this.warn(`Could not tell window ${id} about its stopped subagents: ${String(error)}`));
     return () => { if (this.windows.get(id) === send) this.windows.delete(id); };
   }
-  /** A window's subagents that a Pi restart cut off (see resumeCutOff), named once it reconnects, whose tell resumes them, or once it has ended to the main chat. */
+  /** A window's subagents that a Pi restart cut off (see resumeCutOff), named once it reconnects, whose tell resumes them (they stay
+   * cut off till then, so their own cut-off agents are named to them as they resume), or once it has ended to the main chat. */
   private async cutOffUnder(id: string, open: boolean) {
     const cut = [...this.history.records.values()].filter(run => run.parentId === id && run.cutOff);
     if (!cut.length) return;
-    for (const run of cut) { delete run.cutOff; this.save(run); }
+    if (!open) for (const run of cut) { delete run.cutOff; this.save(run); }
     const ids = cut.map(run => run.id).join(', ');
     await this.toWindow(id, open ? `Pi restarted while your subagents ${ids} were working, so they stopped. tell resumes one where it left off if you still need its result.`
       : `Pi restarted while subagents ${ids} of connected window ${id} were working, so they stopped. The window ended before it could resume them; spawn new ones if their work is still needed.`);
@@ -733,8 +734,9 @@ export class Children {
     for (const id of cut) {
       const run = current(id);
       if (!run) continue;
-      // A window in its own Pi hears of it when it registers again, or the main chat when it ends (cutOffUnder).
-      if (run.parentId && this.history.records.get(run.parentId)?.window) continue;
+      // A window in its own Pi still open hears of it when it registers again, or the main chat when it ends (cutOffUnder).
+      const window = run.parentId ? this.history.records.get(run.parentId) : undefined;
+      if (window && runsElsewhere(window)) continue;
       if (run.parentId) {
         // Its parent was not cut off (it was paused, say) or could not be resumed: nobody else will mention it.
         if (!this.history.records.get(run.parentId)?.cutOff && !this.running.has(run.parentId)) { orphans.push(`${run.id} (under ${run.parentId})`); drop(run); }
