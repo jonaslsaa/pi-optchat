@@ -1,6 +1,7 @@
 import { chmodSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
-import { INTERRUPTED, type Children } from './agents.ts';
+import { Value } from 'typebox/value';
+import { INTERRUPTED, TASKS, type Children } from './agents.ts';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './core/cache.ts';
 import { checkPatch, checkSocketPath, isWindows, profileSocket, removeStaleSocket, type ConfigPatch } from './profiles.ts';
@@ -11,8 +12,9 @@ import { connectWindow, isAssistant, isImportAction, wire, type Action, type Imp
 import type { AssistantMessage, UserMessage } from '@earendil-works/pi-ai';
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
-/** What a registered window may still ask: its agent and conversation are its own. */
-const REMOTE_ACTIONS: readonly Action[] = ['handoff', 'tell-main'];
+/** What a registered window may still ask: its agent and conversation are its own, its subagents run here. The reply to
+ * `register` lists them, so a window knows what an older owner can't do. */
+const REMOTE_ACTIONS: readonly Action[] = ['handoff', 'tell-main', 'spawn', 'tell', 'models'];
 const SHORTENED = '\n[Display shortened; full text is saved in the transcript.]';
 /** Stays under the 4 MB frame bound even when JSON escapes some characters. */
 const ANSWER_LIMIT = 1_000_000;
@@ -45,6 +47,7 @@ export async function serveWindows(directory: string, children: Children, availa
     if (closing) { socket.destroy(); return; }
     connections.add(socket);
     let child: string | undefined, attached = false, remote = false, cursor = 0, firstUser = true, lastStatus = '';
+    let disconnect: (() => void) | undefined;
     // `finished`: an attached agent ended, and the view takes only `resume`, which the app's client sends (Pi's terminal attach
     // just reads a finished agent), until the agent is live again. `closing`: the view takes nothing more.
     let phase: 'open' | 'finished' | 'closing' = 'open';
@@ -107,6 +110,9 @@ export async function serveWindows(directory: string, children: Children, availa
             if (!isRemoteWindow(window)) throw new Error('Invalid window registration');
             await children.adopt(window);
             child = window.id; remote = true;
+            // Its subagents' reports and messages: the window's agent gets them as it would a report (rpc-window.ts).
+            disconnect = children.connectWindow(child, text => { send({ kind: 'event', name: 'message', text }); return !socket.destroyed; });
+            send({ kind: 'reply', id: frame.id, text: REMOTE_ACTIONS.join(' ') }); return;
           } else if (frame.action === 'start') {
             if (child) throw new Error('This window already has a conversation');
             ready();
@@ -117,7 +123,21 @@ export async function serveWindows(directory: string, children: Children, availa
           } else {
             if (!child) throw new Error('Send your first request to start a conversation');
             if (remote && !REMOTE_ACTIONS.includes(frame.action)) throw new Error('This window runs its own agent');
-            if (!remote && frame.action === 'handoff') throw new Error('Only a window running its own agent hands off');
+            if (!remote && frame.action !== 'tell-main' && REMOTE_ACTIONS.includes(frame.action)) throw new Error(`Only a window running its own agent asks for ${frame.action}`);
+            if (frame.action === 'spawn') {
+              ready();
+              let tasks: unknown;
+              try { tasks = JSON.parse(frame.text ?? ''); } catch { tasks = undefined; }
+              if (!Value.Check(TASKS, tasks) || !frame.cwd) throw new Error('Tasks and a working directory are required');
+              send({ kind: 'reply', id: frame.id, text: await children.start(tasks, frame.cwd, controller.signal, child) }); return;
+            }
+            if (frame.action === 'tell') {
+              let tell: unknown;
+              try { tell = JSON.parse(frame.text ?? ''); } catch { tell = undefined; }
+              if (!record(tell) || typeof tell.id !== 'string' || typeof tell.message !== 'string') throw new Error('An agent ID and a message are required');
+              send({ kind: 'reply', id: frame.id, text: await children.guide(child, tell.id, tell.message) }); return;
+            }
+            if (frame.action === 'models') { send({ kind: 'reply', id: frame.id, text: children.models(frame.text || undefined) }); return; }
             if (frame.action === 'handoff') {
               phase = 'closing';
               // Delivered (or saved for the next start) before the reply, so the window queues it if this owner fails it.
@@ -230,7 +250,7 @@ export async function serveWindows(directory: string, children: Children, availa
     const { promise: ended, resolve } = Promise.withResolvers<void>();
     const connection = ended.then(async () => {
       clearInterval(timer); controller.abort(); connections.delete(socket);
-      await queue;
+      await queue; disconnect?.();
       // A window running its own agent outlives this owner: it hands off to whoever owns the profile when it ends.
       if (child && remote) { if (!closing) await children.endRemote(child, 'disconnected'); }
       else if (child && !attached) await children.finish(child, closing ? 'owner-stopped' : 'disconnected');

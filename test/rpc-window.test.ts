@@ -11,6 +11,7 @@ import { ROLE_STATUS, type Role } from '../src/rpc-window.ts';
 import { fixtureProvider, type Sent } from './fixtures/rpc-provider.ts';
 import { connectWindow, type WindowEvent } from '../src/window-client.ts';
 import { removeDir } from './support.ts';
+import { readRuns } from '../src/run-record.ts';
 
 // Short paths: the profile's sockets have a ~103-byte limit on macOS.
 const root = mkdtempSync(process.platform === 'win32' ? join(tmpdir(), 'oc-rpcw-') : '/tmp/oc-rpcw-');
@@ -96,7 +97,7 @@ test('an RPC session on a busy profile joins as a connected window: its own agen
     const [request] = window.sent;
     assert.match(request.system, /You are a connected window of OptChat/);
     assert.match(request.messages.join('\n'), /The colour is teal\./, 'the view, read from disk, comes with the request');
-    assert.ok(!window.sent.some(s => s.system.includes('"spawn"')) && !window.session.getActiveToolNames().includes('spawn'), 'a window delegates nothing');
+    assert.ok(window.session.getActiveToolNames().includes('spawn'), 'a window delegates through the owner');
     assert.ok(window.session.getActiveToolNames().includes('zoom'));
     // The owner's agent is told about the window on its next turn, without a turn of its own; that changes the view.
     const pending = () => readFileSync(join(profilePath(name), 'pending-reports.json'), 'utf8');
@@ -372,4 +373,40 @@ test('a window on a missing profile is refused, and nothing is created', async (
     assert.match(missing.errors[0] ?? '', /does not exist/);
     assert.equal(existsSync(profilePath('nope')), false);
   } finally { await missing.close(); }
+});
+
+test('a window\'s spawn starts its subagents on the owner, as their parent: their reports reach the window, and once it has ended the main chat', async () => {
+  const name = profile();
+  let release = () => {};
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const owner = await rpc(name, undefined, 'rpc', true, request => request.endsWith('slow work') ? held : undefined);
+  const window = await rpc(name);
+  const spawn = (task: string) => `CALL spawn ${JSON.stringify({ tasks: [{ task }] })}`;
+  try {
+    await window.ask(spawn('quick work'));
+    const role = window.role(), id = role?.role === 'window' ? role.id : '';
+    const [quick] = readRuns(profilePath(name)).filter(run => run.task === 'quick work');
+    assert.equal(quick?.parentId, id, 'the window is its parent, in the owner\'s records');
+    await until(() => window.sent.some(s => s.last.startsWith(`[${quick.id}] Reply:`)));
+    assert.ok(!owner.sent.some(s => s.last.includes(`[${quick.id}]`)), 'the report went to the window, not the main chat');
+
+    await window.ask(spawn('slow work'));
+    const [slow] = readRuns(profilePath(name)).filter(run => run.task === 'slow work');
+    await window.close();
+    await until(() => readRuns(profilePath(name)).find(run => run.id === id)?.state === 'interrupted');
+    release();
+    await until(() => owner.sent.some(s => s.last.includes(`[${slow.id}] Reply:`)));
+    assert.match(owner.sent.find(s => s.last.includes(`[${slow.id}] Reply:`))!.last, new RegExp(`For connected window ${id}, which has ended`));
+    assert.ok(!window.sent.some(s => s.last.includes(`[${slow.id}]`)));
+  } finally { release(); await window.close(); await owner.close(); }
+});
+
+test('a window\'s spawn with no owner to reach fails and says so', async () => {
+  const name = profile(), owner = await rpc(name), window = await rpc(name);
+  try {
+    await window.ask('Hello');
+    await owner.close();
+    await until(() => { const role = window.role(); return role?.role === "window" && !role.connected; });
+    assert.match(await window.ask(`CALL spawn ${JSON.stringify({ tasks: [{ task: 'work' }] })}`) ?? '', /^Reply: No main window is reachable/);
+  } finally { await window.close(); await owner.close(); }
 });

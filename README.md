@@ -91,7 +91,7 @@ Compression and subagents make extra model requests with your provider credentia
 | --- | --- | --- |
 | Compactor model | Sonnet 5.5, medium | Same as `/optchat model`. Applies to the next summary. |
 | Subagent model | Opus 5.5, high | Same as `/optchat agents model`. Applies to new subagents. |
-| Subagent levels | 1 | 1: only the main agent starts subagents. 2 or more: subagents may start their own, that many levels deep. Applies to subagents started or resumed after the change. |
+| Subagent levels | 1 | 1: only the main agent and connected windows start subagents. 2 or more: subagents may start their own, that many levels deep. Applies to subagents started or resumed after the change. |
 | Max active agents | 8 | Subagents running at once in the profile, all levels together, so it also caps how deep a chain can go. |
 | Group subagent reports | off | Off: each subagent reports as soon as it finishes (the recipe). On: the subagents started by one spawn report together, in one message once the last of them finishes. Applies to the next spawn. |
 | Previous exchange | on | Replays your last request and answer in full with the next turn. Off is the recipe. |
@@ -115,7 +115,7 @@ Ask in plain words, for example: "Spawn an agent to investigate this repository 
 - **Reports**: each child reports when it finishes, as one message starting `[id]`, shown in a dark grey `↳ subagent <id>` box. Turn on **Group subagent reports** to get one message per spawn instead.
 - **Model**: children run the profile's subagent model. Ask for another in your request ("review it with anthropic/claude-haiku-5-5 at low") and the agent sets that task's `model` and `thinking`.
 - **Talking**: the parent sends guidance with `tell`; the child messages its parent mid-run with `tell_parent`. `tell` to a finished child resumes it with its saved transcript.
-- **Limits**: by default only the main agent starts subagents. **Subagent levels** lets them delegate further, and **Max active agents** (8) caps how many run at once; going over returns an error, there is no queue.
+- **Limits**: by default only the main agent and connected windows start subagents. **Subagent levels** lets them delegate further, and **Max active agents** (8) caps how many run at once; going over returns an error, there is no queue.
 - **Stopping**: stopping an agent stops its whole subtree. Agents run inside the Pi process, so closing Pi stops them.
 - **Restarts**: agents cut off by a close, crash or `/reload` resume when the profile next opens in interactive Pi, and the main agent is told which. Ones you stopped or paused stay stopped.
 

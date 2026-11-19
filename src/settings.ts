@@ -4,7 +4,7 @@ import { NODE } from './core/memory.ts';
 /** Per-profile choices where OptChat departs from Victor's recipe. Each default is the recipe's behaviour unless noted. */
 export const SETTINGS = {
   subagentLevels: { kind: 'number', label: 'Subagent levels', default: 1, min: 1, unit: '',
-    description: 'How deep subagents can nest. 1: only the main agent starts them.',
+    description: 'How deep subagents can nest. 1: only the main chat and connected windows start them.',
     applies: 'Applies to new or resumed subagents.' },
   maxAgents: { kind: 'number', label: 'Max active agents', default: 8, min: 1, unit: '',
     description: 'Subagents running at once, all levels together. Also caps chain depth.',

@@ -1144,3 +1144,21 @@ test('a ~\\ task cwd is the home directory on Windows only', () => {
   assert.equal(taskDirectory('/base', '~\\project', false), resolve('/base', '~\\project'), 'a POSIX backslash is a literal character');
   assert.equal(taskDirectory('/base', '~/project', false), join(homedir(), 'project'));
 });
+
+test('a connected window starts subagents as the main chat does: at Subagent levels 1 they start none of their own, at 2 they do', async () => {
+  for (const subagentLevels of [1, 2]) {
+    const dir = mkdtempSync(join(tmpdir(), 'optchat-window-levels-'));
+    const { children } = await busyChildren(dir, [], { settings: () => ({ subagentLevels, maxAgents: 8 }) });
+    try {
+      const [inOwner] = await children.spawn([{ task: 'talk' }], dir, undefined, undefined, true);
+      await children.adopt({ id: 'remote01', task: 'talk', cwd: dir, model: 'optchat-test/child', thinking: 'minimal', pid: process.pid }, { announce: false });
+      children.connectWindow('remote01', () => true);
+      for (const window of [inOwner, 'remote01']) {
+        const [child] = await children.spawn([{ task: 'work' }], dir, undefined, window);
+        const deeper = children.spawn([{ task: 'deeper' }], dir, undefined, child);
+        if (subagentLevels === 1) await assert.rejects(deeper, /Delegation depth limit reached/, `${window}'s child`);
+        else assert.equal((await deeper).length, 1);
+      }
+    } finally { await children.close(); removeDir(dir); }
+  }
+});

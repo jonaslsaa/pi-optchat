@@ -8,7 +8,7 @@ import { HANDOFF, HANDOFF_REQUEST } from '../../src/prompts.ts';
 export interface Sent { system: string; messages: string[]; last: string }
 
 /** A model with no network: it answers `Reply: <request>`, a window's handoff request with `Handoff: …` and the compactor's
- * handoff with `Summary: …`. `sent` records every request; `hold` keeps a reply back until the promise it returns settles. Loaded by `pi -e`
+ * handoff with `Summary: …`. A request `CALL <tool> <JSON arguments>` calls that tool. `sent` records every request; `hold` keeps a reply back until the promise it returns settles. Loaded by `pi -e`
  * too, for the real RPC test. */
 export function fixtureProvider(sent: Sent[] = [], hold?: (request: string) => Promise<void> | undefined): ProviderConfig {
   return {
@@ -21,10 +21,11 @@ export function fixtureProvider(sent: Sent[] = [], hold?: (request: string) => P
       const end = text.lastIndexOf('</chat>'), request = (end >= 0 ? text.slice(end + '</chat>'.length) : text).trim();
       sent.push({ system, messages: messages.map(m => JSON.stringify(m)), last: request });
       const reply = system.includes(JSON.stringify(HANDOFF).slice(1, 40)) ? `Summary: ${request.slice(0, 2000)}` : request.startsWith(HANDOFF_REQUEST) ? 'Handoff: the user asked about the colour; I answered.' : `Reply: ${request}`;
-      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: reply.slice(0, 400) }],
-        api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+      const call = last?.role === 'toolResult' ? undefined : /^CALL (\w+) (\{.*\})$/s.exec(request);
+      const message: AssistantMessage = { role: 'assistant', content: [call ? { type: 'toolCall', id: `call-${sent.length}`, name: call[1], arguments: JSON.parse(call[2]) } : { type: 'text', text: reply.slice(0, 400) }],
+        api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: call ? 'toolUse' : 'stop', usage: emptyUsage() };
       const stream = createAssistantMessageEventStream();
-      void Promise.resolve(hold?.(request)).then(() => { stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: 'stop', message }); stream.end(); });
+      void Promise.resolve(hold?.(request)).then(() => { stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: call ? 'toolUse' : 'stop', message }); stream.end(); });
       return stream;
     },
   };

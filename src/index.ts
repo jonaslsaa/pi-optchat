@@ -640,14 +640,15 @@ export default function optchat(pi: ExtensionAPI) {
     description: 'Start background subagents, returning IDs immediately. Use only when the user asks. Give each task the cwd of the project it works on, so the subagent starts there with that project\'s AGENTS.md. Leave a task\'s model unset for the profile\'s default; name one only when the user asks, with an id from models(). Each receives the current memory view and read-only zoom/date. Whether children may delegate further, and how many agents may run at once, is set per profile. Completion reports arrive automatically; never poll or sleep waiting for them.',
     parameters: Type.Object({ tasks: TASKS }),
     async execute(_id, args, signal, _update, ctx) {
+      if (rpcWindow) return result(await rpcWindow.delegate('spawn', JSON.stringify(args.tasks)));
       const text = await required().children.start(args.tasks, ctx.cwd, signal); status(ctx);
       return result(text);
     },
   });
-  pi.registerTool(modelsTool(() => required().children));
+  pi.registerTool(modelsTool(provider => rpcWindow ? rpcWindow.delegate('models', provider) : required().children.models(provider)));
   pi.registerTool({ name: 'tell', label: 'Tell background agent', description: 'Send a message to a subagent. A running one gets it at its next tool boundary. A finished one you started is resumed with its earlier conversation, and its new report arrives automatically.',
     parameters: Type.Object({ id: Type.String(), message: Type.String() }),
-    async execute(_id, args) { return result(await required().children.tell(args.id, args.message)); },
+    async execute(_id, args) { return result(rpcWindow ? await rpcWindow.delegate('tell', JSON.stringify(args)) : await required().children.tell(args.id, args.message)); },
   });
 
   /** The settings page's options: every model Pi is logged in to, with the thinking levels it takes, sorted so each provider's models sit together. */
