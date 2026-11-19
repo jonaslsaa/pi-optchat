@@ -395,7 +395,7 @@ export class Children {
     };
   }
   /** A parent agent's tell to one of its own children. */
-  guide(parentId: string, id: string, message: string) {
+  async guide(parentId: string, id: string, message: string) {
     if (this.history.records.get(id)?.parentId !== parentId) throw new Error('You can only guide your own children.');
     return this.tell(id, message, 'manager', parentId);
   }
@@ -665,8 +665,9 @@ export class Children {
     if (!['completed', 'failed', 'stopped', 'interrupted'].includes(run.state) || this.resuming.has(id)) throw new Error(`${id} is still finishing. Its report will arrive on its own.`);
     if (run.parentId !== caller) {
       if (!run.parentId) throw new Error(`Only the main agent can resume ${id}.`);
-      const parent = this.parentRun(run.parentId);
-      throw new Error(parent && ['running', 'waiting', 'paused'].includes(parent.state) ? `Only ${id}'s parent ${run.parentId} can resume it. Ask ${run.parentId} with tell.`
+      const parent = this.parentRun(run.parentId), window = this.history.records.get(run.parentId)?.connected;
+      throw new Error(parent && ['running', 'waiting', 'paused'].includes(parent.state) ? `Only ${id}'s parent ${run.parentId} can resume it.${window ? '' : ` Ask ${run.parentId} with tell.`}`
+        : window ? `Only ${id}'s parent, connected window ${run.parentId}, could resume it, and that window has ended. Spawn a new subagent instead.`
         : `Only ${id}'s parent ${run.parentId} can resume it, and that parent is no longer running. Resume ${run.parentId} instead, or spawn a new subagent.`);
     }
     if (this.closing) throw new Error('Profile is closing.');

@@ -12,6 +12,7 @@ import { fixtureProvider, type Sent } from './fixtures/rpc-provider.ts';
 import { connectWindow, type WindowEvent } from '../src/window-client.ts';
 import { removeDir } from './support.ts';
 import { readRuns } from '../src/run-record.ts';
+import { HANDOFF_REQUEST } from '../src/prompts.ts';
 
 // Short paths: the profile's sockets have a ~103-byte limit on macOS.
 const root = mkdtempSync(process.platform === 'win32' ? join(tmpdir(), 'oc-rpcw-') : '/tmp/oc-rpcw-');
@@ -409,4 +410,27 @@ test('a window\'s spawn with no owner to reach fails and says so', async () => {
     await until(() => { const role = window.role(); return role?.role === "window" && !role.connected; });
     assert.match(await window.ask(`CALL spawn ${JSON.stringify({ tasks: [{ task: 'work' }] })}`) ?? '', /^Reply: No main window is reachable/);
   } finally { await window.close(); await owner.close(); }
+});
+
+test('a report that reaches a window while it writes its handoff goes into the handoff, not into the handoff turn', async () => {
+  const name = profile();
+  let releaseChild = () => {}, releaseHandoff = () => {};
+  const child = new Promise<void>(resolve => { releaseChild = resolve; }), handoff = new Promise<void>(resolve => { releaseHandoff = resolve; });
+  const owner = await rpc(name, undefined, 'rpc', true, request => request.endsWith('late work') ? child : undefined);
+  const window = await rpc(name, undefined, 'rpc', true, request => request.startsWith(HANDOFF_REQUEST) ? handoff : undefined);
+  try {
+    await window.ask(`CALL spawn ${JSON.stringify({ tasks: [{ task: 'late work' }] })}`);
+    const [late] = readRuns(profilePath(name)).filter(run => run.task === 'late work');
+    const completing = window.ask('/complete');
+    await until(() => window.sent.some(s => s.last.startsWith(HANDOFF_REQUEST)));
+    releaseChild();
+    await until(() => readRuns(profilePath(name)).find(run => run.id === late.id)?.state === 'completed');
+    await new Promise(resolve => setTimeout(resolve, 200)); // The report is on its way to the window.
+    releaseHandoff();
+    await completing;
+    await until(() => owner.sent.some(s => s.last.includes('completed by user')));
+    const delivered = owner.sent.find(s => s.last.includes('completed by user'))!.last;
+    assert.match(delivered, /Handoff: the user asked about the colour/, 'the handoff is the window\'s answer to the handoff request');
+    assert.match(delivered, new RegExp(`arrived while this conversation ended:\\n\\n\\[${late.id}\\] Reply:`));
+  } finally { releaseChild(); releaseHandoff(); await window.close(); await owner.close(); }
 });

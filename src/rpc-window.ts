@@ -49,6 +49,8 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
   let connection: Connection | undefined, registered = false, queued = false, completed = false, closed = false;
   /** What the owner takes from a registered window (see REMOTE_ACTIONS): an older one starts no agents for it. */
   let owns: string[] = [];
+  /** Set by /complete: reports that arrive while the window writes its handoff go into it, not into its handoff turn. */
+  let late: string[] | undefined;
   /** The first request, once there is one: until then there is nothing to register or hand off. */
   let task: string | undefined;
   /** The view goes before the request of the run it was read for, and stays there while it doesn't change, so the rest stays cached. */
@@ -68,7 +70,8 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
     try {
       // Its subagents' reports and messages, which its agent takes as the main agent takes reports.
       opened = await connectWindow(dir, event => {
-        if (event.name === 'message' && !closed) pi.sendMessage({ customType: REPORT_TYPE, content: event.text, display: true }, { triggerTurn: true, deliverAs: 'steer' });
+        if (event.name !== 'message' || closed) return;
+        if (late) late.push(event.text); else pi.sendMessage({ customType: REPORT_TYPE, content: event.text, display: true }, { triggerTurn: true, deliverAs: 'steer' });
       }, () => {
         if (!opened || connection !== opened) return;
         connection = undefined; registered = false; publish();
@@ -175,15 +178,18 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
       await register({ quiet: true });
       if (!connection || !registered) throw new Error('No main window is reachable, so this window can\'t reach subagents now. Try again once the profile is open in Pi or the OptChat app.');
       if (!owns.includes(action)) throw new Error('The main window runs an older pi-optchat, which starts no subagents for a connected window. Restart it after updating pi-optchat, then try again.');
-      return await connection.request(action, text, ctx.cwd) ?? '';
+      // A spawn waits for memory to settle, which can take minutes; timing out would drop this window's connection.
+      return await connection.request(action, text, ctx.cwd, { timeout: 30 * 60_000 }) ?? '';
     },
     /** /complete: the window writes its handoff as one more turn of its own (its context still cached), then hands it to the owner. */
     async complete(command: ExtensionCommandContext) {
       if (completed) { command.ui.notify('This conversation is already completed.', 'info'); return; }
       if (!command.isIdle()) { command.abort(); await command.waitForIdle(); }
       let text: string | undefined;
+      late = [];
       if (task !== undefined) try { text = await writeHandoff(command); }
       catch (error) { command.ui.notify(`This window could not write its handoff, so the main window's compactor writes it: ${error instanceof Error ? error.message : String(error)}`, 'warning'); }
+      if (text && late.length) text += `\n\nSubagent reports that arrived while this conversation ended:\n\n${late.join('\n\n')}`;
       await end('complete', text);
       pi.appendEntry(COMPLETED_TYPE, {});
       completed = true; clearInterval(reconnect); publish();
