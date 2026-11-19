@@ -9,7 +9,7 @@ import { checkPatch, loadConfig, lockProfile, patchConfigFile, ProfileBusyError,
 /** `register` and `handoff` are a window whose agent runs in its own process (an RPC host's): it registers once it has a request,
  * and `handoff` ends it with the handoff it wrote. A window that drops its connection without one ended without /complete.
  * Its `spawn`, `tell` and `models` are its agent's tools, run here; its subagents' reports come back as `message` events. */
-const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'stop', 'resume', 'withdraw', 'complete', 'register', 'handoff', 'configure', 'resume-cut-off', 'spawn', 'tell', 'models',
+const ACTIONS = ['list-agents', 'attach', 'start', 'say', 'tell-main', 'answer', 'interrupt', 'stop', 'resume', 'withdraw', 'complete', 'register', 'handoff', 'configure', 'resume-cut-off', 'spawn', 'tell', 'models', 'completing',
   'import-start', 'import-pause', 'import-resume', 'import-discard'] as const;
 export type Action = typeof ACTIONS[number];
 const isAction = (value: unknown): value is Action => ACTIONS.some(action => action === value);

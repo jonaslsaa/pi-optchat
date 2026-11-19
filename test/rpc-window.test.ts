@@ -412,7 +412,7 @@ test('a window\'s spawn with no owner to reach fails and says so', async () => {
   } finally { await window.close(); await owner.close(); }
 });
 
-test('a report that reaches a window while it writes its handoff goes into the handoff, not into the handoff turn', async () => {
+test('a report for a window that is writing its handoff goes to the main chat, not into the handoff turn', async () => {
   const name = profile();
   let releaseChild = () => {}, releaseHandoff = () => {};
   const child = new Promise<void>(resolve => { releaseChild = resolve; }), handoff = new Promise<void>(resolve => { releaseHandoff = resolve; });
@@ -428,9 +428,12 @@ test('a report that reaches a window while it writes its handoff goes into the h
     await new Promise(resolve => setTimeout(resolve, 200)); // The report is on its way to the window.
     releaseHandoff();
     await completing;
-    await until(() => owner.sent.some(s => s.last.includes('completed by user')));
-    const delivered = owner.sent.find(s => s.last.includes('completed by user'))!.last;
+    const handoffOf = (s: { last: string }) => /^\[\w+\] Connected conversation completed by user/.test(s.last);
+    await until(() => owner.sent.some(handoffOf));
+    const delivered = owner.sent.find(handoffOf)!.last;
     assert.match(delivered, /Handoff: the user asked about the colour/, 'the handoff is the window\'s answer to the handoff request');
-    assert.match(delivered, new RegExp(`arrived while this conversation ended:\\n\\n\\[${late.id}\\] Reply:`));
+    assert.doesNotMatch(delivered, new RegExp(`\\[${late.id}\\] Reply`));
+    await until(() => owner.sent.some(s => s.last.startsWith(`[${late.id}] Reply:`)));
+    assert.match(owner.sent.find(s => s.last.startsWith(`[${late.id}] Reply:`))!.last, /which has ended/, 'an ordinary report, saying whose it was');
   } finally { releaseChild(); releaseHandoff(); await window.close(); await owner.close(); }
 });

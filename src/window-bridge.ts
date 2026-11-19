@@ -14,7 +14,7 @@ import type { AssistantMessage, UserMessage } from '@earendil-works/pi-ai';
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 /** What a registered window may still ask: its agent and conversation are its own, its subagents run here. The reply to
  * `register` lists them, so a window knows what an older owner can't do. */
-const REMOTE_ACTIONS: readonly Action[] = ['handoff', 'tell-main', 'spawn', 'tell', 'models'];
+const REMOTE_ACTIONS: readonly Action[] = ['handoff', 'tell-main', 'spawn', 'tell', 'models', 'completing'];
 const SHORTENED = '\n[Display shortened; full text is saved in the transcript.]';
 /** Stays under the 4 MB frame bound even when JSON escapes some characters. */
 const ANSWER_LIMIT = 1_000_000;
@@ -139,6 +139,8 @@ export async function serveWindows(directory: string, children: Children, availa
               if (!record(tell) || typeof tell.id !== 'string' || typeof tell.message !== 'string') throw new Error('An agent ID and a message are required');
               send({ kind: 'reply', id: frame.id, text: await children.guide(child, tell.id, tell.message) }); return;
             }
+            // /complete has begun: from now on its subagents report to the main chat, as once it has ended.
+            if (frame.action === 'completing') { disconnect?.(); send({ kind: 'reply', id: frame.id }); return; }
             if (frame.action === 'models') { send({ kind: 'reply', id: frame.id, text: children.models(frame.text || undefined) }); return; }
             if (frame.action === 'handoff') {
               phase = 'closing';

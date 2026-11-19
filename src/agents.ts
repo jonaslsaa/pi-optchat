@@ -407,7 +407,17 @@ export class Children {
    */
   connectWindow(id: string, send: (text: string) => boolean) {
     this.windows.set(id, send);
+    void this.cutOffUnder(id, true).catch(error => this.warn(`Could not tell window ${id} about its stopped subagents: ${String(error)}`));
     return () => { if (this.windows.get(id) === send) this.windows.delete(id); };
+  }
+  /** A window's subagents that a Pi restart cut off (see resumeCutOff), named once it reconnects, whose tell resumes them, or once it has ended to the main chat. */
+  private async cutOffUnder(id: string, open: boolean) {
+    const cut = [...this.history.records.values()].filter(run => run.parentId === id && run.cutOff);
+    if (!cut.length) return;
+    for (const run of cut) { delete run.cutOff; this.save(run); }
+    const ids = cut.map(run => run.id).join(', ');
+    await this.toWindow(id, open ? `Pi restarted while your subagents ${ids} were working, so they stopped. tell resumes one where it left off if you still need its result.`
+      : `Pi restarted while subagents ${ids} of connected window ${id} were working, so they stopped. The window ended before it could resume them; spawn new ones if their work is still needed.`);
   }
   /** A report or message for a window in its own Pi: to it while it is open, else to the main chat, saying whose it was. */
   private async toWindow(id: string, text: string, count?: number) {
@@ -723,6 +733,8 @@ export class Children {
     for (const id of cut) {
       const run = current(id);
       if (!run) continue;
+      // A window in its own Pi hears of it when it registers again, or the main chat when it ends (cutOffUnder).
+      if (run.parentId && this.history.records.get(run.parentId)?.window) continue;
       if (run.parentId) {
         // Its parent was not cut off (it was paused, say) or could not be resumed: nobody else will mention it.
         if (!this.history.records.get(run.parentId)?.cutOff && !this.running.has(run.parentId)) { orphans.push(`${run.id} (under ${run.parentId})`); drop(run); }
@@ -768,7 +780,7 @@ export class Children {
     run.handoff = { reason }; run.ended = Date.now();
     transition(run, reason === 'complete' ? 'completed' : 'interrupted');
     this.save(run);
-    const work = this.deliverHandoff(run, undefined, written);
+    const work = this.deliverHandoff(run, undefined, written).then(() => this.cutOffUnder(id, false));
     this.completions.add(work);
     try { await work; } finally { this.completions.delete(work); this.changed(); }
   }

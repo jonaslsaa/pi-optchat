@@ -49,7 +49,7 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
   let connection: Connection | undefined, registered = false, queued = false, completed = false, closed = false;
   /** What the owner takes from a registered window (see REMOTE_ACTIONS): an older one starts no agents for it. */
   let owns: string[] = [];
-  /** Set by /complete: reports that arrive while the window writes its handoff go into it, not into its handoff turn. */
+  /** Set by /complete: reports still on their way go into the handoff, not into its handoff turn; the owner sends later ones to the main chat. */
   let late: string[] | undefined;
   /** The first request, once there is one: until then there is nothing to register or hand off. */
   let task: string | undefined;
@@ -187,6 +187,7 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
       if (!command.isIdle()) { command.abort(); await command.waitForIdle(); }
       let text: string | undefined;
       late = [];
+      if (connection && registered && owns.includes('completing')) await connection.request('completing').catch(() => {});
       if (task !== undefined) try { text = await writeHandoff(command); }
       catch (error) { command.ui.notify(`This window could not write its handoff, so the main window's compactor writes it: ${error instanceof Error ? error.message : String(error)}`, 'warning'); }
       if (text && late.length) text += `\n\nSubagent reports that arrived while this conversation ended:\n\n${late.join('\n\n')}`;
