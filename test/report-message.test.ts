@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createAssistantMessageEventStream, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
+import { createAssistantMessageEventStream, getCurrentSystemPrompt, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
 import { createAgentSession, CustomMessageComponent, DefaultResourceLoader, initTheme, ModelRuntime, SessionManager, SettingsManager,
   UserMessageComponent, type ExtensionAPI, type MessageRenderer } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
@@ -69,7 +69,7 @@ test('a report reaches an idle or busy main agent as a user message to the model
         const text = textContent(context.messages.at(-1)?.content);
         if (!compression) {
           const snapshot = structuredClone(context);
-          systems.push(textContent(snapshot.messages.find(m => m.role === 'system')?.content));
+          systems.push(getCurrentSystemPrompt(snapshot.messages));
           snapshot.messages = snapshot.messages.filter(m => m.role !== 'system');
           captured.push(snapshot);
         }

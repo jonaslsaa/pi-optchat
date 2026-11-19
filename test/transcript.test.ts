@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { createAssistantMessageEventStream, type AssistantMessage, type Context, type ImageContent, type TextContent, type UserMessage } from '@earendil-works/pi-ai';
+import { createAssistantMessageEventStream, getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type Context, type ImageContent, type TextContent, type UserMessage } from '@earendil-works/pi-ai';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionAPI, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
@@ -54,6 +54,23 @@ test('retain the exact last answer and its requests, excluding prior working con
   assert.throws(() => buildContext(history, [], 'view', 'prompt', previous), /no current user message/);
   assert.throws(() => buildContext(history, [{ role: 'custom', customType: 'context', content: 'Supplementary instructions', display: false, timestamp: 1 }], 'view', 'prompt', previous), /no current user message/);
   assert.equal(final.content[0].type, 'thinking', 'the saved transcript must not be mutated');
+});
+
+test('context keeps request prompt sections and tool deltas together, using the fallback only without a system message', () => {
+  const current = user('Current task.'), tool = { name: 'read', description: 'Read a file', parameters: { type: 'object' } };
+  const canonical: AgentMessage[] = [
+    { role: 'system', content: 'Request prompt.', sections: { removed: 'OLD_SECTION', changed: 'OLD_VALUE' }, toolsAdded: [tool], timestamp: 1 },
+    user('Old history.'), current,
+    { role: 'system', content: '', sections: { removed: null, changed: 'CURRENT_VALUE' }, toolsRemoved: [{ name: 'read' }], timestamp: 2 },
+  ];
+  const saved = structuredClone(canonical), projected = buildContext(canonical, [current], 'memory', 'STALE_FALLBACK');
+  assert.match(getCurrentSystemPrompt(projected), /Request prompt\./);
+  assert.match(getCurrentSystemPrompt(projected), /CURRENT_VALUE/);
+  assert.doesNotMatch(JSON.stringify(projected), /OLD_SECTION|OLD_VALUE|STALE_FALLBACK|Old history/);
+  assert.deepEqual(getCurrentTools(projected), []);
+  assert.deepEqual(canonical, saved, 'projection never mutates the supplied request');
+  assert.equal(getCurrentSystemPrompt(buildContext([current], [current], 'memory', 'fallback')), 'fallback');
+  assert.equal(getCurrentSystemPrompt(buildContext([{ role: 'system', content: '', timestamp: 0 }, current], [current], 'memory', 'fallback')), '');
 });
 
 test('unsuccessful or unsettled runs preserve the earlier completed exchange', () => {
@@ -350,7 +367,7 @@ test('main agent keeps Pi\'s AGENTS.md files and skills, with profile instructio
       models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
       streamSimple(model, context) {
-        const system = textContent(context.messages.find(m => m.role === 'system')?.content);
+        const system = getCurrentSystemPrompt(context.messages);
         if (system !== COMPACT) systems.push(system);
         const reply = answer(system === COMPACT ? 'Summary.' : 'Done.');
         reply.api = model.api; reply.provider = model.provider; reply.model = model.id;
