@@ -111,7 +111,8 @@ export async function serveWindows(directory: string, children: Children, availa
             await children.adopt(window);
             child = window.id; remote = true;
             // Its subagents' reports and messages: the window's agent gets them as it would a report (rpc-window.ts).
-            disconnect = children.connectWindow(child, text => { send({ kind: 'event', name: 'message', text }); return !socket.destroyed; });
+            // Cut to fit a frame: the head names the agent, whose whole chat zoom reads.
+            disconnect = children.connectWindow(child, text => { send({ kind: 'event', name: 'message', text: shorten(text, ANSWER_LIMIT) }); return !socket.destroyed; });
             send({ kind: 'reply', id: frame.id, text: REMOTE_ACTIONS.join(' ') }); return;
           } else if (frame.action === 'start') {
             if (child) throw new Error('This window already has a conversation');
@@ -132,6 +133,7 @@ export async function serveWindows(directory: string, children: Children, availa
               send({ kind: 'reply', id: frame.id, text: await children.start(tasks, frame.cwd, controller.signal, child) }); return;
             }
             if (frame.action === 'tell') {
+              ready(); // It may resume a finished child.
               let tell: unknown;
               try { tell = JSON.parse(frame.text ?? ''); } catch { tell = undefined; }
               if (!record(tell) || typeof tell.id !== 'string' || typeof tell.message !== 'string') throw new Error('An agent ID and a message are required');
