@@ -22,7 +22,7 @@ class OffscreenTerminal implements Terminal {
   get columns() { return 100; } get rows() { return 30; } get kittyProtocolActive() { return false; }
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {} setProgramStatus() {}
 }
-const plain = (lines: string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b[\]_][^\x07\x1b]*(\x07|\x1b\\)/g, '');
+const plain = (lines: readonly string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b[\]_][^\x07\x1b]*(\x07|\x1b\\)/g, '');
 
 test('agent view shows the child conversation like the main chat, fills the screen, and Esc returns', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-agent-view-'));
@@ -116,7 +116,7 @@ test('running tools show their real elapsed time, finished ones how long they to
   const result: AgentMessage = { role: 'toolResult', toolCallId: 't1', toolName: 'bash', content: [{ type: 'text', text: 'built' }], isError: false, timestamp: started + 70_000 };
   const task: AgentMessage = { role: 'user', content: 'Build', timestamp: started };
   const view = new TranscriptView(tui, process.cwd());
-  const draw = (parts: { render(width: number): string[] }[]) => plain(parts.flatMap(p => p.render(80)));
+  const draw = (parts: { render(width: number): readonly string[] }[]) => plain(parts.flatMap(p => p.render(80)));
   const running = new Map([['t1', { started, output: { content: [{ type: 'text', text: 'compiling' }] } }]]);
   assert.match(draw(view.build('Build', [task, call], undefined, running)), /Elapsed 1m 5s/, 'not from when the view opened');
   assert.match(draw(view.build('Build', [task, call, result])), /Took 1m 10s/);

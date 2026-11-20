@@ -15,8 +15,8 @@ import { emptyUsage } from '../src/usage.ts';
 import { removeDir } from './support.ts';
 
 initTheme('dark', false);
-const plain = (lines: string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b[\]_][^\x07\x1b]*(\x07|\x1b\\)/g, '');
-const backgrounds = (lines: string[]) => new Set(lines.join('').match(/\x1b\[48;[0-9;]+m/g) ?? []);
+const plain = (lines: readonly string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b[\]_][^\x07\x1b]*(\x07|\x1b\\)/g, '');
+const backgrounds = (lines: readonly string[]) => new Set(lines.join('').match(/\x1b\[48;[0-9;]+m/g) ?? []);
 
 test('subagent messages render as a dark labelled box, never in the user-message colour', () => {
   assert.deepEqual(reportParts('[8964a512] Message from subagent (still running): step 1 done'), { label: 'subagent 8964a512 · still running', body: 'step 1 done' });

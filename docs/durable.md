@@ -1,6 +1,6 @@
 # OptChat on Pi Durable
 
-`pi-optchat/durable` runs OptChat's memory in a [Pi Durable](https://www.npmjs.com/package/@earendil-works/pi-durable) agent, such as one in a Cloudflare Durable Object behind the Agents SDK's `PiHarness`. It is `SqliteStore`, a `Store` over SQLite (in a Durable Object, the object's), a Pi Durable extension that builds each request from OptChat's view, and `optchatImport` for importing old history. The Worker, its prompts and tools stay in the app. It needs `@earendil-works/pi-durable` 1.5.x (an optional peer dependency; tested on 1.5.2) and imports nothing from Pi's terminal app or Node; `test/core-boundary.test.ts` keeps it that way.
+`pi-optchat/durable` runs OptChat's memory in a [Pi Durable](https://www.npmjs.com/package/@earendil-works/pi-durable) agent, such as one in a Cloudflare Durable Object behind the Agents SDK's `PiHarness`. It is `SqliteStore`, a `Store` over SQLite (in a Durable Object, the object's), a Pi Durable extension that builds each request from OptChat's view, and `optchatImport` for importing old history. The Worker, its prompts and tools stay in the app. It needs `@earendil-works/pi-durable` 1.5.x or 1.6.x (an optional peer dependency; tested on 1.5.2 and 1.6.0) and imports nothing from Pi's terminal app or Node; `test/core-boundary.test.ts` keeps it that way.
 
 ## Wiring it up
 

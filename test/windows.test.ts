@@ -242,7 +242,7 @@ class OffscreenTerminal implements Terminal {
   get columns() { return 100; } get rows() { return 30; } get kittyProtocolActive() { return false; }
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {} setProgramStatus() {}
 }
-const plain = (lines: string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b[\]_][^\x07\x1b]*(\x07|\x1b\\)/g, '');
+const plain = (lines: readonly string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b[\]_][^\x07\x1b]*(\x07|\x1b\\)/g, '');
 
 test('a connected window draws each reply with its tool results, the live turn, Working vs Waiting for N agents, and your queued messages', async () => {
   const f = await fixture();
