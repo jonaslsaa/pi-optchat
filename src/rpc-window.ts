@@ -172,7 +172,8 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
       if (task === undefined) throw new Error('Send your first request first');
       await register();
       if (!connection || !registered) throw new Error('No main window is reachable');
-      await connection.request('tell-main', text, undefined, { from });
+      // Frames run in order on the owner, so this can wait behind a spawn settling memory (see delegate).
+      await connection.request('tell-main', text, undefined, { from, timeout: 30 * 60_000 });
     },
     /** The agent's spawn, tell and models, which the owner runs: its subagents run there, with this window as their parent. */
     async delegate(action: 'spawn' | 'tell' | 'models', text?: string) {
@@ -201,6 +202,7 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
     /** Pi is closing this session: the owner hands it off from the transcript once the connection drops. */
     async close() {
       closed = true; clearInterval(reconnect);
+      pi.setActiveTools(pi.getActiveTools().filter(name => name !== 'tell_main')); // A host may reuse the session as the owner.
       if (!completed) await end('disconnected'); else connection?.close();
     },
   };

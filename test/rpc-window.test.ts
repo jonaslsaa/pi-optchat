@@ -407,9 +407,8 @@ test('a window\'s agent messages the main agent with tell_main, which only a win
   try {
     assert.equal(await window.ask(`CALL tell_main ${JSON.stringify({ message: 'We are on BACK-1.' })}`), 'Reply: Message sent to the main agent.');
     const role = window.role(), id = role?.role === 'window' ? role.id : '';
-    await until(() => readFileSync(join(profilePath(name), 'pending-reports.json'), 'utf8').includes('We are on BACK-1.') || owner.sent.some(s => s.messages.some(m => m.includes('BACK-1'))));
-    await owner.ask('Anything new?');
-    assert.ok(owner.sent.some(s => s.messages.some(m => m.includes(`[${id}] Connected agent message: We are on BACK-1.`))), 'the main agent reads it as the window agent\'s, not the user\'s');
+    // It wakes the main agent, which reads it as the window agent's, not the user's.
+    await until(() => owner.sent.some(s => s.messages.some(m => m.includes(`[${id}] Connected agent message: We are on BACK-1.`))));
     assert.ok(!owner.session.getActiveToolNames().includes('tell_main'), 'the main chat has no main to tell');
   } finally { await window.close(); await owner.close(); }
 });

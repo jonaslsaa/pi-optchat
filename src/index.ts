@@ -652,7 +652,7 @@ export default function optchat(pi: ExtensionAPI) {
   });
 
   pi.registerTool({ name: 'tell_main', label: 'Message main agent', defaultActive: false,
-    description: 'Send the main chat\'s agent a message while this conversation stays open: when the user asks you to tell it something, or for a question or finding it needs now. The handoff on Complete carries the rest, so don\'t repeat everything.',
+    description: 'Send the main chat\'s agent a message while this conversation stays open: when the user asks you to tell it something, or for a finding it needs now. It can\'t answer you here, so ask the user when you need a reply. The handoff on Complete carries the rest, so don\'t repeat everything.',
     parameters: Type.Object({ message: Type.String() }),
     async execute(_id, args) {
       if (!rpcWindow) throw new Error('Only a connected window has a main chat to message.');
