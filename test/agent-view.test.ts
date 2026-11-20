@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
@@ -50,7 +50,8 @@ test('agent view shows the child conversation like the main chat, fills the scre
     assert.match(text, /TOOL_OUTPUT_42/);
     assert.match(text, /There are 42 files\./);
     assert.match(text, /Esc back to main/);
-    assert.doesNotMatch(text, /MEMORY VIEW MUST NOT APPEAR|hidden reasoning|Ctrl\+X/);
+    assert.doesNotMatch(text, /MEMORY VIEW MUST NOT APPEAR|Ctrl\+X/);
+    assert.match(text, /hidden reasoning/, 'a thinking block shows its reasoning, as in the main chat');
     assert.ok(text.indexOf('Count the files', text.indexOf('\n')) < text.indexOf('Listing them now.'), 'the task opens the conversation');
     rows = 12;
     assert.equal(view.render(40).length, 12);
@@ -68,6 +69,58 @@ async function until(condition: () => boolean) {
   const deadline = Date.now() + 10000;
   while (!condition()) { if (Date.now() > deadline) throw new Error('Timed out'); await new Promise(r => setTimeout(r, 10)); }
 }
+
+test("the transcript follows Pi's hide-thinking setting, so Ctrl+T hides a child's reasoning too", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-agent-view-'));
+  const memory = new Memory(dir, async input => input.source.slice(0, 100), () => {});
+  const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, refreshOnCreate: false });
+  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'test', model: 'test', thinking: 'high' }), () => '', async () => {}, () => {}, dir);
+  const session = SessionManager.create(dir, join(dir, 'runs'));
+  session.appendMessage({ role: 'user', content: 'Your task:\nExplain it', timestamp: 1 });
+  session.appendMessage({ role: 'assistant', ...assistant, stopReason: 'stop', timestamp: 2,
+    content: [{ type: 'thinking', thinking: 'hidden reasoning' }, { type: 'text', text: 'Explained.' }] });
+  children.history.records.set('child-3', { id: 'child-3', task: 'Explain it', cwd: dir, model: 'anthropic/claude-test', thinking: 'high',
+    parentSession: 'parent', depth: 1, sessionFile: session.getSessionFile(), started: 1000, ended: 2000, state: 'completed', guidance: [] });
+  const tui = new TuiMainScreen(new OffscreenTerminal());
+  const settings = join(process.env.PI_CODING_AGENT_DIR!, 'settings.json');
+  const open = () => new AgentView({ id: 'child-3', children, tui, rows: () => 30, redraw: () => {}, done: () => {}, color: (_tone, text) => text });
+  const shown = open();
+  try {
+    assert.match(plain(shown.render(100)), /hidden reasoning/, 'reasoning shows while the main chat shows it');
+    writeFileSync(settings, JSON.stringify({ hideThinkingBlock: true }));
+    const hidden = open();
+    try {
+      const text = plain(hidden.render(100));
+      assert.doesNotMatch(text, /hidden reasoning/, "Ctrl+T in the main chat hides a child agent's reasoning too");
+      assert.match(text, /Explained\./, 'the answer itself still shows');
+    } finally { hidden.dispose(); }
+  } finally { rmSync(settings, { force: true }); shown.dispose(); await children.close(); await memory.close(); removeDir(dir); }
+});
+
+test('agent view follows the host window settings when the child run uses a different project', async () => {
+  const hostDir = mkdtempSync(join(tmpdir(), 'optchat-agent-view-host-'));
+  const childDir = mkdtempSync(join(tmpdir(), 'optchat-agent-view-child-'));
+  const memory = new Memory(childDir, async input => input.source.slice(0, 100), () => {});
+  const runtime = await ModelRuntime.create({ authPath: join(childDir, 'auth.json'), modelsPath: null, refreshOnCreate: false });
+  const children = new Children(memory, new ModelRegistry(runtime), () => ({ provider: 'test', model: 'test', thinking: 'high' }), () => '', async () => {}, () => {}, childDir);
+  const session = SessionManager.create(childDir, join(childDir, 'runs'));
+  session.appendMessage({ role: 'user', content: 'Your task:\nExplain it', timestamp: 1 });
+  session.appendMessage({ role: 'assistant', ...assistant, stopReason: 'stop', timestamp: 2,
+    content: [{ type: 'thinking', thinking: 'hidden reasoning' }, { type: 'text', text: 'Explained.' }] });
+  children.history.records.set('child-host', { id: 'child-host', task: 'Explain it', cwd: childDir, model: 'anthropic/claude-test', thinking: 'high',
+    parentSession: 'parent', depth: 1, sessionFile: session.getSessionFile(), started: 1000, ended: 2000, state: 'completed', guidance: [] });
+  const tui = new TuiMainScreen(new OffscreenTerminal());
+  mkdirSync(join(hostDir, '.pi'), { recursive: true });
+  mkdirSync(join(childDir, '.pi'), { recursive: true });
+  writeFileSync(join(hostDir, '.pi', 'settings.json'), JSON.stringify({ hideThinkingBlock: true }));
+  writeFileSync(join(childDir, '.pi', 'settings.json'), JSON.stringify({ hideThinkingBlock: false }));
+  const view = new AgentView({ id: 'child-host', children, tui, rows: () => 30, redraw: () => {}, done: () => {}, color: (_tone, text) => text, settingsCwd: hostDir });
+  try {
+    const text = plain(view.render(100));
+    assert.doesNotMatch(text, /hidden reasoning/, 'host window hide-thinking hides reasoning even when the child project shows it');
+    assert.match(text, /Explained\./, 'the answer still shows');
+  } finally { view.dispose(); await children.close(); await memory.close(); removeDir(hostDir); removeDir(childDir); }
+});
 
 test('agent view labels guidance from the main agent and child reports, keeps the controls, and scrolls with the wheel', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-agent-view-'));
