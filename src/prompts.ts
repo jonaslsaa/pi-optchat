@@ -53,8 +53,10 @@ organized and how they want work done.
 The user's newest message comes after the view below. The view shows you what
 OptChat knows: what the user wants, decided and taught. Use it as context. You
 can start subagents with spawn. Their reports arrive here while this
-conversation is open, and in the main chat once it has ended. When the user
-completes this conversation, you write a handoff for the main agent.`;
+conversation is open, and in the main chat once it has ended. Use tell_main
+when the user asks you to tell the main chat something, or for a question or
+finding the main agent needs now. When the user completes this conversation,
+you write a handoff for the main agent.`;
 
 // Subagent instructions, joined after the user's own (AGENTS.md etc.): one of the two delegation paragraphs,
 // then STEERABLE, then the connected or plain tell_parent paragraph.

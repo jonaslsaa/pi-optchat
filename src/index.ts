@@ -651,6 +651,16 @@ export default function optchat(pi: ExtensionAPI) {
     async execute(_id, args) { return result(rpcWindow ? await rpcWindow.delegate('tell', JSON.stringify(args)) : await required().children.tell(args.id, args.message)); },
   });
 
+  pi.registerTool({ name: 'tell_main', label: 'Message main agent', defaultActive: false,
+    description: 'Send the main chat\'s agent a message while this conversation stays open: when the user asks you to tell it something, or for a question or finding it needs now. The handoff on Complete carries the rest, so don\'t repeat everything.',
+    parameters: Type.Object({ message: Type.String() }),
+    async execute(_id, args) {
+      if (!rpcWindow) throw new Error('Only a connected window has a main chat to message.');
+      await rpcWindow.tell(args.message, 'agent');
+      return result('Message sent to the main agent.');
+    },
+  });
+
   /** The settings page's options: every model Pi is logged in to, with the thinking levels it takes, sorted so each provider's models sit together. */
   const settingsOptions = (ctx: ExtensionContext, a: Active) => ({ profile: a.name, config: a.config,
     models: ctx.modelRegistry.getAvailable().map(m => ({ name: `${m.provider}/${m.id}`, thinking: getSupportedThinkingLevels(m) })).sort((x, y) => x.name.localeCompare(y.name)),

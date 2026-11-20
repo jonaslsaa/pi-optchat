@@ -121,8 +121,9 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
     connection?.close();
   };
   const syncTools = (search: boolean) => {
-    const tools = pi.getActiveTools().filter(name => name !== 'search');
-    pi.setActiveTools(search ? [...tools, 'search'] : tools);
+    // tell_main is a window's alone: the main chat has no main to tell.
+    const tools = pi.getActiveTools().filter(name => name !== 'search' && name !== 'tell_main');
+    pi.setActiveTools([...tools, 'tell_main', ...search ? ['search'] : []]);
   };
   try { await connect(requireOwner); } catch (error) { clearInterval(reconnect); throw error; }
   syncTools(loadConfig(dir).memorySearch);
@@ -165,13 +166,13 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
       anchor = placed.anchor;
       return placed.messages;
     },
-    /** /tell-main: a message to the main agent. */
-    async tell(text: string) {
+    /** /tell-main, or the agent's tell_main (`from: 'agent'`): a message to the main agent. */
+    async tell(text: string, from?: 'agent') {
       if (!text.trim()) throw new Error('Message is empty');
       if (task === undefined) throw new Error('Send your first request first');
       await register();
       if (!connection || !registered) throw new Error('No main window is reachable');
-      await connection.request('tell-main', text);
+      await connection.request('tell-main', text, undefined, { from });
     },
     /** The agent's spawn, tell and models, which the owner runs: its subagents run there, with this window as their parent. */
     async delegate(action: 'spawn' | 'tell' | 'models', text?: string) {

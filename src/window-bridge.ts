@@ -180,7 +180,7 @@ export async function serveWindows(directory: string, children: Children, availa
             } else {
               if (!frame.text?.trim()) throw new Error('Message is empty');
               if (frame.action === 'say') await children.tell(child, frame.text, 'user');
-              else await report(`[${child}] User message from connected window: ${frame.text}`);
+              else await report(`[${child}] ${frame.from === 'agent' ? 'Connected agent message' : 'User message from connected window'}: ${frame.text}`);
             }
           }
           send({ kind: 'reply', id: frame.id });

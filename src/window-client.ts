@@ -16,7 +16,8 @@ const isAction = (value: unknown): value is Action => ACTIONS.some(action => act
 /** An app's import requests: pi-optchat/files' startImport (with its selection) and controlImport. */
 export type ImportAction = Extract<Action, `import-${string}`>;
 export const isImportAction = (action: Action): action is ImportAction => action.startsWith('import-');
-interface Request { kind: 'request'; id: number; action: Action; text?: string; cwd?: string; activeOnly?: boolean }
+/** `from: 'agent'`: a window's agent sent this `tell-main` (its tell_main tool), not the user. */
+interface Request { kind: 'request'; id: number; action: Action; text?: string; cwd?: string; activeOnly?: boolean; from?: 'agent' }
 interface Reply { kind: 'reply'; id: number; error?: string; text?: string }
 /** A tool the subagent is running right now, with its streamed output so far. */
 export interface LiveTool { id: string; name: string; args: unknown; output?: unknown; started: number }
@@ -55,7 +56,7 @@ function parse(value: unknown): Frame {
   if (value.kind === 'request' && isAction(action)
     && (value.text === undefined || typeof value.text === 'string') && (value.cwd === undefined || typeof value.cwd === 'string')
     && (value.activeOnly === undefined || typeof value.activeOnly === 'boolean'))
-    return { kind: 'request', id: value.id, action, text: value.text, cwd: value.cwd, activeOnly: value.activeOnly as boolean | undefined };
+    return { kind: 'request', id: value.id, action, text: value.text, cwd: value.cwd, activeOnly: value.activeOnly as boolean | undefined, from: value.from === 'agent' ? 'agent' : undefined };
   throw new Error('Invalid window message');
 }
 
@@ -105,14 +106,14 @@ export async function connectWindow(directory: string, event: (event: WindowEven
   });
   socket.setTimeout(0);
   return {
-    async request(action: Action, text?: string, cwd?: string, options: { timeout?: number; activeOnly?: boolean; limit?: number } = {}) {
+    async request(action: Action, text?: string, cwd?: string, options: { timeout?: number; activeOnly?: boolean; limit?: number; from?: 'agent' } = {}) {
       if (socket.destroyed) throw new Error('The original Pi window is disconnected');
       const limit = options.limit ?? 256_000;
       if (text && text.length > limit) throw new Error(`Connected-window messages are limited to ${limit.toLocaleString('en')} characters`);
       const id = next++;
       return await new Promise<string | undefined>((resolve, reject) => {
         const timer = setTimeout(() => { pending.delete(id); reject(new Error('Owner response timed out; closing this connection')); socket.destroy(); }, options.timeout ?? 120_000);
-        pending.set(id, { resolve, reject, timer }); send({ kind: 'request', id, action, text, cwd, activeOnly: options.activeOnly });
+        pending.set(id, { resolve, reject, timer }); send({ kind: 'request', id, action, text, cwd, activeOnly: options.activeOnly, from: options.from });
       });
     },
     close() { socket.destroy(); },
