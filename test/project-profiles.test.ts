@@ -1,0 +1,530 @@
+import { after, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createAssistantMessageEventStream, type AssistantMessage, type Context } from '@earendil-works/pi-ai';
+import { AgentSessionRuntime, createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type CreateAgentSessionRuntimeFactory, type ExtensionUIContext } from '@earendil-works/pi-coding-agent';
+import optchat from '../src/index.ts';
+import { createProfile, lastProfile, loadConfig, profilePath, profileOwner, saveConfig } from '../src/profiles.ts';
+import { createProjectProfile, discoverProjectProfile, resolveProfile } from '../src/project-profiles.ts';
+import { readDefaultProfile, saveDefaultProfile } from '../src/profile-picker.ts';
+import { emptyUsage } from '../src/usage.ts';
+import { profilePickerUI, removeDir } from './support.ts';
+
+const root = mkdtempSync(join(process.platform === 'win32' ? tmpdir() : '/tmp', 'oc-project-'));
+const oldHome = process.env.OPTCHAT_HOME;
+process.env.OPTCHAT_HOME = join(root, 'home');
+after(() => { if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome; removeDir(root); });
+const sandbox = () => mkdtempSync(join(root, 's-'));
+const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+const repository = () => { const dir = sandbox(); git(dir, 'init', '-q', '-b', 'main'); return dir; };
+const fixture = { provider: 'fixture', model: 'fixture', thinking: 'off' } as const;
+function project(cwd: string) {
+  const ref = createProjectProfile(cwd);
+  saveConfig(ref.dir, { ...loadConfig(ref.dir), compactor: fixture, subagent: fixture });
+  return ref;
+}
+function global(name: string) {
+  createProfile(name); const dir = profilePath(name);
+  saveConfig(dir, { ...loadConfig(dir), compactor: fixture, subagent: fixture });
+}
+async function start(dir: string, options: { mode?: 'tui' | 'rpc' | 'print'; bound?: unknown; flag?: string; disabled?: boolean; connect?: string; agent?: string; ui?: Partial<ExtensionUIContext>; manager?: SessionManager; lifecycle?: boolean; fromFile?: boolean } = {}) {
+  const state = sandbox(), sent: Context[] = [], notes: string[] = [], errors: string[] = [], picks: string[][] = [], statuses: string[] = [];
+  const runtime = await ModelRuntime.create({ authPath: join(state, 'auth.json'), modelsPath: null, modelsStorePath: join(state, 'models.json'), refreshOnCreate: false });
+  runtime.registerProvider('fixture', {
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple(model, context) {
+      sent.push(structuredClone(context));
+      const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: 'fixture reply' }], api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop', usage: emptyUsage() };
+      const stream = createAssistantMessageEventStream();
+      stream.push({ type: 'done', reason: 'stop', message }); stream.end(); return stream;
+    },
+  });
+  const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 1 }, cacheWarming: 'off', retry: { enabled: false } });
+  const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(state, 'agent'), settingsManager, noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, ...options.fromFile ? { additionalExtensionPaths: [fileURLToPath(new URL('../src/index.ts', import.meta.url))] } : { extensionFactories: [optchat] } });
+  await loader.reload();
+  assert.deepEqual(loader.getExtensions().errors, []);
+  const manager = options.manager ?? SessionManager.create(dir, join(state, 'sessions'));
+  if (options.bound !== undefined) manager.appendCustomEntry('optchat.profile', options.bound);
+  const { session } = await createAgentSession({ cwd: dir, modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date'] });
+  if (options.flag !== undefined) session.extensionRunner.setFlagValue('optchat-profile', options.flag);
+  if (options.disabled !== undefined) session.extensionRunner.setFlagValue('no-optchat', options.disabled);
+  if (options.connect !== undefined) session.extensionRunner.setFlagValue('optchat-connect', options.connect);
+  if (options.agent !== undefined) session.extensionRunner.setFlagValue('optchat-agent', options.agent);
+  let host: AgentSessionRuntime | undefined;
+  if (options.lifecycle) {
+    const make: CreateAgentSessionRuntimeFactory = async target => {
+      const resources = new DefaultResourceLoader({ cwd: target.cwd, agentDir: target.agentDir, settingsManager, noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+      await resources.reload();
+      const created = await createAgentSession({ ...target, modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'), resourceLoader: resources, settingsManager, tools: ['zoom', 'date'] });
+      // The CLI reapplies its launch flags whenever it builds a session runtime.
+      if (options.disabled !== undefined) created.session.extensionRunner.setFlagValue('no-optchat', options.disabled);
+      return { ...created, services: { cwd: target.cwd, agentDir: target.agentDir, modelRuntime: runtime, resourceLoader: resources, settingsManager, diagnostics: [] }, diagnostics: [] };
+    };
+    host = new AgentSessionRuntime(session, { cwd: dir, agentDir: join(state, 'agent'), modelRuntime: runtime, resourceLoader: loader, settingsManager, diagnostics: [] }, make);
+  }
+  const bind = async (current: AgentSession) => current.bindExtensions({ mode: options.mode ?? 'rpc', onError: error => { errors.push(error.error); },
+    uiContext: { ...current.extensionRunner.getUIContext(), notify: note => { notes.push(note); }, setStatus: (_key, text) => { if (text) statuses.push(text); }, select: async (_title, choices) => { picks.push(choices); return undefined; }, ...options.ui, custom: options.ui?.custom ?? profilePickerUI(options.ui?.select ?? (async (_title, choices) => { picks.push(choices); return undefined; })) },
+    ...host && { commandContextActions: { waitForIdle: () => current.agent.waitForIdle(), newSession: host.newSession.bind(host), fork: host.fork.bind(host),
+      switchSession: host.switchSession.bind(host), navigateTree: () => { throw new Error('Unused fixture action'); }, reload: () => { throw new Error('Unused fixture action'); } } } });
+  host?.setRebindSession(bind);
+  await bind(session);
+  const current = () => host?.session ?? session;
+  return { get session() { return current(); }, sent, notes, errors, picks, statuses, get manager() { return current().sessionManager; }, host,
+    bindings: () => current().sessionManager.getEntries().flatMap(e => e.type === 'custom' && e.customType === 'optchat.profile' ? [e.data] : []),
+    close: async () => { if (host) await host.dispose(); else { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); } process.exitCode = undefined; } };
+}
+
+
+
+for (const alias of [false, true]) test(`discovery is read-only; explicit creation is shared by subdirectories and leaves the source tree untouched (directory alias ${alias})`, () => {
+  const physical = repository(), dir = alias ? join(sandbox(), 'alias') : physical;
+  if (alias) symlinkSync(physical, dir, process.platform === 'win32' ? 'junction' : 'dir');
+  const child = join(dir, 'src'); mkdirSync(child);
+  assert.equal(discoverProjectProfile(child), undefined);
+  assert.ok(!existsSync(join(dir, '.pi')));
+  const ref = project(child);
+  // Git may expand Windows 8.3 names (RUNNER~1) or directory aliases; compare the actual locations.
+  assert.equal(realpathSync.native(ref.dir), realpathSync.native(join(dir, '.pi', 'optchat')));
+  assert.deepEqual(discoverProjectProfile(dir), ref);
+  assert.deepEqual(discoverProjectProfile(child), ref);
+  assert.deepEqual(discoverProjectProfile(physical), ref, 'directory aliases select the same project profile');
+  assert.equal(git(dir, 'status', '--porcelain'), '');
+  assert.ok(!existsSync(join(dir, '.gitignore')), 'the source project needs no tracked ignore edit');
+  assert.ok(!existsSync(join(ref.dir, 'profiles')));
+  const before = readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8');
+  assert.deepEqual(createProjectProfile(child), ref);
+  assert.equal(readFileSync(join(dir, '.git', 'info', 'exclude'), 'utf8'), before);
+});
+
+test('linked worktrees and nested repositories have independent project memories', () => {
+  const dir = repository(); writeFileSync(join(dir, 'app'), 'source'); git(dir, 'add', 'app');
+  git(dir, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@localhost', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Initial');
+  const linked = join(sandbox(), 'linked'); git(dir, 'worktree', 'add', '-q', '-b', 'linked', linked);
+  const original = project(dir), other = project(linked);
+  assert.notEqual(original.dir, other.dir);
+  assert.deepEqual(discoverProjectProfile(linked), other);
+  const nested = join(dir, 'nested'); mkdirSync(nested); git(nested, 'init', '-q');
+  assert.equal(discoverProjectProfile(nested), undefined, 'the outer project never leaks into an inner repository');
+});
+
+test('tracked profiles and conflicting ignore rules refuse creation before memory is written', () => {
+  const dir = repository(); writeFileSync(join(dir, '.gitignore'), '!/.pi/optchat/\n');
+  assert.throws(() => project(dir), /ignore rules expose/);
+  assert.ok(!existsSync(join(dir, '.pi', 'optchat')));
+  mkdirSync(join(dir, '.pi', 'optchat'), { recursive: true });
+  writeFileSync(join(dir, '.pi', 'optchat', 'keep'), 'tracked');
+  git(dir, 'add', '-f', '.pi/optchat/keep');
+  assert.throws(() => createProjectProfile(dir), /tracked by Git/);
+  assert.equal(readFileSync(join(dir, '.pi', 'optchat', 'keep'), 'utf8'), 'tracked');
+});
+
+test('project discovery refuses symlinked storage', { skip: process.platform === 'win32' }, () => {
+  for (const leaf of [false, true]) {
+    const dir = repository(), outside = sandbox();
+    if (leaf) mkdirSync(join(dir, '.pi'));
+    symlinkSync(outside, join(dir, '.pi', ...leaf ? ['optchat'] : []), 'dir');
+    assert.throws(() => discoverProjectProfile(dir), /real directory/);
+    assert.throws(() => createProjectProfile(dir), /real directory/);
+    assert.deepEqual(readdirSync(outside), []);
+  }
+});
+
+test('an existing project autoloads without a picker in TUI, print and RPC, independently of OPTCHAT_HOME', async () => {
+  const dir = repository(), child = join(dir, 'src'); mkdirSync(child);
+  const ref = project(dir), home = process.env.OPTCHAT_HOME;
+  writeFileSync(join(ref.dir, 'AGENTS.md'), 'PROJECT-INSTRUCTIONS');
+  for (const mode of ['tui', 'print', 'rpc'] as const) {
+    const pi = await start(child, { mode });
+    try {
+      assert.deepEqual(pi.errors, []); assert.deepEqual(pi.picks, []);
+      assert.deepEqual(pi.bindings(), [ref]);
+      assert.ok(pi.statuses.some(s => s.startsWith(`OptChat: ${resolveProfile(ref).name} ·`)));
+      await pi.session.prompt(`remember ${mode}`);
+      assert.match(JSON.stringify(pi.sent), /PROJECT-INSTRUCTIONS/);
+      assert.match(JSON.stringify(pi.sent), /pi --no-optchat/);
+      assert.equal(process.env.OPTCHAT_HOME, home);
+    } finally { await pi.close(); }
+  }
+  assert.ok(!existsSync(join(home!, 'last-profile')), 'opening a project does not change the global last-used profile');
+});
+
+test('the picker creates a project and switches between it and a same-named global profile in fresh sessions', async () => {
+  const parent = sandbox(), dir = join(parent, 'example'); mkdirSync(dir); git(dir, 'init', '-q'); global('example'); saveDefaultProfile('example');
+  const pi = await start(dir, { mode: 'tui', lifecycle: true, ui: { select: async (_title, choices) => {
+    pi.picks.push(choices); return choices.includes('+ Create project profile') ? '+ Create project profile' : choice;
+  } } });
+  let choice: string | undefined;
+  try {
+    assert.deepEqual(pi.bindings(), [{ name: 'example' }]);
+    await pi.session.prompt('Global conversation');
+    const before = pi.session.sessionManager.getSessionId();
+    await pi.session.prompt('/optchat profile');
+    const ref = discoverProjectProfile(dir)!;
+    assert.ok(ref); assert.deepEqual(pi.bindings(), [ref]);
+    assert.notEqual(pi.session.sessionManager.getSessionId(), before);
+    assert.equal(pi.session.sessionManager.getEntries().filter(e => e.type === 'message').length, 0, 'global history is not copied');
+    saveConfig(ref.dir, { ...loadConfig(ref.dir), compactor: fixture, subagent: fixture });
+    choice = 'example'; await pi.session.prompt('/optchat profile');
+    assert.deepEqual(pi.bindings(), [{ name: 'example' }]);
+    choice = 'example (this project)'; await pi.session.prompt('/optchat profile');
+    assert.deepEqual(pi.bindings(), [ref]);
+    assert.equal(lastProfile(), 'example');
+  } finally { await pi.close(); saveDefaultProfile(null); }
+  const fresh = await start(dir, { mode: 'tui' });
+  try { assert.deepEqual(fresh.bindings(), [discoverProjectProfile(dir)]); assert.deepEqual(fresh.picks, []); }
+  finally { await fresh.close(); }
+});
+
+test('saved bindings and the explicit profile flag take precedence; project resumes keep their original directory', async () => {
+  const dir = repository(), ref = project(dir); global('override');
+  for (const options of [{ flag: 'override' }, { bound: { name: 'override' } }]) {
+    const pi = await start(dir, options);
+    try { assert.deepEqual(pi.bindings(), [{ name: 'override' }]); assert.deepEqual(pi.errors, []); }
+    finally { await pi.close(); }
+  }
+  const original = await start(dir); let file: string;
+  try { await original.session.prompt('Original project memory'); file = original.session.sessionManager.getSessionFile()!; }
+  finally { await original.close(); }
+  const elsewhere = repository(); project(elsewhere);
+  const resumed = await start(elsewhere, { manager: SessionManager.open(file!) });
+  try { assert.deepEqual(resumed.bindings(), [ref]); assert.deepEqual(resumed.errors, []); }
+  finally { await resumed.close(); }
+});
+
+test('a busy automatic project opens the picker and Escape keeps plain Pi through new sessions', async () => {
+  const dir = repository(), ref = project(dir);
+  const owner = await start(dir, { mode: 'tui' });
+  try {
+    for (const bound of [undefined, ref]) {
+      const busy = await start(dir, { mode: 'tui', bound, lifecycle: true });
+      try {
+        assert.equal(busy.picks.length, 1); assert.deepEqual(busy.notes, []);
+        assert.deepEqual(busy.bindings().at(-1), { kind: 'none' });
+        await busy.session.prompt('Plain Pi after Escape'); assert.equal(busy.sent.length, 1);
+        assert.doesNotMatch(JSON.stringify(busy.sent), /You are OptChat/);
+        await busy.host!.newSession();
+        assert.equal(busy.picks.length, 1, '/new keeps the explicit none choice');
+        assert.deepEqual(busy.bindings(), [{ kind: 'none' }]);
+      } finally { await busy.close(); }
+    }
+  } finally { await owner.close(); }
+});
+
+test('invalid project profiles still report an error without switching memories', async () => {
+  const dir = repository(); project(dir);
+  writeFileSync(join(dir, '.pi', 'optchat', 'config.json'), 'invalid');
+  const invalid = await start(dir, { mode: 'tui' });
+  try {
+    assert.deepEqual(invalid.picks, []); assert.ok(invalid.notes.length);
+    await invalid.session.prompt('must not answer'); assert.deepEqual(invalid.sent, []);
+  } finally { await invalid.close(); }
+});
+
+test('a busy resumed project with messages keeps its binding instead of offering another memory', async () => {
+  const dir = repository(), ref = project(dir), original = await start(dir);
+  let file: string;
+  try { await original.session.prompt('Remember this project'); file = original.manager.getSessionFile()!; }
+  finally { await original.close(); }
+  const owner = await start(dir);
+  const resumed = await start(dir, { mode: 'tui', manager: SessionManager.open(file!) });
+  try {
+    assert.deepEqual(resumed.picks, []); assert.deepEqual(resumed.bindings(), [ref]);
+    assert.match(resumed.notes.join('\n'), /Use \/optchat profile to connect or choose another profile/);
+    await resumed.session.prompt('Do not switch my memory'); assert.deepEqual(resumed.sent, []);
+  } finally { await resumed.close(); await owner.close(); }
+});
+
+test('--no-optchat bypasses a busy project, bindings and explicit flags in every mode', async () => {
+  const dir = repository(), ref = project(dir), owner = await start(dir);
+  const firstOwner = await profileOwner(ref.dir);
+  try {
+    for (const mode of ['tui', 'print', 'rpc'] as const) {
+      const pi = await start(dir, { mode, disabled: true, bound: ref, flag: 'missing', connect: 'join', agent: 'unused', lifecycle: true });
+      try {
+        assert.deepEqual(pi.picks, []); assert.deepEqual(pi.errors, []); assert.deepEqual(pi.notes, []);
+        assert.deepEqual(pi.statuses, []); assert.deepEqual(pi.session.getActiveToolNames(), []);
+        assert.deepEqual(pi.bindings(), [ref], 'disabling this process does not rewrite a saved binding');
+        await pi.session.prompt('Run independently');
+        assert.equal(pi.sent.length, 1); assert.doesNotMatch(JSON.stringify(pi.sent), /You are OptChat|pi --no-optchat/);
+        assert.equal(await pi.session.extensionRunner.emitCacheWarmingDecision({ type: 'cache_warming_decision', action: 'warm',
+          warmCost: 0.01, missCost: 0.1, continuationProbability: 0.5 }), 'warm');
+        await pi.session.compact();
+        assert.ok(pi.manager.getEntries().some(e => e.type === 'compaction'));
+        await pi.session.prompt('/optchat profile');
+        assert.match(pi.notes.at(-1)!, /disabled by --no-optchat/);
+        assert.deepEqual(pi.picks, []);
+        await pi.host!.newSession();
+        await pi.session.prompt('Still independent');
+        assert.doesNotMatch(JSON.stringify(pi.sent), /You are OptChat/);
+        assert.deepEqual(pi.errors, []);
+        assert.deepEqual(await profileOwner(ref.dir), firstOwner);
+        assert.deepEqual(owner.sent, [], 'the child never sends a task to the profile owner');
+      } finally { await pi.close(); }
+    }
+  } finally { await owner.close(); }
+});
+
+test('--no-optchat skips invalid project discovery and saved defaults without saving a preference', async () => {
+  const dir = repository(), ref = project(dir);
+  writeFileSync(join(ref.dir, 'config.json'), 'invalid');
+  const preference = join(process.env.OPTCHAT_HOME!, 'default-profile');
+  mkdirSync(process.env.OPTCHAT_HOME!, { recursive: true });
+  writeFileSync(preference, '{invalid');
+  try {
+    const pi = await start(dir, { mode: 'tui', disabled: true });
+    try {
+      assert.deepEqual(pi.picks, []); assert.deepEqual(pi.errors, []); assert.deepEqual(pi.notes, []);
+      assert.deepEqual(pi.bindings(), []);
+      await pi.session.prompt('Plain Pi'); assert.equal(pi.sent.length, 1);
+      assert.equal(readFileSync(preference, 'utf8'), '{invalid');
+      assert.equal(readFileSync(join(ref.dir, 'config.json'), 'utf8'), 'invalid');
+    } finally { await pi.close(); }
+  } finally { saveDefaultProfile(null); }
+});
+
+test('the busy startup picker offers the existing connect, back and cancel flows', async () => {
+  const dir = repository(), ref = project(dir), name = resolveProfile(ref).name;
+  global('busy-fallback');
+  const owner = await start(dir, { mode: 'tui' });
+  const connect = 'Start a connected subagent conversation here';
+  try {
+    for (const action of ['Back', undefined, connect]) {
+      const asked: { title: string; choices: string[] }[] = [];
+      const choices = [`${name} (this project)`, action, ...action === 'Back' ? ['busy-fallback'] : []];
+      const pi = await start(dir, { mode: 'tui', lifecycle: true, ui: { select: async (title, options) => {
+        asked.push({ title: title.split('\n')[0], choices: options }); return choices.shift();
+      } } });
+      try {
+        assert.deepEqual(asked.slice(0, 2).map(a => a.title), ['OptChat profile', `${name} is open in another window`]);
+        assert.deepEqual(asked[1].choices, [connect, 'Back']);
+        assert.deepEqual(pi.errors, []);
+        assert.equal(choices.length, 0);
+        if (action === 'Back') {
+          assert.equal(asked[2].title, 'OptChat profile');
+          assert.deepEqual(pi.bindings().at(-1), { name: 'busy-fallback' });
+          assert.ok(pi.statuses.some(s => s.startsWith('OptChat: busy-fallback ·')));
+        } else {
+          if (action === connect) {
+            assert.deepEqual(pi.bindings().at(-1), ref);
+            assert.ok(pi.statuses.some(s => s.includes('connected window · send a task to start')));
+            assert.equal((await pi.session.extensionRunner.emit({ type: 'session_before_switch', reason: 'new' }))?.cancel, true);
+            assert.deepEqual(owner.sent, [], 'connecting does not wake the owning agent');
+          } else {
+            assert.match(pi.notes.join('\n'), /Profile already running/);
+            await pi.session.prompt('must not fall back to another memory');
+            assert.deepEqual(pi.sent, []);
+          }
+        }
+        if (action !== undefined) assert.ok(!pi.notes.some(n => n.includes('Profile already running')));
+      } finally { await pi.close(); }
+    }
+  } finally { await owner.close(); }
+});
+
+test('an RPC window can join an existing project owner using the project directory', async () => {
+  const dir = repository(), ref = project(dir), owner = await start(dir, { mode: 'tui' });
+  try {
+    const window = await start(dir, { mode: 'rpc' });
+    try {
+      assert.deepEqual(window.errors, []); assert.deepEqual(window.bindings(), [ref]);
+      assert.ok(window.statuses.some(s => s.includes('"role":"window"')));
+      await window.session.prompt('Connected project conversation');
+      assert.ok(window.sent.length > 0);
+      assert.deepEqual(owner.sent, [], 'opening the window does not wake the owner');
+    } finally { await window.close(); }
+  } finally { await owner.close(); }
+});
+
+
+test('project display names with spaces are readable through the existing profile-owner API', async () => {
+  const dir = join(sandbox(), 'Large Project'); mkdirSync(dir); git(dir, 'init', '-q');
+  const ref = project(dir), pi = await start(dir, { mode: 'tui' });
+  try { assert.equal((await profileOwner(ref.dir))?.profile, 'Large Project'); }
+  finally { await pi.close(); }
+});
+
+test('ordinary directories offer no project action and /new retains a manually selected global profile', async () => {
+  const outside = await start(sandbox(), { mode: 'tui' });
+  try {
+    await outside.session.prompt('/optchat profile');
+    assert.ok(outside.picks.every(choices => !choices.some(choice => choice.includes('project'))));
+  } finally { await outside.close(); }
+  const dir = repository(); project(dir); global('continued');
+  const pi = await start(dir, { mode: 'tui', lifecycle: true, ui: { select: async () => 'continued' } });
+  try {
+    await pi.session.prompt('/optchat profile');
+    await pi.session.prompt('Keep this global choice');
+    await pi.host!.newSession();
+    assert.deepEqual(pi.bindings(), [{ name: 'continued' }]);
+  } finally { await pi.close(); }
+});
+
+test('a second Pi loads the extension from disk, sees the busy project in its picker, and can choose none', async () => {
+  const dir = repository(), ref = project(dir), name = resolveProfile(ref).name;
+  const owner = await start(dir, { mode: 'tui', fromFile: true });
+  let screen = '';
+  const drive = profilePickerUI(async () => 'none');
+  const second = await start(dir, { mode: 'tui', lifecycle: true, fromFile: true, ui: { custom: async (factory, options) => drive(async (...args) => {
+    const page = await factory(...args); screen = page.render(500).join('\n'); return page;
+  }, options) } });
+  try {
+    assert.deepEqual(owner.picks, []); assert.deepEqual(second.picks, []);
+    assert.deepEqual(second.notes, []);
+    assert.ok(screen.includes(`${name} (this project) (in-use)`));
+    assert.deepEqual(second.bindings(), [{ kind: 'none' }]);
+    await second.session.prompt('Plain Pi still answers while the project is busy');
+    assert.equal(second.sent.length, 1);
+    assert.doesNotMatch(JSON.stringify(second.sent), /You are OptChat/);
+    assert.deepEqual(owner.sent, []);
+    assert.deepEqual(second.errors, []);
+  } finally { await second.close(); await owner.close(); }
+});
+
+test('none survives /new and resume inside a project, and restores Pi tools, caching and compaction', async () => {
+  const dir = repository(), ref = project(dir);
+  const pi = await start(dir, { mode: 'tui', lifecycle: true, ui: { select: async () => 'none' } });
+  let file: string;
+  try {
+    await pi.session.prompt('/optchat profile');
+    assert.equal(await profileOwner(ref.dir), undefined, 'switching releases the project lock');
+    assert.deepEqual(pi.session.getActiveToolNames(), []);
+    await pi.session.prompt('Plain conversation');
+    await pi.session.prompt('Another turn');
+    assert.doesNotMatch(JSON.stringify(pi.sent), /You are OptChat/);
+    assert.equal(await pi.session.extensionRunner.emitCacheWarmingDecision({ type: 'cache_warming_decision', action: 'warm',
+      warmCost: 0.01, missCost: 0.1, continuationProbability: 0.5 }), 'warm');
+    await pi.session.compact();
+    assert.ok(pi.manager.getEntries().some(e => e.type === 'compaction'));
+    file = pi.manager.getSessionFile()!;
+    await pi.host!.newSession();
+    assert.deepEqual(pi.bindings(), [{ kind: 'none' }]);
+    assert.deepEqual(pi.errors, []);
+  } finally { await pi.close(); }
+  const resumed = await start(dir, { mode: 'tui', manager: SessionManager.open(file!) });
+  try { assert.deepEqual(resumed.bindings(), [{ kind: 'none' }]); assert.deepEqual(resumed.picks, []); }
+  finally { await resumed.close(); }
+});
+
+test('Escape at startup binds plain Pi through /new and resume, even if a project profile appears later', async () => {
+  const dir = repository(), pi = await start(dir, { mode: 'tui', lifecycle: true });
+  let file: string;
+  try {
+    assert.equal(pi.picks.length, 1, 'the fixture presses Escape in the startup picker');
+    assert.deepEqual(pi.bindings(), [{ kind: 'none' }]);
+    assert.deepEqual(pi.session.getActiveToolNames(), []);
+    await pi.session.prompt('Plain Pi after Escape');
+    assert.equal(pi.sent.length, 1);
+    assert.doesNotMatch(JSON.stringify(pi.sent), /You are OptChat/);
+    file = pi.manager.getSessionFile()!;
+    project(dir);
+    await pi.host!.newSession();
+    assert.deepEqual(pi.bindings(), [{ kind: 'none' }]);
+    assert.equal(pi.picks.length, 1);
+    assert.deepEqual(pi.errors, []);
+  } finally { await pi.close(); }
+  const resumed = await start(dir, { mode: 'tui', manager: SessionManager.open(file!) });
+  try { assert.deepEqual(resumed.bindings(), [{ kind: 'none' }]); assert.deepEqual(resumed.picks, []); }
+  finally { await resumed.close(); }
+});
+
+test('Escape with a loaded project keeps its session, binding and tools', async () => {
+  const dir = repository(), ref = project(dir), pi = await start(dir, { mode: 'tui', lifecycle: true });
+  try {
+    const sessionId = pi.manager.getSessionId(), tools = pi.session.getActiveToolNames();
+    await pi.session.prompt('/optchat profile');
+    assert.equal(pi.manager.getSessionId(), sessionId);
+    assert.deepEqual(pi.bindings(), [ref]);
+    assert.deepEqual(pi.session.getActiveToolNames(), tools);
+    assert.ok(await profileOwner(ref.dir), 'the current profile remains open');
+    assert.deepEqual(pi.errors, []);
+  } finally { await pi.close(); }
+});
+
+test('a global default loads quietly outside projects; a project overrides it but cannot replace the default', async () => {
+  const dir = repository(), ref = project(dir); global('preferred');
+  saveDefaultProfile('preferred');
+  try {
+    for (const [cwd, expected] of [[sandbox(), { name: 'preferred' }], [dir, ref]] as const) {
+      const pi = await start(cwd, { mode: 'tui' });
+      try { assert.deepEqual(pi.bindings(), [expected]); assert.deepEqual(pi.picks, []); assert.deepEqual(pi.errors, []); }
+      finally { await pi.close(); }
+    }
+    assert.throws(() => Reflect.apply(saveDefaultProfile, undefined, [ref]), /Only global profiles/);
+    assert.equal(readDefaultProfile(), 'preferred');
+    const picks = [`D:${resolveProfile(ref).name} (this project)`, undefined];
+    const pi = await start(dir, { mode: 'tui', ui: { select: async () => picks.shift() } });
+    try {
+      const sessionId = pi.manager.getSessionId();
+      await pi.session.prompt('/optchat profile');
+      assert.deepEqual(picks, []);
+      assert.equal(readDefaultProfile(), 'preferred');
+      assert.equal(pi.manager.getSessionId(), sessionId);
+      assert.deepEqual(pi.bindings(), [ref]); assert.deepEqual(pi.errors, []);
+    } finally { await pi.close(); }
+  } finally { saveDefaultProfile(null); }
+});
+
+test('project defaults saved by older builds are ignored outside their worktree, without deleting project data', async () => {
+  const dir = repository(), ref = project(dir);
+  const path = join(process.env.OPTCHAT_HOME!, 'default-profile'), saved = `${JSON.stringify(ref)}\n`;
+  mkdirSync(process.env.OPTCHAT_HOME!, { recursive: true });
+  writeFileSync(path, saved);
+  try {
+    assert.equal(readDefaultProfile(), undefined);
+    const elsewhere = await start(sandbox(), { mode: 'tui' });
+    try {
+      assert.equal(elsewhere.picks.length, 1);
+      assert.ok(elsewhere.picks[0].every(label => !label.includes('(project)') && !label.includes('(this project)')));
+      assert.deepEqual(elsewhere.bindings(), [{ kind: 'none' }]);
+      assert.deepEqual(elsewhere.errors, []);
+      assert.equal(await profileOwner(ref.dir), undefined, 'the old default did not open the project');
+    } finally { await elsewhere.close(); }
+    const local = await start(dir, { mode: 'tui' });
+    try {
+      assert.deepEqual(local.picks, []); assert.deepEqual(local.bindings(), [ref]); assert.deepEqual(local.errors, []);
+    } finally { await local.close(); }
+    assert.equal(readFileSync(path, 'utf8'), saved, 'discovery does not rewrite the old preference');
+    assert.ok(existsSync(join(ref.dir, 'config.json')));
+  } finally { saveDefaultProfile(null); }
+});
+
+test('a busy saved default opens the picker and marks only the other instance as in-use', async () => {
+  const dir = sandbox(); global('busy-default'); saveDefaultProfile('busy-default');
+  let screen = '';
+  const inspect: ExtensionUIContext['custom'] = async (factory, options) => profilePickerUI(async () => undefined)(async (...args) => {
+    const page = await factory(...args); screen = page.render(500).join('\n'); return page;
+  }, options);
+  const owner = await start(dir, { mode: 'tui', ui: { custom: inspect } });
+  const second = await start(dir, { mode: 'tui', lifecycle: true, ui: { custom: inspect } });
+  try {
+    assert.deepEqual(second.notes, []);
+    assert.match(screen, /busy-default \(in-use\) \(default\)/);
+    assert.deepEqual(second.bindings(), [{ kind: 'none' }], 'Escape after a failed autoload selects plain Pi');
+    await second.session.prompt('Plain Pi after leaving the busy profile picker');
+    assert.equal(second.sent.length, 1);
+    assert.doesNotMatch(JSON.stringify(second.sent), /You are OptChat/);
+    assert.equal(readDefaultProfile(), 'busy-default');
+    assert.deepEqual(second.errors, []);
+    await owner.session.prompt('/optchat profile');
+    assert.match(screen, /busy-default \(default\)/);
+    assert.doesNotMatch(screen, /busy-default \(in-use\)/);
+  } finally { await second.close(); await owner.close(); saveDefaultProfile(null); }
+});
+
+test('explicitly activating a profile in plain RPC restores its memory tools', async () => {
+  global('activate');
+  const pi = await start(sandbox());
+  try {
+    assert.deepEqual(pi.session.getActiveToolNames(), []);
+    await pi.session.prompt('/optchat profile activate');
+    assert.deepEqual(pi.session.getActiveToolNames().sort(), ['date', 'zoom']);
+    await pi.session.prompt('Use this memory');
+    assert.match(JSON.stringify(pi.sent), /You are OptChat/);
+    assert.deepEqual(pi.errors, []);
+  } finally { await pi.close(); }
+});

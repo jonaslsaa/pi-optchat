@@ -6,15 +6,16 @@ import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionUIContext, type SessionStartEvent } from '@earendil-works/pi-coding-agent';
 import optchat from '../src/index.ts';
+import { readDefaultProfile, saveDefaultProfile } from '../src/profile-picker.ts';
 import { Memory } from '../src/memory.ts';
 import { checkSocketPath, createProfile, isWindows, loadConfig, lockProfile, profilePath, profileSocket, saveConfig, SOCKET_PATH_LIMIT } from '../src/profiles.ts';
-import { removeDir } from './support.ts';
+import { profilePickerUI, removeDir } from './support.ts';
 
 const agentDir = process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'optchat-agent-'));
 after(() => removeDir(agentDir));
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: string, talked = false, sessionStartEvent?: SessionStartEvent) {
+async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: string, talked = false, sessionStartEvent?: SessionStartEvent, options: { mode?: 'tui' | 'print' | 'rpc'; flag?: string } = {}) {
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
     modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
   runtime.registerProvider('fixture', {
@@ -33,8 +34,9 @@ async function start(dir: string, ui: Partial<ExtensionUIContext>, bound?: strin
     resourceLoader: loader, settingsManager, sessionManager: manager, sessionStartEvent, tools: ['zoom'] });
   const titles: string[] = [], errors: string[] = [];
   const uiContext: ExtensionUIContext = { ...session.extensionRunner.getUIContext(), setTitle: t => { titles.push(t); },
-    notify: (text, type) => { if (type === 'error') errors.push(text); }, ...ui };
-  await session.bindExtensions({ uiContext, mode: 'tui' });
+    notify: (text, type) => { if (type === 'error') errors.push(text); }, ...ui, custom: ui.custom ?? profilePickerUI(ui.select ?? (async () => undefined)) };
+  if (options.flag) session.extensionRunner.setFlagValue('optchat-profile', options.flag);
+  await session.bindExtensions({ uiContext, mode: options.mode ?? 'tui' });
   return { session, titles, errors, manager };
 }
 
@@ -54,18 +56,18 @@ test('a busy profile offers to connect or pick another profile, and picking anot
     }
     unlock = await lockProfile(profilePath('busy'), 'busy · PID 1 · elsewhere');
 
-    // New session: pick `busy`, it's taken, choose "Back", then pick `other`.
+    // An explicit busy choice can go Back and select another profile.
     const asked: { title: string, options: string[] }[] = [];
-    const picks = ['busy', 'Back', 'other'];
-    const fresh = await start(dir, { select: async (title, options) => { asked.push({ title, options }); return picks.shift(); } });
+    const picks = ['Back', 'other'];
+    const fresh = await start(dir, { select: async (title, options) => { asked.push({ title, options }); return picks.shift(); } }, 'busy');
     sessions.push(fresh.session);
-    assert.deepEqual(asked.map(a => a.title.split('\n')[0]), ['OptChat profile', 'busy is open in another window', 'OptChat profile']);
-    assert.match(asked[1].title, /busy · PID 1 · elsewhere/);
-    assert.deepEqual(asked[1].options, ['Start a connected subagent conversation here', 'Back']);
+    assert.deepEqual(asked.map(a => a.title.split('\n')[0]), ['busy is open in another window', 'OptChat profile']);
+    assert.match(asked[0].title, /busy · PID 1 · elsewhere/);
+    assert.deepEqual(asked[0].options, ['Start a connected subagent conversation here', 'Back']);
     assert.equal(fresh.titles[0], 'π other');
     assert.deepEqual(fresh.errors, []);
     const bound = fresh.manager.getEntries().filter(e => e.type === 'custom' && e.customType === 'optchat.profile');
-    assert.deepEqual(bound.map(e => e.type === 'custom' && e.data), [{ name: 'other' }], 'the session is bound to the profile actually opened');
+    assert.deepEqual(bound.map(e => e.type === 'custom' && e.data), [{ name: 'busy' }, { name: 'other' }], 'the session is bound to the profile actually opened');
 
     // `/optchat profile` makes a fresh session already bound to its pick; a busy pick can still go Back and rebind.
     const switchedPicks = ['Back', 'third']; // `other` is held by the session above
@@ -212,7 +214,7 @@ test('a second writer that got past the lock is refused on its next turn, with t
   try {
     createProfile('shared');
     saveConfig(profilePath('shared'), { ...loadConfig(profilePath('shared')), compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' }, subagent: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
-    const opened = await start(dir, { select: async () => 'shared' });
+    const opened = await start(dir, {}, 'shared');
     session = opened.session;
     const other = new Memory(profilePath('shared'), async () => 'summary', () => {});
     other.append('user', 'written by the other process'); await other.close();
@@ -243,11 +245,14 @@ async function withHome(prefix: string, body: (dir: string, sessions: Session[])
   }
 }
 
-test('a lone profile opens without the picker', () => withHome('optchat-solo-', async (dir, sessions) => {
-  createProfile('solo');
-  const { session, titles, errors } = await start(dir, noPicker); sessions.push(session);
-  assert.deepEqual(errors, []);
-  assert.equal(titles[0], 'π solo');
+for (const names of [[], ['solo'], ['work', 'personal']]) test(`an unset default opens the startup picker with ${names.length} global profiles`, () => withHome('optchat-unset-', async (dir, sessions) => {
+  for (const name of names) createProfile(name);
+  const asked: string[][] = [];
+  const { session, titles, errors, manager } = await start(dir, { select: async (_title, choices) => { asked.push(choices); return 'none'; } }); sessions.push(session);
+  assert.deepEqual(errors, []); assert.deepEqual(titles, []);
+  assert.equal(asked.length, 1); assert.equal(asked[0].at(-1), 'none');
+  assert.deepEqual(manager.getEntries().flatMap(e => e.type === 'custom' && e.customType === 'optchat.profile' ? [e.data] : []), [{ kind: 'none' }]);
+  assert.deepEqual(session.getActiveToolNames(), [], 'selecting none disables memory tools');
 }));
 
 test('/new keeps the profile of the session it replaces', () => withHome('optchat-new-', async (dir, sessions) => {
@@ -278,13 +283,63 @@ test('OPTCHAT_PROFILE picks among several profiles, and a missing one warns and 
   assert.equal(fallback.titles[0], 'π work');
 }));
 
-test('Back from a lone busy profile shows the picker instead of retrying it', () => withHome('optchat-lone-busy-', async (dir, sessions) => {
+test('Back from an explicitly chosen busy profile shows the picker instead of retrying it', () => withHome('optchat-lone-busy-', async (dir, sessions) => {
   createProfile('busy');
   const unlock = await lockProfile(profilePath('busy'), 'busy · PID 1 · elsewhere');
   try {
     const asked: string[] = [], picks = ['Back', undefined];
-    const { session } = await start(dir, { select: async title => { asked.push(title.split('\n')[0]); return picks.shift(); } });
+    const { session } = await start(dir, { select: async title => { asked.push(title.split('\n')[0]); return picks.shift(); } }, 'busy');
     sessions.push(session);
     assert.deepEqual(asked, ['busy is open in another window', 'OptChat profile']);
   } finally { await unlock(); }
+}));
+
+
+test('the picker saves and clears a default without switching the current conversation', () => withHome('oc-default-', async (dir, sessions) => {
+  createProfile('work'); createProfile('personal');
+  let picks: (string | undefined)[] = ['D:personal', undefined];
+  const opened = await start(dir, { select: async (_title, options) => {
+    const pick = picks.shift(); if (pick) assert.ok(options.includes(pick.replace(/^D:/, ''))); return pick;
+  } }, 'work'); sessions.push(opened.session);
+  await opened.session.prompt('/optchat profile');
+  assert.equal(readDefaultProfile(), 'personal');
+  assert.deepEqual(opened.manager.getEntries().flatMap(e => e.type === 'custom' && e.customType === 'optchat.profile' ? [e.data] : []), [{ name: 'work' }]);
+  picks = ['D:none', undefined];
+  await opened.session.prompt('/optchat profile');
+  assert.equal(readDefaultProfile(), undefined);
+  assert.deepEqual(opened.errors, []);
+  let asked = 0;
+  const fresh = await start(dir, { select: async () => { asked++; return 'none'; } }); sessions.push(fresh.session);
+  assert.equal(asked, 1, 'clearing the saved default restores the startup picker');
+  assert.deepEqual(fresh.errors, []);
+}));
+
+test('a saved default opens fresh interactive sessions, below explicit choices and never in headless runs', () => withHome('oc-default-', async (dir, sessions) => {
+  createProfile('work'); createProfile('personal'); saveDefaultProfile('personal');
+  for (const [bound, flag, env, mode, expected] of [
+    [undefined, undefined, undefined, 'tui', 'personal'],
+    [undefined, undefined, 'work', 'tui', 'work'],
+    [undefined, 'work', 'personal', 'tui', 'work'],
+    ['work', undefined, 'personal', 'tui', 'work'],
+    [undefined, undefined, undefined, 'print', undefined],
+    [undefined, undefined, undefined, 'rpc', undefined],
+  ] as const) {
+    if (env) process.env.OPTCHAT_PROFILE = env; else delete process.env.OPTCHAT_PROFILE;
+    const opened = await start(dir, noPicker, bound, false, undefined, { mode, flag }); sessions.push(opened.session);
+    assert.deepEqual(opened.errors, []);
+    const bindings = opened.manager.getEntries().flatMap(e => e.type === 'custom' && e.customType === 'optchat.profile' ? [e.data] : []);
+    assert.deepEqual(bindings, expected ? [{ name: expected }] : []);
+    await opened.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); opened.session.dispose(); sessions.pop();
+  }
+}));
+
+test('an unavailable saved default opens the picker and invalid choices preserve the preference', () => withHome('oc-default-', async (dir, sessions) => {
+  createProfile('work'); createProfile('personal');
+  writeFileSync(join(process.env.OPTCHAT_HOME!, 'default-profile'), 'removed-profile\n');
+  let asked = 0;
+  const selected = await start(dir, { select: async () => { asked++; return 'none'; } }); sessions.push(selected.session);
+  assert.equal(asked, 1);
+  assert.deepEqual(selected.titles, []);
+  assert.throws(() => saveDefaultProfile('missing'), /No profile/);
+  assert.equal(readDefaultProfile(), 'removed-profile', 'a failed selection does not replace the preference');
 }));

@@ -2,7 +2,7 @@ import { getMarkdownTheme, keyText, UserMessageComponent, type ExtensionAPI, typ
 import { Container, Editor, getKeybindings, Loader, Markdown, Spacer, TruncatedText, TuiAltScreen, TuiMainScreen, type Component, type TUI } from '@earendil-works/pi-tui';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { connectWindow, type LiveState, type WindowEvent } from './window-client.ts';
-import { profilePath } from './profiles.ts';
+import { prepareProjectProfile, resolveProfile, type ProfileSelection } from './project-profiles.ts';
 import { TranscriptView } from './agent-view.ts';
 import { isReport, reportBox } from './report-message.ts';
 import { statusState, windowTitle, type WindowState } from './title.ts';
@@ -84,7 +84,9 @@ class LiveTurn implements Component {
   dispose() { clearInterval(this.timer); this.loader.stop(); }
 }
 
-export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContext, profile: string, setTitle: (title: string) => void = title => ctx.ui.setTitle(title), agentId?: string, activeOnly = false) {
+export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContext, selection: ProfileSelection, setTitle: (title: string) => void = title => ctx.ui.setTitle(title), agentId?: string, activeOnly = false) {
+  prepareProjectProfile(selection);
+  const { name: profile, dir } = resolveProfile(selection);
   // Each window draws with its own transcript, so nothing from an earlier window carries over.
   transcript = undefined;
   let label: string | undefined, started = false, ended = false, liveTurn: LiveTurn | undefined, live: LiveState | undefined, turn: AgentMessage[] = [];
@@ -101,7 +103,7 @@ export async function openConnectedWindow(pi: ExtensionAPI, ctx: ExtensionContex
   const settled = () => { const done = new Set(turn.flatMap(m => m.role === 'toolResult' ? [m.toolCallId] : [])); return turn.length > 0 && toolCalls(turn[0]).every(id => done.has(id)); };
   const showLive = () => ctx.ui.setWidget('optchat-connected', (tui, theme) => { view(tui); liveTurn = new LiveTurn(tui, theme); refresh(); return liveTurn; });
   const hideLive = () => { live = undefined; liveTurn = undefined; ctx.ui.setWidget('optchat-connected', undefined); };
-  const connection = await connectWindow(profilePath(profile), event => {
+  const connection = await connectWindow(dir, event => {
     if (event.name === 'started') {
       label = event.title; started = true; showLive(); title('working');
       ctx.ui.setStatus('optchat', `OptChat: ${profile} · ${agentId ? 'attached' : 'connected'} agent ${event.text}${label ? ` · ${label}` : ''} · /complete`);

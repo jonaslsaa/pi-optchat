@@ -45,10 +45,13 @@ This opens that **same agent's session** as a normal Pi chat: its task, previous
 
 ## Headless and RPC runs
 
-For headless use (`pi -p`, `--mode rpc`, other extensions' runners), pass `--optchat-profile work`.
+Headless Pi (`pi -p`, `--mode rpc`, other extensions' runners) loads the project profile for its working directory when one exists. `--optchat-profile work` explicitly selects a global profile, and resumed sessions retain their saved binding. Print and RPC modes do not show profile pickers, but they do not disable OptChat.
 
-- Without it, and without a saved profile in a resumed session, a headless run is plain Pi with no OptChat memory.
+- Without a project, explicit profile or saved binding, a headless run is plain Pi with no OptChat memory. Saved defaults and `OPTCHAT_PROFILE` apply only to interactive Pi.
+- `--no-optchat` explicitly runs plain Pi, bypassing profile discovery, bindings and connections for that process.
 - If the requested profile can't open (misspelled, deleted, or busy and not joinable, see below), the run reports the error and doesn't answer.
+
+Choose the child's memory deliberately. A child in the same project can run independently with `--no-optchat` or intentionally join the active profile and send its handoff back to the owner. To give children their own project memories, launch each in its own Git repository or worktree without that flag; nested repositories count as separate projects, ordinary subdirectories do not.
 
 In RPC and SDK hosts that create sessions themselves (Pi Web), send `/optchat profile work` as the first message of a new session. A second RPC session on a profile that is already open becomes a connected window (next section).
 

@@ -4,7 +4,8 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { BeforeAgentStartEvent, ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { readMemory, type Memory } from './memory.ts';
 import { fingerprint } from './store.ts';
-import { loadConfig, memoryDirectory, profilePath, readInstructions } from './profiles.ts';
+import { loadConfig, memoryDirectory, readInstructions } from './profiles.ts';
+import { prepareProjectProfile, resolveProfile, type ProfileSelection } from './project-profiles.ts';
 import { allowSearch, IMPORT_GUIDANCE, SEARCH_DOC, VIEW_DOC } from './core/prompts.ts';
 import { WINDOW, WINDOW_STEERABLE, windowHandoff } from './prompts.ts';
 import { placeView } from './core/messages.ts';
@@ -32,8 +33,9 @@ const COMPLETED_TYPE = 'optchat-window-completed';
  * each run and never written; the profile's owner keeps this conversation's record and gets its handoff over the window socket.
  * With no owner to reach, the window queues itself in the profile directory for the next one (see `queueWindow`).
  */
-export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, profile: string, { requireOwner = false } = {}) {
-  const dir = profilePath(profile), id = randomUUID().slice(0, 8);
+export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, selection: ProfileSelection, { requireOwner = false } = {}) {
+  prepareProjectProfile(selection);
+  const { name: profile, dir } = resolveProfile(selection), id = randomUUID().slice(0, 8);
   // A session that goes on after /complete, now or resumed later, is a new conversation: what came before is not this window's.
   // Its branch only: a marker on a branch the user left behind ends nothing here.
   const ended = ctx.sessionManager.getBranch().findLast(entry => entry.type === 'custom' && entry.customType === COMPLETED_TYPE);
@@ -130,7 +132,7 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
   publish();
 
   return {
-    id, profile, session: ctx.sessionManager.getSessionId(),
+    id, profile, selection, session: ctx.sessionManager.getSessionId(),
     get completed() { return completed; },
     memory: (): Memory => memory,
     /** A subagent's chat, for zoom: the owner's run record names its transcript. */

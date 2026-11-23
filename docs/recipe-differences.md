@@ -19,6 +19,7 @@ The README has the summary table. This page has the detail: what changed in each
 - **Tool results.** A tool result's leaf summary also gets the raw tool call it answers, as a `<call>` block of context (#153 A/B: recall 3.88 → 4.22).
 - **Images.** A message's leaf summary gets the images it names after the task, each after its `[image <name>]`, with one sentence asking it to say what matters in each and keep each `[image <name>]`; such a message is summarized even when short, and its line may be longer than its source. A zoom's page doesn't send its images again. A model without image input gets none, and a provider that rejects them is asked once more by name only. Merges stay text. An A/B (Sonnet 5.5, 18 chats) kept image facts in 100% of leaves and 97% of roots, against 0% and 1% without, for about 1¢ an image.
 - **Subagent prompt.** The original's, plus a closing note on time: report progress on long tasks with `tell_parent`, and say so before waiting on something slow, so the main agent can go on.
+- **Pi child processes.** Main agents, subagents and connected windows get five sentences distinguishing unattended launch modes from memory choices: plain Pi with `--no-optchat`, intentional sharing through a connected conversation, or a child's own project profile selected by its Git worktree. They explain automatic joining, the owner's sole responsibility for writing memory, and the execution difference between joined print and RPC tasks.
 
 ## Numbers kept from the recipe
 

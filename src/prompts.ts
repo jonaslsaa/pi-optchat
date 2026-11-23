@@ -3,6 +3,11 @@ import type { FinishReason } from './runs.ts';
 
 // Prompts from Victor Taelin's OptChat recipe, lightly adapted; docs/recipe-differences.md lists the changes.
 // These are Pi's: the main agent, subagents and connected windows. Memory's own are in core/prompts.ts.
+const PI_CHILDREN = `For unattended Pi children, use \`-p\` or \`--mode rpc\` to avoid interactive pickers; neither disables OptChat.
+In the same project, prefer \`pi --no-optchat ...\` for an independent child, and omit it when sharing the active profile's memory is intended.
+Without that flag, an occupied profile is joined automatically: the child has a separate conversation, reads shared memory and sends a handoff to the owner, which remains the sole memory writer.
+A joined \`-p\` task runs as the owner's configured subagent; RPC runs its connected agent in the child process.
+For a child with its own project profile, launch from that Git repository or worktree without \`--no-optchat\` so its own profile loads; ordinary subdirectories share the enclosing project's profile.`;
 
 /** Names the profile's subagent choice, so the agent has no gap to fill from memory when it spawns: unset means this
  * model, and the ids it knows from training drift, so the models tool is the only source for a named one. */
@@ -23,7 +28,9 @@ for one (no sleep, no polling): go on, or end your turn and tell the user what
 is running. The same goes for anything slow, such as CI or a deploy: don't sit
 polling it yourself at the end of a task, start a subagent to watch it, and
 move on. A message starting "[OptChat status]" is OptChat's own note on which
-subagents are running, not the user.`;
+subagents are running, not the user.
+
+${PI_CHILDREN}`;
 export const SUBAGENT = `You are a subagent of OptChat, an AI agent that works for one user in a
 single chat that never ends. OptChat gave you a task. Do it yourself, with
 your tools, following the user's instructions at the end of this
@@ -40,7 +47,9 @@ while you work.
 Be aware of time. When your task is long, tell OptChat how far you are with
 tell_parent. Before you wait on something slow, such as CI, say so the same
 way ("pushed, now watching CI until it passes"), so OptChat can go on
-without you, then watch it.`;
+without you, then watch it.
+
+${PI_CHILDREN}`;
 
 /** A connected window whose agent runs in its own Pi (an RPC host's second session): it talks with the user directly, and its
  * newest request carries the view. Its instructions are the user's, then STEERABLE. */
@@ -56,7 +65,9 @@ can start subagents with spawn. Their reports arrive here while this
 conversation is open, and in the main chat once it has ended. Use tell_main
 when the user asks you to tell the main chat something, or for a finding the
 main agent needs now; it can't answer you here. When the user completes this conversation,
-you write a handoff for the main agent.`;
+you write a handoff for the main agent.
+
+${PI_CHILDREN}`;
 
 // Subagent instructions, joined after the user's own (AGENTS.md etc.): one of the two delegation paragraphs,
 // then STEERABLE, then the connected or plain tell_parent paragraph.
