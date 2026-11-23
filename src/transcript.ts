@@ -133,10 +133,24 @@ export function atWork(runs: readonly { id: string; task: string; title?: string
 export function buildContext(canonical: AgentMessage[], run: AgentMessage[], view: string, prompt: string,
   previous: readonly AgentMessage[] = [], status?: string): AgentMessage[] {
   // Keep request-time prompt/tool edits and named sections, so later extensions can still update or remove a section.
-  const head: SystemMessage = getCurrentSystemMessage(canonical) ?? { role: 'system', content: prompt, timestamp: 0 };
+  // Keep profile `instructions` after `project_context` and `skills` if Pi's patch replay re-inserted them later.
+  const current = getCurrentSystemMessage(canonical);
+  const head: SystemMessage = current ? orderedInstructions(current) : { role: 'system', content: prompt, timestamp: 0 };
   if (!run.some(m => m.role === 'user')) throw new Error('OptChat has no current user message; refusing to send historical context.');
   const messages = withView([...previous, ...run].filter(m => m.role !== 'system'), view);
   return [head, ...messages, ...status && messages.at(-1)?.role !== 'toolResult' ? [{ role: 'user' as const, content: [{ type: 'text' as const, text: status }], timestamp: 0 }] : []];
+}
+
+/** Pi replays removed-then-restored sections at the end, which can put `project_context` or `skills` after profile `instructions`. */
+function orderedInstructions(head: SystemMessage): SystemMessage {
+  const sections = head.sections;
+  if (!sections || !Object.hasOwn(sections, 'instructions')) return head;
+  const keys = Object.keys(sections), at = keys.indexOf('instructions');
+  const after = Math.max(keys.indexOf('project_context'), keys.indexOf('skills'));
+  if (after <= at) return head;
+  const reordered = keys.filter(name => name !== 'instructions');
+  reordered.splice(reordered.lastIndexOf(keys[after]) + 1, 0, 'instructions');
+  return { ...head, sections: Object.fromEntries(reordered.map(name => [name, sections[name]])) };
 }
 
 /** The share of the model's window the current turn's verbatim messages may fill before they move into memory (#146): the
