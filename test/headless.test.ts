@@ -28,12 +28,12 @@ for (const name of ['work', 'personal']) {
 rememberProfile('personal');
 
 /** A headless Pi (print or RPC) whose model answers "OK to: <prompt>" and records what each call was sent. */
-async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?: string; connect?: string; agent?: string; hold?: Promise<void>; later?: ExtensionFactory; headers?: Record<string, string>; error?: string } = {}) {
+async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?: string; connect?: string; agent?: string; hold?: Promise<void>; later?: ExtensionFactory; headers?: Record<string, string>; error?: string; api?: 'anthropic-messages' | 'openai-completions' } = {}) {
   const dir = mkdtempSync(join(root, 's-'));
   const sent: string[] = [], errors: string[] = [];
   const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null, modelsStorePath: join(dir, 'models.json'), refreshOnCreate: false });
   runtime.registerProvider('fixture', {
-    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+    baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: options.api ?? 'openai-completions',
     models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
     streamSimple(model, context, call) {
       sent.push(JSON.stringify(context.messages));
@@ -73,7 +73,7 @@ async function headless(mode: 'print' | 'rpc', options: { flag?: string; bound?:
   };
   const bindings = () => manager.getEntries().flatMap(e => e.type === 'custom' && e.customType === 'optchat.profile' ? [e.data] : []);
   const close = async () => { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); };
-  return { ask, bindings, close, errors, notes, sent };
+  return { ask, bindings, close, errors, notes, sent, session };
 }
 
 test('a headless run without a binding or --optchat-profile is plain Pi: it answers, and no profile is picked or created', async () => {
@@ -99,6 +99,31 @@ test('--optchat-profile still opens that profile headlessly', async () => {
     assert.match(pi.sent[0], /You are OptChat/);
   } finally { await pi.close(); }
 });
+
+for (const mode of ['print', 'rpc'] as const) for (const flag of [undefined, 'work'])
+  for (const api of ['anthropic-messages', 'openai-completions'] as const)
+    test(`${mode} ${api} caching is managed only with an active OptChat profile (${flag ?? 'plain Pi'})`, async () => {
+      const pi = await headless(mode, { flag, api });
+      try {
+        const runner = pi.session.extensionRunner;
+        const warming = await runner.emitCacheWarmingDecision({ type: 'cache_warming_decision', action: 'warm',
+          warmCost: 0.01, missCost: 0.1, continuationProbability: 0.5 });
+        // A pasted OptChat view is ordinary input in plain Pi, even though it matches OptChat's cache format.
+        const payload = {
+          system: [{ type: 'text', text: 'Instructions', cache_control: { type: 'ephemeral', ttl: '1h' } }],
+          messages: [{ role: 'user', content: [{ type: 'text', text: '<chat>\n0+1|user: Earlier request\n1+1|talk: Earlier answer\n2+1|user: Continue\n</chat>',
+            cache_control: { type: 'ephemeral', ttl: '1h' } }] }],
+        };
+        const original = structuredClone(payload), output = await runner.emitBeforeProviderRequest(payload);
+        if (flag && api === 'anthropic-messages') {
+          assert.notDeepEqual(output, original, 'an active profile still applies OptChat cache marks');
+          assert.equal('cache_control' in payload.system[0], false);
+          assert.ok(payload.messages[0].content.length > 1, 'the memory view is split into cache blocks');
+        } else assert.deepEqual(output, original, 'native cache marks, TTLs and blocks stay intact');
+        assert.equal(warming, flag ? 'stop' : 'warm', 'plain Pi keeps its own warming decision');
+        assert.deepEqual(pi.errors, []);
+      } finally { await pi.close(); }
+    });
 
 test('the main chat\'s answers save the subscription\'s limits in its profile, and a refused one is noted there; plain Pi saves none', async () => {
   const headers = { 'anthropic-ratelimit-unified-5h-utilization': '0.62', 'anthropic-ratelimit-unified-5h-reset': '1794846600', 'anthropic-ratelimit-unified-5h-status': 'allowed' };
