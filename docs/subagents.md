@@ -87,7 +87,7 @@ It lists the id and the first words of each task, so the main agent knows what i
 
 ## Levels and limits
 
-- By default only the main agent starts subagents. Set **Subagent levels** in `/optchat settings` to let them delegate further (3 means child, grandchild, great-grandchild).
+- By default only the main agent and connected windows start subagents (a window you talk to counts as the main chat, so its subagents are level 1). Set **Subagent levels** in `/optchat settings` to let them delegate further (3 means child, grandchild, great-grandchild).
 - **Max active agents** (8 by default) caps how many agents can be active per profile, including parents waiting on descendants.
 - Going over a limit returns an error; there is no queue.
 

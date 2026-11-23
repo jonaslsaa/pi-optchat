@@ -61,8 +61,11 @@ organized and how they want work done.
 
 The user's newest message comes after the view below. The view shows you what
 OptChat knows: what the user wants, decided and taught. Use it as context. You
-can't start subagents here; background work belongs in the main chat. When the
-user completes this conversation, you write a handoff for the main agent.
+can start subagents with spawn. Their reports arrive here while this
+conversation is open, and in the main chat once it has ended. Use tell_main
+when the user asks you to tell the main chat something, or for a finding the
+main agent needs now; it can't answer you here. When the user completes this conversation,
+you write a handoff for the main agent.
 
 ${PI_CHILDREN}`;
 

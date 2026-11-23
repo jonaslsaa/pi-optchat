@@ -12,7 +12,7 @@ import { placeView } from './core/messages.ts';
 import { connectWindow } from './window-client.ts';
 import { HANDOFF_TIMEOUT, handoffText } from './handoff.ts';
 import { queueWindow, readRun, runMessages, unqueueWindow, type FinishReason, type RemoteWindow } from './runs.ts';
-import { textContent } from './transcript.ts';
+import { REPORT_TYPE, textContent } from './transcript.ts';
 
 /**
  * What this Pi is to its profile, for RPC hosts: `setStatus` with this key carries it as JSON (see `Role`).
@@ -21,8 +21,6 @@ import { textContent } from './transcript.ts';
 export const ROLE_STATUS = 'optchat.role';
 export type Role = { role: 'owner'; profile: string }
   | { role: 'window'; profile: string; id: string; connected: boolean; completed: boolean; after?: number };
-/** Tools that need the owner's agents: a window delegates nothing. */
-const OWNER_TOOLS = ['spawn', 'tell', 'models'];
 const RECONNECT_MS = 5000;
 /** The closing message that asks a window for its handoff (`windowHandoff`). */
 const HANDOFF_TYPE = 'optchat-handoff-request';
@@ -51,6 +49,10 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
   };
   type Connection = Awaited<ReturnType<typeof connectWindow>>;
   let connection: Connection | undefined, registered = false, queued = false, completed = false, closed = false;
+  /** What the owner takes from a registered window (see REMOTE_ACTIONS): an older one starts no agents for it. */
+  let owns: string[] = [];
+  /** Set by /complete: reports still on their way go into the handoff, not into its handoff turn; the owner sends later ones to the main chat. */
+  let late: string[] | undefined;
   /** The first request, once there is one: until then there is nothing to register or hand off. */
   let task: string | undefined;
   /** The view goes before the request of the run it was read for, and stays there while it doesn't change, so the rest stays cached. */
@@ -68,7 +70,11 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
     if (connection) return;
     let opened: Connection | undefined;
     try {
-      opened = await connectWindow(dir, () => {}, () => {
+      // Its subagents' reports and messages, which its agent takes as the main agent takes reports.
+      opened = await connectWindow(dir, event => {
+        if (event.name !== 'message' || closed) return;
+        if (late) late.push(event.text); else pi.sendMessage({ customType: REPORT_TYPE, content: event.text, display: true }, { triggerTurn: true, deliverAs: 'steer' });
+      }, () => {
         if (!opened || connection !== opened) return;
         connection = undefined; registered = false; publish();
       }, 2000);
@@ -91,7 +97,7 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
       if (task === undefined || completed) return;
       if (connection && !registered) {
         try {
-          await connection.request('register', JSON.stringify(self()));
+          owns = (await connection.request('register', JSON.stringify(self())))?.split(' ') ?? [];
           registered = true;
           if (queued) { unqueueWindow(dir, id); queued = false; }
         } catch (error) { if (!quiet) ctx.ui.notify(`OptChat could not register this window with the main one: ${error instanceof Error ? error.message : String(error)}`, 'warning'); }
@@ -117,8 +123,9 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
     connection?.close();
   };
   const syncTools = (search: boolean) => {
-    const tools = pi.getActiveTools().filter(name => !OWNER_TOOLS.includes(name) && name !== 'search');
-    pi.setActiveTools(search ? [...tools, 'search'] : tools);
+    // tell_main is a window's alone: the main chat has no main to tell.
+    const tools = pi.getActiveTools().filter(name => name !== 'search' && name !== 'tell_main');
+    pi.setActiveTools([...tools, 'tell_main', ...search ? ['search'] : []]);
   };
   try { await connect(requireOwner); } catch (error) { clearInterval(reconnect); throw error; }
   syncTools(loadConfig(dir).memorySearch);
@@ -161,21 +168,33 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
       anchor = placed.anchor;
       return placed.messages;
     },
-    /** /tell-main: a message to the main agent. */
-    async tell(text: string) {
+    /** /tell-main, or the agent's tell_main (`from: 'agent'`): a message to the main agent. */
+    async tell(text: string, from?: 'agent') {
       if (!text.trim()) throw new Error('Message is empty');
       if (task === undefined) throw new Error('Send your first request first');
       await register();
       if (!connection || !registered) throw new Error('No main window is reachable');
-      await connection.request('tell-main', text);
+      // Frames run in order on the owner, so this can wait behind a spawn settling memory (see delegate).
+      await connection.request('tell-main', text, undefined, { from, timeout: 30 * 60_000 });
+    },
+    /** The agent's spawn, tell and models, which the owner runs: its subagents run there, with this window as their parent. */
+    async delegate(action: 'spawn' | 'tell' | 'models', text?: string) {
+      await register({ quiet: true });
+      if (!connection || !registered) throw new Error('No main window is reachable, so this window can\'t reach subagents now. Try again once the profile is open in Pi or the OptChat app.');
+      if (!owns.includes(action)) throw new Error('The main window runs an older pi-optchat, which starts no subagents for a connected window. Restart it after updating pi-optchat, then try again.');
+      // A spawn waits for memory to settle, which can take minutes; timing out would drop this window's connection.
+      return await connection.request(action, text, ctx.cwd, { timeout: 30 * 60_000 }) ?? '';
     },
     /** /complete: the window writes its handoff as one more turn of its own (its context still cached), then hands it to the owner. */
     async complete(command: ExtensionCommandContext) {
       if (completed) { command.ui.notify('This conversation is already completed.', 'info'); return; }
       if (!command.isIdle()) { command.abort(); await command.waitForIdle(); }
       let text: string | undefined;
+      late = [];
+      if (connection && registered && owns.includes('completing')) await connection.request('completing').catch(() => {});
       if (task !== undefined) try { text = await writeHandoff(command); }
       catch (error) { command.ui.notify(`This window could not write its handoff, so the main window's compactor writes it: ${error instanceof Error ? error.message : String(error)}`, 'warning'); }
+      if (text && late.length) text += `\n\nSubagent reports that arrived while this conversation ended:\n\n${late.join('\n\n')}`;
       await end('complete', text);
       pi.appendEntry(COMPLETED_TYPE, {});
       completed = true; clearInterval(reconnect); publish();
@@ -185,6 +204,7 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
     /** Pi is closing this session: the owner hands it off from the transcript once the connection drops. */
     async close() {
       closed = true; clearInterval(reconnect);
+      pi.setActiveTools(pi.getActiveTools().filter(name => name !== 'tell_main')); // A host may reuse the session as the owner.
       if (!completed) await end('disconnected'); else connection?.close();
     },
   };

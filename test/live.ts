@@ -7,6 +7,7 @@ import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import optchat from '../src/index.ts';
 import { createProfile, profilePath } from '../src/profiles.ts';
+import { REPORT_TYPE } from '../src/transcript.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'optchat-live-'));
 process.env.OPTCHAT_HOME = home;
@@ -45,7 +46,8 @@ try {
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => { unsubscribe(); reject(new Error('Subagent report did not arrive within 120 seconds')); }, 120_000);
     const unsubscribe = session.subscribe(event => {
-      if (event.type === 'agent_settled' && session.messages.some(m => m.role === 'user' && JSON.stringify(m.content).includes('] ') && JSON.stringify(m.content).includes('copper heron 814'))) {
+      // A report arrives as an `optchat-report` custom message, which the model sees as a user turn.
+      if (event.type === 'agent_settled' && session.messages.some(m => m.role === 'custom' && m.customType === REPORT_TYPE && JSON.stringify(m.content).includes('copper heron 814'))) {
         clearTimeout(timeout); unsubscribe(); resolve();
       }
     });

@@ -1144,3 +1144,46 @@ test('a ~\\ task cwd is the home directory on Windows only', () => {
   assert.equal(taskDirectory('/base', '~\\project', false), resolve('/base', '~\\project'), 'a POSIX backslash is a literal character');
   assert.equal(taskDirectory('/base', '~/project', false), join(homedir(), 'project'));
 });
+
+test('a connected window starts subagents as the main chat does: at Subagent levels 1 they start none of their own, at 2 they do', async () => {
+  for (const subagentLevels of [1, 2]) {
+    const dir = mkdtempSync(join(tmpdir(), 'optchat-window-levels-'));
+    const { children } = await busyChildren(dir, [], { settings: () => ({ subagentLevels, maxAgents: 8 }) });
+    try {
+      const [inOwner] = await children.spawn([{ task: 'talk' }], dir, undefined, undefined, true);
+      await children.adopt({ id: 'remote01', task: 'talk', cwd: dir, model: 'optchat-test/child', thinking: 'minimal', pid: process.pid }, { announce: false });
+      children.connectWindow('remote01', () => true);
+      for (const window of [inOwner, 'remote01']) {
+        const [child] = await children.spawn([{ task: 'work' }], dir, undefined, window);
+        const deeper = children.spawn([{ task: 'deeper' }], dir, undefined, child);
+        if (subagentLevels === 1) await assert.rejects(deeper, /Delegation depth limit reached/, `${window}'s child`);
+        else assert.equal((await deeper).length, 1);
+      }
+    } finally { await children.close(); removeDir(dir); }
+  }
+});
+
+test('a window\'s subagents that a Pi restart cut off are named to it when it registers again, or to the main chat once it has ended', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-window-cut-'));
+  const reports: string[] = [];
+  const { children } = await busyChildren(dir, reports);
+  try {
+    const window = (id: string) => children.adopt({ id, task: 'talk', cwd: dir, model: 'optchat-test/child', thinking: 'minimal', pid: process.pid }, { announce: false });
+    await window('back0001'); await window('gone0001'); await window('done0001');
+    await children.endRemote('done0001', 'complete', 'Handoff.'); // It ended before Pi restarted.
+    reports.length = 0;
+    for (const [id, parentId] of [['aaaa0001', 'back0001'], ['bbbb0001', 'gone0001'], ['cccc0001', 'done0001']])
+      children.history.save({ id, task: 'work', cwd: dir, model: 'optchat-test/child', thinking: 'minimal', parentSession: '', parentId, depth: 1, started: 1, ended: 2, state: 'interrupted', cutOff: true, guidance: [] });
+    await children.resumeCutOff();
+    assert.equal(reports.length, 1, 'only the ended window\'s child is named now');
+    assert.match(reports[0], /not resumed because their parent agent is not running: cccc0001 \(under done0001\)/);
+    const told: string[] = [];
+    children.connectWindow('back0001', text => { told.push(text); return true; });
+    await until(() => told.length === 1);
+    assert.match(told[0], /subagents aaaa0001 were working, so they stopped\. tell resumes one/);
+    assert.equal(children.history.records.get('aaaa0001')?.cutOff, true, 'cut off until the window resumes it, so its own cut-off agents stay named to it');
+    await children.endRemote('gone0001', 'disconnected');
+    assert.match(reports.at(-1) ?? '', /subagents bbbb0001 of connected window gone0001 were working, so they stopped\. The window ended before it could resume them/);
+    assert.ok(!children.history.records.get('bbbb0001')?.cutOff);
+  } finally { await children.close(); removeDir(dir); }
+});

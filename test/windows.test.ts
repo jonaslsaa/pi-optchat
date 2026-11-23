@@ -242,7 +242,7 @@ class OffscreenTerminal implements Terminal {
   get columns() { return 100; } get rows() { return 30; } get kittyProtocolActive() { return false; }
   moveBy() {} hideCursor() {} showCursor() {} clearLine() {} clearFromCursor() {} clearScreen() {} setTitle() {} setProgress() {} setProgramStatus() {}
 }
-const plain = (lines: string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b[\]_][^\x07\x1b]*(\x07|\x1b\\)/g, '');
+const plain = (lines: readonly string[]) => lines.join('\n').replace(/\x1b\[[0-9;:]*[A-Za-z]|\x1b[\]_][^\x07\x1b]*(\x07|\x1b\\)/g, '');
 
 test('a connected window draws each reply with its tool results, the live turn, Working vs Waiting for N agents, and your queued messages', async () => {
   const f = await fixture();
@@ -1375,4 +1375,20 @@ test('two apps resume the same finished agent at once: one wins, and both views 
       assert.equal(events.filter(e => e.text === 'Reply: first result').length, 1, 'no replay across the reopen');
     }
   } finally { for (const agent of agents) agent.close(); await close(); await f.close(); }
+});
+
+test('a parent guides only its own children, and only a window running its own agent asks the owner to delegate', async () => {
+  const f = await fixture();
+  const events: WindowEvent[] = [];
+  const close = await serveWindows(f.dir, f.children, () => true, async text => { f.reports.push(text); });
+  const client = await connectWindow(f.dir, event => events.push(event), () => {});
+  try {
+    await client.request('start', 'Investigate this repository.', f.dir);
+    const id = events.find(e => e.name === 'started')?.text; assert.ok(id);
+    for (const action of ['spawn', 'tell', 'models'] as const)
+      await assert.rejects(client.request(action, JSON.stringify([{ task: 'x' }]), f.dir), new RegExp(`Only a window running its own agent asks for ${action}`));
+    const [other] = await f.children.spawn([{ task: 'not yours' }], f.dir);
+    await until(() => f.children.history.records.get(other)?.state === 'completed');
+    await assert.rejects(f.children.guide(id, other, 'Do more.'), /only guide your own children/);
+  } finally { client.close(); await close(); await f.close(); }
 });
