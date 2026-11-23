@@ -139,3 +139,65 @@ test('the main window title follows the real Pi session: profile, working, runni
     removeDir(dir);
   }
 });
+
+test('the status line clears pending summaries once background compaction finishes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-status-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  let releaseSummary!: () => void;
+  const summaryReleased = new Promise<void>(resolve => { releaseSummary = resolve; });
+  let summaryHeld!: () => void;
+  const held = new Promise<void>(resolve => { summaryHeld = resolve; });
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    const config = loadConfig(profilePath('fixture'));
+    saveConfig(profilePath('fixture'), { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
+      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+    runtime.registerProvider('fixture', {
+      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+      streamSimple(model, context) {
+        const compression = context.messages.some(m => m.role === 'system' && m.content === COMPACT);
+        // Long enough to require a real compactor call (>512 B) rather than the verbatim short-message path.
+        const text = compression ? 'Summary.' : 'Long reply. '.repeat(60);
+        const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text }],
+          timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
+        const stream = createAssistantMessageEventStream();
+        void (async () => {
+          if (compression) { stream.push({ type: 'start', partial: reply }); summaryHeld(); await summaryReleased; }
+          stream.push({ type: 'done', reason: 'stop', message: reply });
+          stream.end();
+        })();
+        return stream;
+      },
+    });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.create(dir, join(dir, 'sessions'));
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
+      resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date'] })).session;
+    const statuses: (string | undefined)[] = [];
+    const uiContext: ExtensionUIContext = { ...session.extensionRunner.getUIContext(),
+      setStatus: (key, text) => { if (key === 'optchat') statuses.push(text); } };
+    await session.bindExtensions({ uiContext });
+
+    await session.prompt('Say something long.');
+    await session.agent.waitForIdle();
+    await held;
+    await until(() => /1 pending/.test(statuses.at(-1) ?? ''));
+
+    releaseSummary();
+    await until(() => /0 pending/.test(statuses.at(-1) ?? ''));
+    assert.match(statuses.at(-1) ?? '', /^OptChat: fixture · 2 messages · 0 pending · 0 agents$/);
+  } finally {
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    removeDir(dir);
+  }
+});
