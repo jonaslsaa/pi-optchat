@@ -196,6 +196,7 @@ test('the status line clears pending summaries once background compaction finish
     await until(() => /0 pending/.test(statuses.at(-1) ?? ''));
     assert.match(statuses.at(-1) ?? '', /^OptChat: fixture · 2 messages · 0 pending · 0 agents$/);
   } finally {
+    releaseSummary();
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
     removeDir(dir);

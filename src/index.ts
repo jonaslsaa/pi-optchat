@@ -117,7 +117,6 @@ export default function optchat(pi: ExtensionAPI) {
   let working = false;
   let untitle: (() => void) | undefined;
   let unstatus: (() => void) | undefined;
-  let lastStatus: string | undefined;
   const showTitle = (ctx: ExtensionContext) => {
     const a = active;
     if (a) title.show(text => ctx.ui.setTitle(text), mainTitle(a.name, working, a.children.ids.length));
@@ -186,17 +185,12 @@ export default function optchat(pi: ExtensionAPI) {
     if (rpcWindow) return;
     const a = active;
     if (ctx.mode === 'rpc') ctx.ui.setStatus(ROLE_STATUS, a ? JSON.stringify({ role: 'owner', profile: a.name } satisfies Role) : undefined);
-    if (!a) {
-      const text = 'OptChat: choose profile';
-      if (text !== lastStatus) ctx.ui.setStatus('optchat', lastStatus = text);
-      return;
-    }
+    if (!a) { ctx.ui.setStatus('optchat', 'OptChat: choose profile'); return; }
     // A display only: a broken import journal is refused where it matters, never here.
     let note = '';
     try { note = importing ? ' · importing' : pendingImport(a.dir) ? ' · import paused: /optchat import' : ''; }
     catch { note = ' · import journal invalid'; }
-    const text = `OptChat: ${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending · ${a.children.ids.length} agents${note}`;
-    if (text !== lastStatus) ctx.ui.setStatus('optchat', lastStatus = text);
+    ctx.ui.setStatus('optchat', `OptChat: ${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending · ${a.children.ids.length} agents${note}`);
   };
   // `steered` describes this process's Pi queue, so it is not journaled.
   const saveReports = () => { if (active) atomicWrite(join(active.dir, 'pending-reports.json'), JSON.stringify(reports, (key, value: unknown) => key === 'steered' ? undefined : value)); };
@@ -253,7 +247,7 @@ export default function optchat(pi: ExtensionAPI) {
       await old.memory.close(); await old.unlock(); active = undefined;
       run = []; previous = []; logged = 0; keep = 0; view = undefined; runStarted = false; receipts.clear(); idle = () => true;
       untitle?.(); untitle = undefined; title.clear(); working = false;
-      unstatus?.(); unstatus = undefined; lastStatus = undefined;
+      unstatus?.(); unstatus = undefined;
     }
   };
   const CONNECT = 'Start a connected subagent conversation here', BACK = 'Back';
@@ -292,12 +286,7 @@ export default function optchat(pi: ExtensionAPI) {
     // Pi's RPC mode binds extensions twice after new_session/switch_session/fork/clone (setRebindSession, then rebindSession()),
     // so session_start can arrive again for the session this profile already serves. Taking the lock again would meet our own socket.
     // Only the same session is kept: another session without a session_shutdown still fails loudly below.
-    if (active?.name === name && active.session === ctx.sessionManager.getSessionId()) {
-      await restoreMain(ctx, active);
-      untitle?.(); untitle = active.children.subscribe(() => { showTitle(ctx); status(ctx); }); showTitle(ctx);
-      unstatus?.(); unstatus = active.memory.onChange(() => status(ctx));
-      lastStatus = undefined; status(ctx); return;
-    }
+    if (active?.name === name && active.session === ctx.sessionManager.getSessionId()) { await restoreMain(ctx, active); showTitle(ctx); status(ctx); return; }
     const unlock = await holdProfile(storeFor(dir), dir, name, describeOwner({ profile: name, pid: process.pid, host: hostname(), cwd: ctx.cwd }), warning => ctx.ui.notify(warning, 'warning'));
     let openingMemory: Memory | undefined;
     try {
@@ -349,7 +338,7 @@ export default function optchat(pi: ExtensionAPI) {
     } catch (error) {
       await closeWindows?.(); closeWindows = undefined;
       untitle?.(); untitle = undefined; title.clear();
-      unstatus?.(); unstatus = undefined; lastStatus = undefined;
+      unstatus?.(); unstatus = undefined;
       if (active && active.memory === openingMemory) {
         unmountNavigation?.(); unmountNavigation = undefined;
         await active.children.close(); active = undefined;
