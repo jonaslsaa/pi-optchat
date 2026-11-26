@@ -33,7 +33,9 @@ To uninstall, run `pi remove git:github.com/jonaslsaa/pi-optchat`. Profile data 
 2. Choose **+ Create profile** and name it, for example `work`.
 3. Chat normally.
 
-The footer shows the active profile. Memory follows the profile across directories and Pi sessions. Resumed sessions restore their profile, and `/new` keeps the window's once its session has a message. Other new sessions open `OPTCHAT_PROFILE` if set (`OPTCHAT_PROFILE=work pi`, interactive Pi only), or your only profile, else show the picker with the last-used profile first. `/optchat profile` always shows the picker.
+The footer shows the active profile. Memory follows the profile across directories and Pi sessions. Resumed sessions restore their profile, and `/new` keeps the window's once its session has a message. Other new sessions open `OPTCHAT_PROFILE` if set (`OPTCHAT_PROFILE=work pi`, interactive Pi only), then your saved default, then your only profile, else show the picker with the last-used profile first. `/optchat profile` always shows the picker.
+
+To choose a default without setting an environment variable, open `/optchat profile`, select **Default profile**, then a profile. It is used for new interactive sessions after `OPTCHAT_PROFILE` and before the single-profile fallback. Choosing **No saved default** restores automatic selection. This preference is saved in `~/.optchat/default-profile` (under `OPTCHAT_HOME` when set); choosing another profile normally does not change it. Explicit flags, resumed sessions, `/new`, print and RPC behavior stay the same. A default whose profile has been removed is ignored.
 
 ### Headless and RPC
 

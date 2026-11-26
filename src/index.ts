@@ -38,6 +38,7 @@ import { openConnectedWindow, registerConnectedRenderer } from './connected-wind
 import { openRemoteWindow, ROLE_STATUS, type Role } from './rpc-window.ts';
 import { createHandoffSummarizer } from './handoff.ts';
 import { mainTitle, TabTitle } from './title.ts';
+import { pickProfile, preferredProfile } from './profile-picker.ts';
 import { showModelPicker, showSettings } from './settings-page.ts';
 import { showMenu } from './menu.ts';
 
@@ -256,13 +257,13 @@ export default function optchat(pi: ExtensionAPI) {
     if (ctx.mode !== 'tui') return undefined;
     const names = listProfiles(), last = lastProfile();
     if (last) names.sort((a, b) => Number(b === last) - Number(a === last));
-    const selected = await ctx.ui.select('OptChat profile', [...names, '+ Create profile']);
+    const selected = await pickProfile(ctx, [...names, '+ Create profile']);
     if (selected !== '+ Create profile') return selected;
     const name = (await ctx.ui.input('New profile name', 'work or personal'))?.trim();
     if (!name) return undefined;
     createProfile(name); return name;
   };
-  // An unbound TUI session skips the picker when the choice is clear (#238): /new keeps the window's profile, then OPTCHAT_PROFILE, then a lone profile.
+  // An unbound session selects its profile before falling back to the interactive picker.
   const defaultProfile = (ctx: ExtensionContext, event: SessionStartEvent): string | undefined => {
     if (ctx.mode !== 'tui') return undefined;
     const names = listProfiles();
@@ -278,7 +279,7 @@ export default function optchat(pi: ExtensionAPI) {
       if (names.includes(env)) return env;
       ctx.ui.notify(`OPTCHAT_PROFILE: no profile named ${env}.`, 'warning');
     }
-    return names.length === 1 ? names[0] : undefined;
+    return preferredProfile(ctx) ?? (names.length === 1 ? names[0] : undefined);
   };
   const openProfile = async (name: string, ctx: ExtensionContext) => {
     const dir = profilePath(name);
