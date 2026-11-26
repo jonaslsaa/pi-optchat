@@ -57,6 +57,8 @@ Every report ends with `Full chat: zoom("<id>")`, so the agent can check it agai
 
 `zoom` with a run ID returns that child's chat so far as `kind|text` lines: its task without the memory view, replies, tool calls, tool results cut to their first and last ~500 characters, and what it was told. It comes in 25,000-character pages that say which `offset` to go on from. It works on running children too. A subagent can read only its own descendants' chats, as with `tell`.
 
+Visible extension messages are included with their source tag, also after compaction and restart. Hidden context injected by extensions stays out of the transcript.
+
 ## The "agents at work" status line
 
 While any subagent runs, each new input to the main agent (your message, a report, a `tell_parent` message, the restart note, a connected window's message) ends with one status line:

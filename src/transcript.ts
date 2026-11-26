@@ -103,6 +103,7 @@ const STEP = 1_000;
 export function runTranscript(messages: readonly AgentMessage[]) {
   const task = messages.find(message => message.role === 'user');
   return messages.flatMap(message => {
+    message = asUser(message);
     if (message.role === 'user') {
       // Only the task prompt holds the memory view: core's childInput({ view, task }) (src/agents.ts), the view, TASK_HEADER and the task.
       const text = textContent(message.content, false), at = text.indexOf(TASK);
