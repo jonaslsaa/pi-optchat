@@ -1,4 +1,5 @@
 import { after, test } from 'node:test';
+import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
@@ -227,6 +228,35 @@ test('a second writer that got past the lock is refused on its next turn, with t
   const reopened = new Memory(join(dir, 'home', 'profiles', 'shared'), async () => 'summary', () => {});
   try { assert.deepEqual(reopened.root.map(e => reopened.text(e.i)), ['written by the other process']); }
   finally { await reopened.close(); removeDir(dir); }
+});
+
+test('the footer hint works inside and outside Git, passes input through, and stays dismissed without covering a draft', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oc-hint-')), oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = join(dir, 'home');
+  try {
+    createProfile('personal');
+    for (const [repository, draft, input] of [[true, '', 'a'], [true, '', '\x1b[200~hello\x1b[201~'], [false, '', 'a'], [false, '', '\x1b[200~hello\x1b[201~'], [true, 'existing draft', 'a'], [false, 'existing draft', 'a']] as const) {
+      const cwd = mkdtempSync(join(dir, 'run-'));
+      if (repository) execFileSync('git', ['init', '-q', cwd]);
+      const listeners = new Set<(data: string) => unknown>();
+      let footer = '';
+      const ui = { getEditorText: () => draft, setStatus: (key: string, text: string | undefined) => { if (key === 'optchat') footer = text ?? ''; },
+        onTerminalInput: (listener: (data: string) => undefined) => { listeners.add(listener); return () => { listeners.delete(listener); }; } };
+      const running = await start(cwd, ui, 'personal');
+      try {
+        assert.equal(footer.includes('to switch: /optchat profile'), !draft);
+        assert.match(footer, /^OptChat: personal/);
+        for (const listener of listeners) assert.equal(listener('\x1b[I'), undefined, 'focus reports pass through');
+        assert.equal(footer.includes('to switch:'), !draft);
+        for (const listener of [...listeners]) assert.equal(listener(input), undefined, 'the editor receives the original input');
+        assert.ok(!footer.includes('to switch:'));
+        assert.equal(listeners.size, 0, 'no observer remains after dismissal');
+        await running.session.bindExtensions({ uiContext: { ...running.session.extensionRunner.getUIContext(), ...ui }, mode: 'tui' });
+        assert.ok(!footer.includes('to switch:'), 'rebinding the same session does not rearm it');
+      } finally { await running.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); running.session.dispose(); }
+      assert.equal(listeners.size, 0);
+    }
+  } finally { if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome; removeDir(dir); }
 });
 
 // #238: an unbound session skips the picker when the choice is clear.

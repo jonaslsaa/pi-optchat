@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
+import { ProfileHint } from './profile-hint.ts';
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { parseArgs, parseSessionEntries, parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type CustomEntry, type FileEntry, type SessionStartEvent } from '@earendil-works/pi-coding-agent';
@@ -68,6 +69,7 @@ export const version = ((): string | undefined => {
 const brand = version ? `OptChat v${version}` : 'OptChat';
 
 export default function optchat(pi: ExtensionAPI) {
+  const profileHint = new ProfileHint();
   let active: Active | undefined;
   let remote: Awaited<ReturnType<typeof openConnectedWindow>> | undefined;
   /** `pi -p` on a profile another Pi owns: the prompt goes to a subagent in that Pi (--optchat-connect). */
@@ -190,8 +192,11 @@ export default function optchat(pi: ExtensionAPI) {
     let note = '';
     try { note = importing ? ' · importing' : pendingImport(a.dir) ? ' · import paused: /optchat import' : ''; }
     catch { note = ' · import journal invalid'; }
-    ctx.ui.setStatus('optchat', `OptChat: ${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending · ${a.children.ids.length} agents${note}`);
+    ctx.ui.setStatus('optchat', `OptChat: ${a.name}${profileHint.suffix} · ${a.memory.root.length} messages · ${a.memory.pending} pending · ${a.children.ids.length} agents${note}`);
   };
+  pi.on('session_start', (_event, ctx) => {
+    profileHint.start(ctx, () => { if (active && !remote && !rpcWindow) status(ctx); });
+  });
   // `steered` describes this process's Pi queue, so it is not journaled.
   const saveReports = () => { if (active) atomicWrite(join(active.dir, 'pending-reports.json'), JSON.stringify(reports, (key, value: unknown) => key === 'steered' ? undefined : value)); };
   const flush = () => {
@@ -229,6 +234,7 @@ export default function optchat(pi: ExtensionAPI) {
     saveReports();
   };
   const stop = async () => {
+    profileHint.dispose();
     remote?.close(); remote = undefined; joined?.close(); joined = undefined;
     const window = rpcWindow; rpcWindow = undefined; await window?.close();
     inspectorController?.abort(); unmountNavigation?.(); unmountNavigation = undefined;
