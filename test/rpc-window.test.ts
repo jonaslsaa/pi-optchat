@@ -631,6 +631,91 @@ test('a child subagent report queued while a remote window is busy before /compl
   } finally { releaseChild(); releaseWork(); await window.close(); await owner.close(); }
 });
 
+test('branching back before /complete and adding a new finding keeps it in both the compactor handoff and zoom', async () => {
+  const name = profile(), owner = await rpc(name), window = await rpc(name);
+  try {
+    await window.ask('Initial question.');
+    await window.ask('/complete');
+    const firstId = window.role()?.role === 'window' ? (window.role() as Extract<Role, { role: 'window' }>).id : '';
+    await until(() => logged(name).some(text => text.includes(`[${firstId}] Connected conversation`)) && !owner.session.isStreaming);
+
+    // Branch back to before `/complete` and resume the session, then add a new finding and close without `/complete`.
+    const beforeComplete = window.session.sessionManager.getEntries().find(e => e.type === 'message' && e.message.role === 'assistant');
+    window.session.sessionManager.branch(beforeComplete!.id);
+    await window.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+    await window.session.extensionRunner.emit({ type: 'session_start', reason: 'resume' });
+    await window.ask('New branch finding: root cause is missing index.');
+    const secondId = window.role()?.role === 'window' ? (window.role() as Extract<Role, { role: 'window' }>).id : '';
+    assert.ok(secondId && secondId !== firstId);
+
+    let settled = false;
+    const off = owner.session.subscribe(event => {
+      if (event.type === 'agent_settled' && owner.sent.some(s => s.last.includes(`[${secondId}] Connected conversation interrupted`))) settled = true;
+    });
+    try {
+      await window.close();
+      await until(() => settled);
+    } finally { off(); }
+
+    const compactorInput = owner.sent.find(s => s.system.includes('handoff') && s.last.includes(`AGENT ${secondId}`))?.last ?? '';
+    assert.match(compactorInput, /New branch finding: root cause is missing index\./, 'branched finding survives in compactor input');
+    const zoomed = await owner.ask(`CALL zoom ${JSON.stringify({ id: secondId })}`);
+    assert.match(zoomed ?? '', /New branch finding: root cause is missing index\./, 'branched finding survives in zoom');
+  } finally { await window.close(); await owner.close(); }
+});
+
+test('a verification tool call run during a failing /complete handoff is preserved in the compactor fallback and zoom', async () => {
+  const name = profile();
+  const owner = await rpc(name);
+  let handoffStep = 0;
+  const window = await rpc(name, undefined, 'rpc', true, (request, lastRole) => {
+    if (request.startsWith(HANDOFF_REQUEST) && handoffStep === 0) {
+      handoffStep = 1;
+      return `CALL models ${JSON.stringify({})}`;
+    }
+    if (lastRole === 'toolResult' && handoffStep === 1) {
+      handoffStep = 2;
+      return Promise.reject(new Error('handoff failed after verification'));
+    }
+    return undefined;
+  });
+  try {
+    await window.ask('Check the setup.');
+    const role = window.role(), id = role?.role === 'window' ? role.id : '';
+    let settled = false;
+    const off = owner.session.subscribe(event => {
+      if (event.type === 'agent_settled' && owner.sent.some(s => s.last.includes(`[${id}] Connected conversation completed by user`))) settled = true;
+    });
+    try {
+      await window.ask('/complete');
+      await until(() => settled);
+    } finally { off(); }
+
+    const compactorInput = owner.sent.find(s => s.system.includes('handoff') && s.last.includes(`AGENT ${id}`))?.last ?? '';
+    assert.match(compactorInput, /TOOL CALL: models/, 'verification tool call is kept for the compactor');
+    assert.match(compactorInput, /TOOL RESULT \(models, error=false\):/, 'verification tool result is kept for the compactor');
+    const zoomed = await owner.ask(`CALL zoom ${JSON.stringify({ id })}`);
+    assert.match(zoomed ?? '', /tool\|models/, 'verification tool call is kept in zoom');
+    assert.match(zoomed ?? '', /echo\|models:/, 'verification tool result is kept in zoom');
+  } finally { await window.close(); await owner.close(); }
+});
+
+test('a remote window whose written /complete handoff is itself JSON is delivered intact, never mistaken for a protocol envelope', async () => {
+  const name = profile(), owner = await rpc(name);
+  const jsonSummary = JSON.stringify({ conclusion: 'Ready to ship', checks: ['unit', 'e2e'] });
+  const window = await rpc(name, undefined, 'rpc', true, request => request.startsWith(HANDOFF_REQUEST) ? jsonSummary : undefined);
+  try {
+    await window.ask('Give me a JSON summary.');
+    const role = window.role(), id = role?.role === 'window' ? role.id : '';
+    await window.ask('/complete');
+    const handoffOf = (s: { last: string }) => new RegExp(`^\\[${id}\\] Connected conversation completed by user`).test(s.last);
+    await until(() => owner.sent.some(handoffOf));
+    const delivered = owner.sent.find(handoffOf)!.last;
+    assert.ok(delivered.includes(jsonSummary), 'the JSON handoff text arrives verbatim');
+    assert.ok(!owner.sent.some(s => s.system.includes('handoff') && s.last.includes(`AGENT ${id}`)), 'compactor fallback is not invoked');
+  } finally { await window.close(); await owner.close(); }
+});
+
 test('a window\'s spawn with no owner to reach fails and says so', async () => {
   const name = profile(), owner = await rpc(name), window = await rpc(name);
   try {

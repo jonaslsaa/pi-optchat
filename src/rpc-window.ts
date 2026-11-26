@@ -121,20 +121,19 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
     if (task === undefined) { connection?.close(); return; }
     await register();
     const { text, undelivered, unread } = handoff ?? {};
-    const extras = !!(undelivered?.length || unread?.length);
     if (connection && registered) {
       try {
         // A dropped connection is itself an ending without /complete, which the owner hands off from the transcript.
-        // Send plain text when there are no unread extras (or the owner is older and doesn't advertise `handoff-json`); otherwise send structured JSON.
         if (reason === 'complete') {
-          let body = text;
-          if (extras) {
-            if (owns.includes('handoff-json')) body = JSON.stringify({ ...(text ? { text } : {}), ...(undelivered?.length ? { undelivered } : {}), ...(unread?.length ? { unread } : {}) } satisfies RemoteHandoff);
-            else if (text) body = text
+          if (owns.includes('handoff-meta')) {
+            await connection.request('handoff', text, undefined, { undelivered, unread });
+          } else {
+            // An older owner ignores frame `undelivered`/`unread` fields, so append them onto the written summary when we have one.
+            const body = text ? text
               + (undelivered?.length ? `\nMessages queued but NOT delivered to the agent:\n${undelivered.join('\n')}` : '')
-              + (unread?.length ? `\n\nSubagent reports that arrived while this conversation ended:\n\n${unread.join('\n\n')}` : '');
+              + (unread?.length ? `\n\nSubagent reports that arrived while this conversation ended:\n\n${unread.join('\n\n')}` : '') : undefined;
+            await connection.request('handoff', body);
           }
-          await connection.request('handoff', body);
         }
         connection.close(); return;
       } catch {}

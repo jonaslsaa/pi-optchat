@@ -56,14 +56,13 @@ export function isRemoteWindow(value: unknown): value is RemoteWindow {
 }
 /** A finished run's saved messages: for a window, only its own conversation (see `RunInfo.window`). */
 export function runMessages(run: RunInfo): AgentMessage[] {
-  const messages = run.sessionFile ? sessionMessages(run.sessionFile, run.window?.after) : [], after = run.window?.after;
+  const messages = run.sessionFile ? sessionMessages(run.sessionFile, undelivered(run)) : [], after = run.window?.after;
   return after === undefined ? messages : messages.filter(message => message.timestamp >= after);
 }
-/** What a window that ended with `/complete` sends the owner (or queues for the next one) when it has no handoff text or
- * also has unread guidance/reports to preserve. Older windows send plain handoff text, which still parses as `{ text }`. */
+/** What a window that ended with `/complete` sends the owner (or queues for the next one): its handoff text plus any unread guidance/reports. */
 export interface RemoteHandoff { text?: string; undelivered?: string[]; unread?: string[] }
 const isStringList = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string');
-export const isRemoteHandoff = (value: unknown): value is RemoteHandoff => record(value)
+const isRemoteHandoff = (value: unknown): value is RemoteHandoff => record(value)
   && (value.text === undefined || typeof value.text === 'string')
   && (value.undelivered === undefined || isStringList(value.undelivered))
   && (value.unread === undefined || isStringList(value.unread));
@@ -88,13 +87,30 @@ export function queuedWindows(profileDirectory: string): QueuedWindow[] {
 /** A connected run that has ended but whose handoff summary has not reached the main agent yet. */
 export const isHandingOff = (run: RunInfo) => !isActiveRun(run) && !!run.handoff && !run.handoff.delivered;
 export const CUT_OFF = 'Pi closed before this agent finished. Its partial transcript is retained.';
-export function sessionMessages(file: string, after?: number): AgentMessage[] {
+/**
+ * Messages saved in a session file. `exclude` drops unread main-agent guidance that Pi's steering queue drained into a closing
+ * handoff turn after `/complete` aborted an active turn, so the compactor and `zoom` don't show it as read conversation.
+ */
+export function sessionMessages(file: string, exclude: readonly string[] = []): AgentMessage[] {
   const entries = SessionManager.open(file).getEntries();
-  const own = after === undefined ? entries : entries.filter(entry => Date.parse(entry.timestamp) >= after);
-  // Everything from a hidden handoff request on belongs to `/complete`'s own closing turn (including any steering Pi drained into it),
-  // never to the conversation the compactor or zoom reads.
-  const handoffAt = own.findLastIndex(entry => entry.type === 'custom_message' && entry.customType === 'optchat-handoff-request');
-  return (handoffAt >= 0 ? own.slice(0, handoffAt) : own).flatMap(entry => {
+  const skip = new Set<number>();
+  if (exclude.length) {
+    // Match from the end so an identical guidance message that really was read earlier stays in the transcript.
+    const remaining = new Map<string, number>();
+    for (const text of exclude) remaining.set(text, (remaining.get(text) ?? 0) + 1);
+    for (let i = entries.length - 1; i >= 0 && remaining.size; i--) {
+      const entry = entries[i];
+      if (entry.type !== 'custom_message' || entry.customType !== REPORT_TYPE) continue;
+      const body = textContent(entry.content);
+      const count = remaining.get(body) ?? 0;
+      if (count > 0) {
+        skip.add(i);
+        if (count === 1) remaining.delete(body); else remaining.set(body, count - 1);
+      }
+    }
+  }
+  return entries.flatMap((entry, i) => {
+    if (skip.has(i)) return [];
     if (entry.type === 'message') return [entry.message];
     // Main-agent guidance in a remote window is saved as an `optchat-report` custom message (rpc-window.ts); keep only that
     // here so subagent reports aren't misattributed as user messages in handoffs or zoom.
