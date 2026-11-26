@@ -9,7 +9,7 @@ import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime,
 import { Type } from 'typebox';
 import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
-import { PAGE } from '../src/core/memory.ts';
+import { CAP, PAGE } from '../src/core/memory.ts';
 import { memoryTools } from '../src/tools.ts';
 import { result } from '../src/core/tools.ts';
 import { runTranscript } from '../src/transcript.ts';
@@ -27,12 +27,90 @@ const chat: AgentMessage[] = [
   { role: 'user', content: '<chat>\npasted by the parent', ...at },
 ];
 
-test('a run transcript is its chat as kind|text lines, without the memory view, tool results cut to head and tail', () => {
+test('a run transcript keeps upstream head/tail excerpts, adding a locator only for clipped tool items', () => {
   const text = runTranscript(chat);
   assert.ok(text.startsWith('user|Your task:\nRun the tests.\ntalk|Running them.\ntool|bash {"command":"npm test"}\necho|bash: ok ok'));
   assert.ok(!text.includes('a long memory view'));
-  assert.match(text, /characters omitted; head and tail retained[\s\S]*fail 1\nuser\|Parent says: fix it\.\nuser\|<chat>\npasted by the parent$/, 'only the task prompt loses its memory view');
+  assert.match(text, /characters omitted; head and tail retained[\s\S]*fail 1\n\[full text: item 2\]\nuser\|Parent says: fix it\.\nuser\|<chat>\npasted by the parent$/, 'only the task prompt loses its memory view');
   assert.ok(text.length < 1_500);
+  assert.doesNotMatch(text, /full text: item 1/, 'a short call is already shown whole');
+});
+
+test('named zoom stays clipped until one tool item is selected, then pages that item alone', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-full-steps-'));
+  const memory = new Memory(dir, async () => 'summary', () => {});
+  const argument = 'a'.repeat(PAGE - 1) + '😀ARGUMENT_MIDDLE' + 'b'.repeat(PAGE);
+  const output = 'c'.repeat(PAGE) + '😀RESULT_MIDDLE' + 'd'.repeat(PAGE + 100);
+  const messages: AgentMessage[] = [chat[0], assistant([
+    { type: 'thinking', thinking: 'PRIVATE_THOUGHT' },
+    { type: 'toolCall', id: 'long-call', name: 'inspect', arguments: { evidence: argument } },
+  ]), { role: 'toolResult', toolCallId: 'long-call', toolName: 'inspect', isError: false, ...at,
+    content: [{ type: 'text', text: output }, { type: 'image', data: 'IMAGE_DATA', mimeType: 'image/png' }] }];
+  const zoom = memoryTools(() => memory, id => id === 'feed0000' ? messages : undefined)[0];
+  const read = async (args: Parameters<typeof zoom.execute>[1]) =>
+    (await zoom.execute('test', args)).content.flatMap(c => c.type === 'text' ? [c.text] : []).join('');
+  try {
+    const overview = await read({ id: 'feed0000' });
+    assert.ok(overview.length < 2_500, 'large calls and results still get only short excerpts');
+    const expansions = [...overview.matchAll(/\[Read more: zoom\((\{[^\n]+\})\)\]/g)].map(match => JSON.parse(match[1]));
+    assert.deepEqual(expansions, [
+      { id: 'feed0000', item: 1, offset: 0, limit: 1000 },
+      { id: 'feed0000', item: 2, offset: 0, limit: 1000 },
+    ], 'each clipped item gives a complete, directly usable read call');
+    assert.doesNotMatch(overview, /ARGUMENT_MIDDLE|RESULT_MIDDLE|PRIVATE_THOUGHT|IMAGE_DATA/);
+    for (const [item, expected] of [[1, `tool|inspect ${JSON.stringify({ evidence: argument })}`], [2, `echo|inspect: ${output}`]] as const) {
+      let all = '', offset = 0;
+      let request: Parameters<typeof zoom.execute>[1] = { id: 'feed0000', item };
+      const expanded = await read(expansions[item - 1]);
+      assert.equal(expanded, await read(request), 'omitting limit gives the same 1,000-character first page');
+      for (let pages = 0; ; pages++) {
+        assert.ok(pages < 100, 'pagination makes progress');
+        const text = await read(request);
+        assert.ok(text.length <= CAP, 'each response fits the tool-result budget');
+        assert.ok(text.isWellFormed(), 'a page never splits a surrogate pair');
+        const match = /^([\s\S]*)\n\[characters (\d+)-(\d+) of (\d+)(?:; continue with zoom\((\{[^\n]+\})\))?\]$/.exec(text)!;
+        assert.ok(match); assert.equal(Number(match[2]), offset);
+        assert.ok(match[1].length <= 1000, 'item reads default to small pages');
+        all += match[1]; offset = Number(match[3]);
+        if (!match[5]) { assert.equal(offset, Number(match[4])); break; }
+        request = JSON.parse(match[5]);
+        assert.deepEqual(request, { id: 'feed0000', item, offset, limit: 1000 });
+      }
+      assert.equal(all, expected, 'only the selected item is returned, including its middle');
+      const slice = await read({ id: 'feed0000', item, offset: 1000, limit: 137 });
+      const next = JSON.stringify({ id: 'feed0000', item, offset: 1137, limit: 137 });
+      assert.equal(slice, `${expected.slice(1000, 1137)}\n[characters 1000-1137 of ${expected.length}; continue with zoom(${next})]`, 'custom page sizes carry into the continuation');
+    }
+    assert.equal(await read({ id: 'feed0000' }), overview, 'reading detail does not expand future overview requests');
+    await assert.rejects(read({ id: 'feed0000', item: 3 }), /No tool item 3/);
+    for (const item of [0, -1, 1.5, NaN]) await assert.rejects(read({ id: 'feed0000', item }), /item must be a positive integer/);
+    await assert.rejects(read({ id: 0, item: 1 }), /only available with a subagent run ID/);
+    await assert.rejects(read({ id: 'missing', item: 1 }), /No run missing/);
+    await assert.rejects(read({ id: 'feed0000', item: 1, n: 1 }), /omit it when reading a run item/);
+    await assert.rejects(read({ id: 'feed0000', item: 1, offset: -1 }), /offset must be a nonnegative integer/);
+    await assert.rejects(read({ id: 'feed0000', item: 1, limit: 0 }), /limit must be a positive integer/);
+    await assert.rejects(read({ id: 'feed0000', item: 1, offset: argument.length * 2 }), /offset must be/);
+    const large = await read({ id: 'feed0000', item: 1, limit: PAGE * 2 });
+    assert.ok(large.length <= CAP, 'even direct tool execution stays bounded');
+    assert.match(large, /"limit":25000/, 'the continuation carries the capped page size');
+  } finally { await memory.close(); removeDir(dir); }
+});
+
+test('tool item numbers distinguish parallel calls and repeated provider call IDs', async () => {
+  const messages: AgentMessage[] = [assistant([
+    { type: 'toolCall', id: 'same', name: 'first', arguments: { value: 'FIRST_ARGUMENTS' } },
+    { type: 'toolCall', id: 'parallel', name: 'second', arguments: { value: 'SECOND_ARGUMENTS' } },
+  ]), { role: 'toolResult', toolCallId: 'parallel', toolName: 'second', content: [{ type: 'text', text: 'SECOND_RESULT' }], isError: false, ...at },
+  { role: 'toolResult', toolCallId: 'same', toolName: 'first', content: [{ type: 'text', text: 'FIRST_RESULT' }], isError: false, ...at },
+  assistant([{ type: 'toolCall', id: 'same', name: 'third', arguments: { value: 'THIRD_ARGUMENTS' } }])];
+  const zoom = memoryTools(() => { throw new Error('run retrieval should not read main memory'); }, id => id === 'feed0000' ? messages : undefined)[0];
+  for (const [index, expected] of ['FIRST_ARGUMENTS', 'SECOND_ARGUMENTS', 'SECOND_RESULT', 'FIRST_RESULT', 'THIRD_ARGUMENTS'].entries()) {
+    const response = await zoom.execute('test', { id: 'feed0000', item: index + 1 });
+    const text = response.content.flatMap(c => c.type === 'text' ? [c.text] : []).join('');
+    assert.match(text, new RegExp(expected));
+    assert.equal((text.match(/(?:FIRST|SECOND|THIRD)_(?:ARGUMENTS|RESULT)/g) ?? []).length, 1);
+  }
+  await assert.rejects(zoom.execute('test', { id: 'feed0000', item: 6 }), /No tool item 6/, 'a result that has not arrived is not invented');
 });
 
 test('zoom takes a run id: the transcript in pages that say where to go on; an unknown run says so', async () => {
@@ -44,9 +122,9 @@ test('zoom takes a run id: the transcript in pages that say where to go on; an u
   const text = async (args: Parameters<typeof zoom.execute>[1]) => (await zoom.execute('call', args)).content.flatMap(c => c.type === 'text' ? [c.text] : []).join('');
   try {
     memory.append('user', 'hello');
-    const whole = runTranscript(chat);
+    const whole = runTranscript(chat, 'abcd1234');
     assert.equal(await text({ id: 'abcd1234' }), `${whole}\n[characters 0-${whole.length} of ${whole.length}]`);
-    const all = runTranscript(long), first = await text({ id: 'feed0000' });
+    const all = runTranscript(long, 'feed0000'), first = await text({ id: 'feed0000' });
     assert.equal(first, `${all.slice(0, PAGE)}\n[characters 0-${PAGE} of ${all.length}; go on with offset ${PAGE}]`);
     assert.equal(await text({ id: 'feed0000', offset: PAGE, limit: 10 }), `${all.slice(PAGE, PAGE + 10)}\n[characters ${PAGE}-${PAGE + 10} of ${all.length}; go on with offset ${PAGE + 10}]`);
     assert.equal(await text({ id: '12345678' }), '\n[characters 0-0 of 0]', 'an all-digit run id is a run, even before it has said anything');
@@ -111,7 +189,7 @@ test('live zoom retains compacted evidence, its page offsets and the unsaved tai
       await loader.reload();
       return createAgentSession({ ...options, settingsManager: settings, modelRuntime: runtime, resourceLoader: loader, tools: ['read_evidence'],
         customTools: [{ name: 'read_evidence', label: 'Evidence', description: 'Return a test record.', parameters: Type.Object({ step: Type.Number() }),
-          execute: async (_id, { step }) => result(`EVIDENCE_${step} ${'y'.repeat(6000)}`) }] });
+          execute: async (_id, { step }) => result(`EVIDENCE_${step} ${'y'.repeat(3000)} RESULT_MIDDLE_${step} 😀 ${'z'.repeat(3000)}`) }] });
     },
   });
   const deadline = setTimeout(() => { releaseFirst(); releaseLast(); void children.close(); }, 10000);
@@ -134,6 +212,7 @@ test('live zoom retains compacted evidence, its page offsets and the unsaved tai
     await until(() => !!live.streaming);
     const zoom = memoryTools(() => memory, run => children.transcript(run))[0];
     const page = async (offset = 0) => (await zoom.execute('test', { id, offset })).content.flatMap(c => c.type === 'text' ? [c.text] : []).join('');
+    const detail = async () => (await zoom.execute('test', { id, item: 2, offset: 3000, limit: 1000 })).content.flatMap(c => c.type === 'text' ? [c.text] : []).join('');
     const before = await page();
     assert.ok(before.includes(`go on with offset ${PAGE}`));
     assert.match(before, /EARLY_REPLY/);
@@ -143,6 +222,13 @@ test('live zoom retains compacted evidence, its page offsets and the unsaved tai
     assert.ok(!runTranscript(children.messages(id)).includes('EARLY_REPLY'), 'the inspector still shows the compacted working context');
     const retained = runTranscript(children.transcript(id)!);
     assert.match(retained, /EARLY_REPLY/); assert.match(retained, /EVIDENCE_1/);
+    assert.doesNotMatch(retained, /RESULT_MIDDLE_1/, 'the normal overview remains clipped after compaction');
+    assert.match(retained, /full text: item 2/);
+    const resultSlice = await detail();
+    assert.match(resultSlice, /RESULT_MIDDLE_1 😀/, 'the selected old result range survives compaction');
+    assert.doesNotMatch(resultSlice, /EVIDENCE_2|EARLY_REPLY/, 'other work is not expanded');
+    const restricted = memoryTools(() => memory, run => children.transcript(run, id))[0];
+    await assert.rejects(restricted.execute('test', { id, item: 2 }), /No run/, 'item retrieval preserves descendant access checks');
     assert.equal(retained.split('FINAL_STREAMING').length - 1, 1);
     assert.equal((await page()).slice(0, PAGE), before.slice(0, PAGE), 'compaction preserves the existing page prefix');
     assert.match(await page(PAGE), /EVIDENCE_1/, 'a pre-compaction continuation still reaches the old evidence');
@@ -154,9 +240,11 @@ test('live zoom retains compacted evidence, its page offsets and the unsaved tai
     assert.deepEqual(boundaryErrors, []);
     const finished = runTranscript(children.transcript(id)!);
     assert.equal(finished, retained.replace('FINAL_STREAMING', 'FINAL_SAVED'), 'the stream becomes one saved reply, with no duplicate messages');
+    assert.equal(await detail(), resultSlice, 'completion preserves item numbering and contents');
     await children.close();
     children = new Children(memory, registry, choice, () => '', async () => {}, text => warnings.push(text), dir);
     assert.equal(runTranscript(children.transcript(id)!), finished);
+    assert.equal(await detail(), resultSlice, 'reload preserves item numbering and contents');
     assert.deepEqual(warnings, []);
   } finally { clearTimeout(deadline); releaseFirst(); releaseLast(); await children.close(); await memory.close(); removeDir(dir); }
 });

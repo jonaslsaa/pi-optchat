@@ -57,6 +57,8 @@ Every report ends with `Full chat: zoom("<id>")`, so the agent can check it agai
 
 `zoom` with a run ID returns that child's chat so far as `kind|text` lines: its task without the memory view, replies, tool calls, tool results cut to their first and last ~500 characters, and what it was told. It comes in 25,000-character pages that say which `offset` to go on from. It works on running children too. A subagent can read only its own descendants' chats, as with `tell`.
 
+A clipped tool call or result also gives a complete read call, such as `zoom({id: "<run id>", item: 2, offset: 0, limit: 1000})`. Item reads default to 1,000 characters; request a larger `limit` explicitly, up to 25,000. `offset` is a zero-based character position within that item. Each page reports its character range and total length, followed by a complete continuation call carrying the same run ID, item number and page size. The last page has no continuation. The overview stays clipped, and other tool results are not expanded. Item numbers follow retained tool-call/result order and remain available after compaction and restart. Thoughts and image data are omitted.
+
 ## The "agents at work" status line
 
 While any subagent runs, each new input to the main agent (your message, a report, a `tell_parent` message, the restart note, a connected window's message) ends with one status line:
