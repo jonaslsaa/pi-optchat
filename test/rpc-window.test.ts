@@ -562,6 +562,75 @@ test('tell guidance sent while a busy remote window starts /complete before read
   } finally { releaseWork(); await window.close(); await owner.close(); }
 });
 
+test('when a remote window\'s /complete handoff turn fails, unread guidance stays explicitly undelivered in the owner\'s compactor fallback (never ordinary MAIN AGENT input)', async () => {
+  const name = profile();
+  let releaseWork = () => {};
+  const work = new Promise<void>(resolve => { releaseWork = resolve; });
+  const owner = await rpc(name);
+  const window = await rpc(name, undefined, 'rpc', true, request =>
+    request === 'Slow step.' ? work : request.startsWith(HANDOFF_REQUEST) ? Promise.reject(new Error('handoff model down')) : undefined);
+  try {
+    await window.ask('First turn.');
+    const role = window.role(), id = role?.role === 'window' ? role.id : '';
+    await until(() => readFileSync(join(profilePath(name), 'pending-reports.json'), 'utf8').includes(`[${id}] User started`));
+    await owner.ask('Drain start notice.');
+
+    // Queue tell while busy, then /complete aborts the turn and the window's own handoff model turn fails.
+    const busy = window.ask('Slow step.');
+    await until(() => window.sent.some(s => s.last === 'Slow step.'));
+    assert.equal(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'Do not deploy yet.' })}`), 'Reply: Message sent to the connected window.');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const completing = window.ask('/complete');
+    await busy;
+    await completing;
+
+    // The owner falls back to the compactor: the guidance must appear ONLY as undelivered, never as ordinary MAIN AGENT input.
+    const handoffOf = (s: { last: string }) => new RegExp(`^\\[${id}\\] Connected conversation completed by user`).test(s.last);
+    await until(() => owner.sent.some(handoffOf));
+    const compactorInput = owner.sent.find(s => s.system.includes('handoff') && s.last.includes('First turn.'))?.last ?? '';
+    assert.match(compactorInput, /Messages queued but NOT delivered to this agent:\n\[Main agent guidance\]\nDo not deploy yet\./);
+    assert.doesNotMatch(compactorInput, /MAIN AGENT: \[Main agent guidance\]\nDo not deploy yet\./);
+    const delivered = owner.sent.find(handoffOf)!.last;
+    assert.match(delivered, /Summary:/, 'the owner compactor wrote the fallback summary');
+    assert.match(delivered, /Messages queued but NOT delivered to the agent:\n\[Main agent guidance\]\nDo not deploy yet\./);
+  } finally { releaseWork(); await window.close(); await owner.close(); }
+});
+
+test('a child subagent report queued while a remote window is busy before /complete stays as an unread report in the handoff without steering it', async () => {
+  const name = profile();
+  let releaseChild = () => {}, releaseWork = () => {};
+  const childWork = new Promise<void>(resolve => { releaseChild = resolve; });
+  const slowWork = new Promise<void>(resolve => { releaseWork = resolve; });
+  const owner = await rpc(name, undefined, 'rpc', true, request => request.endsWith('bg check') ? childWork : undefined);
+  const window = await rpc(name, undefined, 'rpc', true, request => request === 'Slow step.' ? slowWork : undefined);
+  try {
+    await window.ask(`CALL spawn ${JSON.stringify({ tasks: [{ task: 'bg check' }] })}`);
+    const role = window.role(), id = role?.role === 'window' ? role.id : '';
+    const [child] = readRuns(profilePath(name)).filter(run => run.task === 'bg check');
+    assert.ok(child);
+
+    // Window starts a busy turn; while busy, the child finishes and its report reaches the window's steering queue; then /complete runs before the next tool boundary.
+    const busy = window.ask('Slow step.');
+    await until(() => window.sent.some(s => s.last === 'Slow step.'));
+    releaseChild();
+    await until(() => readRuns(profilePath(name)).find(run => run.id === child.id)?.state === 'completed');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const completing = window.ask('/complete');
+    await busy;
+    await completing;
+
+    // The child report did not steer the handoff turn, was named as unread in the handoff prompt, and appears in the delivered handoff.
+    const handoffPrompt = window.sent.find(s => s.last.startsWith(HANDOFF_REQUEST))?.last ?? '';
+    assert.match(handoffPrompt, new RegExp(`Reports from your subagents that you never read:[\\s\\S]*\\[${child.id}\\] Reply:`));
+    assert.ok(!window.sent.some(s => s.last.startsWith(`[${child.id}] Reply:`)), 'the queued report did not steer into a turn');
+    const handoffOf = (s: { last: string }) => new RegExp(`^\\[${id}\\] Connected conversation completed by user`).test(s.last);
+    await until(() => owner.sent.some(handoffOf));
+    const delivered = owner.sent.find(handoffOf)!.last;
+    assert.match(delivered, /Handoff: the user asked about the colour/);
+    assert.match(delivered, new RegExp(`Subagent reports that arrived while this conversation ended:[\\s\\S]*\\[${child.id}\\] Reply:`));
+  } finally { releaseChild(); releaseWork(); await window.close(); await owner.close(); }
+});
+
 test('a window\'s spawn with no owner to reach fails and says so', async () => {
   const name = profile(), owner = await rpc(name), window = await rpc(name);
   try {

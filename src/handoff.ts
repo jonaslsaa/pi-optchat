@@ -29,8 +29,10 @@ function formatEvidence({ run, messages, transcriptError }: HandoffEvidence) {
     if (message.role === 'toolResult') return [`TOOL RESULT (${message.toolName}, error=${message.isError}): ${textContent(message.content)}`];
     return [];
   }).join('\n\n') + `\n\nRecorded outcome before handoff: ${run.report ?? 'No final answer'}`;
-  const queued = undelivered(run);
-  return transcript + (queued.length ? `\nMessages queued but NOT delivered to this agent:\n${queued.join('\n')}` : '');
+  const queued = undelivered(run), unread = run.handoff?.unread ?? [];
+  return transcript
+    + (queued.length ? `\nMessages queued but NOT delivered to this agent:\n${queued.join('\n')}` : '')
+    + (unread.length ? `\n\nSubagent reports that arrived but were NOT read by this agent:\n\n${unread.join('\n\n')}` : '');
 }
 
 /** Summarize in one call when possible; otherwise fold chunks with the prior handoff included in the budget. `limits` is the
@@ -80,6 +82,8 @@ export function handoffText(reply: AssistantMessage) {
   return text;
 }
 export const withUndelivered = (run: RunInfo, summary: string) => {
-  const queued = undelivered(run);
-  return summary + (queued.length ? `\nMessages queued but NOT delivered to the agent:\n${queued.join('\n')}` : '');
+  const queued = undelivered(run), unread = run.handoff?.unread ?? [];
+  return summary
+    + (queued.length ? `\nMessages queued but NOT delivered to the agent:\n${queued.join('\n')}` : '')
+    + (unread.length ? `\n\nSubagent reports that arrived while this conversation ended:\n\n${unread.join('\n\n')}` : '');
 };

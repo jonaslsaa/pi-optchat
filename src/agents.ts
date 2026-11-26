@@ -16,7 +16,7 @@ import type { Memory } from './memory.ts';
 import type { ModelChoice } from './profiles.ts';
 import { cachePayload } from './core/cache.ts';
 import { childInput } from './core/messages.ts';
-import { alive, runMessages, runsElsewhere, CUT_OFF, reportHead, RunHistory, isActiveRun, isRunning, transition, sessionMessages, savedSession, undelivered, sentText, queuedWindows, unqueueWindow, type Guidance, type RemoteWindow, type RunInfo, type RunState, type FinishReason } from './runs.ts';
+import { alive, runMessages, runsElsewhere, CUT_OFF, reportHead, RunHistory, isActiveRun, isRunning, transition, sessionMessages, savedSession, undelivered, sentText, queuedWindows, unqueueWindow, type Guidance, type RemoteHandoff, type RemoteWindow, type RunInfo, type RunState, type FinishReason } from './runs.ts';
 import { UsageLedger } from './usage.ts';
 import { fullChat, refreshFraction, textContent } from './transcript.ts';
 import { Type, type Static } from 'typebox';
@@ -792,15 +792,19 @@ export class Children {
       depth: 1, started: Date.now(), state: 'running', guidance: [], connected: true, window: where });
     if (!known && announce) await this.report(`[${id}] User started a connected conversation in ${cwd}, in a Pi window of its own. That agent is handling this request with the user directly; don't do it yourself. Initial message: ${task}\n\nUse tell with this agent ID only if you know something it needs. It sends a final handoff on completion or disconnect.`, { quiet: true });
   }
-  /** A window in its own process has ended. `written`: the handoff it wrote itself (/complete); without one the compactor writes it from the window's transcript. */
-  async endRemote(id: string, reason: FinishReason, written?: string) {
+  /** A window in its own process has ended. `written`: the handoff it wrote itself (/complete), plus any guidance/reports it never read; without text the compactor writes it from the window's transcript. */
+  async endRemote(id: string, reason: FinishReason, written?: RemoteHandoff) {
     this.completingWindows.delete(id);
     const run = this.history.records.get(id);
     if (!run?.window || run.handoff) return;
-    run.handoff = { reason }; run.ended = Date.now();
+    run.handoff = { reason, ...(written?.unread?.length ? { unread: written.unread } : {}) }; run.ended = Date.now();
+    if (written?.undelivered?.length) {
+      const now = Date.now();
+      run.guidance.push(...written.undelivered.map(text => ({ text, date: now, state: 'undelivered' as const, from: 'manager' as const })));
+    }
     transition(run, reason === 'complete' ? 'completed' : 'interrupted');
     this.save(run);
-    const work = this.deliverHandoff(run, undefined, written).then(() => this.cutOffUnder(id, false));
+    const work = this.deliverHandoff(run, undefined, written?.text).then(() => this.cutOffUnder(id, false));
     this.completions.add(work);
     try { await work; } finally { this.completions.delete(work); this.changed(); }
   }
@@ -808,13 +812,13 @@ export class Children {
     // Windows that found no owner queued themselves; one still running without a reason is left for later.
     for (const window of queuedWindows(this.profileDirectory)) {
       if (!window.reason && alive(window.pid)) continue;
-      const { reason = 'disconnected', text, ...rest } = window, known = this.history.records.get(window.id);
+      const { reason = 'disconnected', text, undelivered: missed, unread, ...rest } = window, known = this.history.records.get(window.id);
       try {
         if (!known || known.window && !known.handoff?.delivered) {
           // Its own ending wins over the `owner-stopped` one a restart gave a record whose window was gone by then.
           if (known && !isActiveRun(known)) delete known.handoff;
           else await this.adopt(rest, { announce: false });
-          await this.endRemote(window.id, reason, text);
+          await this.endRemote(window.id, reason, { text, undelivered: missed, unread });
         }
         unqueueWindow(this.profileDirectory, window.id);
       } catch (error) { this.warn(`Could not take the handoff of window ${window.id}: ${String(error)}`); }
@@ -840,7 +844,7 @@ export class Children {
       if (!written && deferred.aborted) return;
       // Written by the window itself, else by the compactor from every transcript (read after the window's try, which may have
       // checked things), else a labelled stub. A window in its own process wrote its handoff there, or it ended without one.
-      let summary = written;
+      let summary = written !== undefined ? withUndelivered(run, written) : undefined;
       if (run.window) this.keepTranscript(run);
       else try { summary = await this.writtenByWindow(run, live, deferred); }
       catch (error) {
@@ -859,7 +863,7 @@ export class Children {
           summary = await this.options.summarizeHandoff(run, evidence[0].messages, evidence.slice(1), deferred);
         } catch (error) {
           if (deferred.aborted) return;
-          summary = `Automatic summary unavailable: ${String(error)}\nInitial request: ${run.task}\nLast recorded result: ${run.report ?? 'No final answer recorded.'}\nUndelivered guidance: ${undelivered(run).join('\n')}\nRead the saved transcript or run metadata for the full work and user corrections.`;
+          summary = withUndelivered(run, `Automatic summary unavailable: ${String(error)}\nInitial request: ${run.task}\nLast recorded result: ${run.report ?? 'No final answer recorded.'}\nRead the saved transcript or run metadata for the full work and user corrections.`);
         }
       }
       const source = evidence.map(({ run: record, transcriptError }) => {

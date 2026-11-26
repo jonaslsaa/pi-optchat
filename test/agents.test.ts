@@ -1170,7 +1170,7 @@ test('a window\'s subagents that a Pi restart cut off are named to it when it re
   try {
     const window = (id: string) => children.adopt({ id, task: 'talk', cwd: dir, model: 'optchat-test/child', thinking: 'minimal', pid: process.pid }, { announce: false });
     await window('back0001'); await window('gone0001'); await window('done0001');
-    await children.endRemote('done0001', 'complete', 'Handoff.'); // It ended before Pi restarted.
+    await children.endRemote('done0001', 'complete', { text: 'Handoff.' }); // It ended before Pi restarted.
     reports.length = 0;
     for (const [id, parentId] of [['aaaa0001', 'back0001'], ['bbbb0001', 'gone0001'], ['cccc0001', 'done0001']])
       children.history.save({ id, task: 'work', cwd: dir, model: 'optchat-test/child', thinking: 'minimal', parentSession: '', parentId, depth: 1, started: 1, ended: 2, state: 'interrupted', cutOff: true, guidance: [] });

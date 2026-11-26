@@ -56,14 +56,22 @@ export function isRemoteWindow(value: unknown): value is RemoteWindow {
 }
 /** A finished run's saved messages: for a window, only its own conversation (see `RunInfo.window`). */
 export function runMessages(run: RunInfo): AgentMessage[] {
-  const messages = run.sessionFile ? sessionMessages(run.sessionFile) : [], after = run.window?.after;
+  const messages = run.sessionFile ? sessionMessages(run.sessionFile, run.window?.after) : [], after = run.window?.after;
   return after === undefined ? messages : messages.filter(message => message.timestamp >= after);
 }
+/** What a window that ended with `/complete` sends the owner (or queues for the next one) when it has no handoff text or
+ * also has unread guidance/reports to preserve. Older windows send plain handoff text, which still parses as `{ text }`. */
+export interface RemoteHandoff { text?: string; undelivered?: string[]; unread?: string[] }
+const isStringList = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string');
+export const isRemoteHandoff = (value: unknown): value is RemoteHandoff => record(value)
+  && (value.text === undefined || typeof value.text === 'string')
+  && (value.undelivered === undefined || isStringList(value.undelivered))
+  && (value.unread === undefined || isStringList(value.unread));
 /** A window that found no owner keeps itself here, in the profile directory, for the next owner to take: `reason` once it has
- * ended, with `text` if it wrote its own handoff. One without a reason whose process is gone was killed. */
-export type QueuedWindow = RemoteWindow & { reason?: FinishReason; text?: string };
+ * ended, with `text` if it wrote its own handoff (and `undelivered`/`unread` for messages it never read). One without a reason whose process is gone was killed. */
+export type QueuedWindow = RemoteWindow & RemoteHandoff & { reason?: FinishReason };
 const isQueuedWindow = (value: unknown): value is QueuedWindow => record(value)
-  && (value.reason === undefined || isFinishReason(value.reason)) && (value.text === undefined || typeof value.text === 'string') && isRemoteWindow(value);
+  && (value.reason === undefined || isFinishReason(value.reason)) && isRemoteHandoff(value) && isRemoteWindow(value);
 const queue = (profileDirectory: string) => join(profileDirectory, 'remote-windows');
 export const queueWindow = (profileDirectory: string, window: QueuedWindow) => atomicWrite(join(queue(profileDirectory), `${window.id}.json`), JSON.stringify(window));
 export const unqueueWindow = (profileDirectory: string, id: string) => rmSync(join(queue(profileDirectory), `${id}.json`), { force: true });
@@ -80,8 +88,13 @@ export function queuedWindows(profileDirectory: string): QueuedWindow[] {
 /** A connected run that has ended but whose handoff summary has not reached the main agent yet. */
 export const isHandingOff = (run: RunInfo) => !isActiveRun(run) && !!run.handoff && !run.handoff.delivered;
 export const CUT_OFF = 'Pi closed before this agent finished. Its partial transcript is retained.';
-export function sessionMessages(file: string): AgentMessage[] {
-  return SessionManager.open(file).getEntries().flatMap(entry => {
+export function sessionMessages(file: string, after?: number): AgentMessage[] {
+  const entries = SessionManager.open(file).getEntries();
+  const own = after === undefined ? entries : entries.filter(entry => Date.parse(entry.timestamp) >= after);
+  // Everything from a hidden handoff request on belongs to `/complete`'s own closing turn (including any steering Pi drained into it),
+  // never to the conversation the compactor or zoom reads.
+  const handoffAt = own.findLastIndex(entry => entry.type === 'custom_message' && entry.customType === 'optchat-handoff-request');
+  return (handoffAt >= 0 ? own.slice(0, handoffAt) : own).flatMap(entry => {
     if (entry.type === 'message') return [entry.message];
     // Main-agent guidance in a remote window is saved as an `optchat-report` custom message (rpc-window.ts); keep only that
     // here so subagent reports aren't misattributed as user messages in handoffs or zoom.

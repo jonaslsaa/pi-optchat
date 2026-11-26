@@ -39,6 +39,12 @@ export function fixtureProvider(sent: Sent[] = [], hold?: (request: string) => P
         if (done) return;
         done = true;
         stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: call ? 'toolUse' : 'stop', message }); stream.end();
+      }, error => {
+        options?.signal?.removeEventListener('abort', abort);
+        if (done) return;
+        done = true;
+        const failed: AssistantMessage = { ...message, content: [], stopReason: 'error', errorMessage: error instanceof Error ? error.message : String(error) };
+        stream.push({ type: 'error', reason: 'error', error: failed }); stream.end();
       });
       return stream;
     },

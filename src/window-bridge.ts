@@ -6,7 +6,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { record } from './core/cache.ts';
 import { checkPatch, checkSocketPath, isWindows, profileSocket, removeStaleSocket, type ConfigPatch } from './profiles.ts';
 import { textContent } from './transcript.ts';
-import { isActiveRun, isRemoteWindow, type RunInfo } from './runs.ts';
+import { isActiveRun, isRemoteHandoff, isRemoteWindow, type RemoteHandoff, type RunInfo } from './runs.ts';
 import { HANDOFF_REQUEST } from './prompts.ts';
 import { connectWindow, isAssistant, isImportAction, wire, type Action, type ImportAction, type AttachableAgent, type LiveState, type WindowMessage } from './window-client.ts';
 import type { AssistantMessage, UserMessage } from '@earendil-works/pi-ai';
@@ -15,6 +15,8 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 /** What a registered window may still ask: its agent and conversation are its own, its subagents run here. The reply to
  * `register` lists them, so a window knows what an older owner can't do. */
 const REMOTE_ACTIONS: readonly Action[] = ['handoff', 'tell-main', 'spawn', 'tell', 'models', 'completing'];
+/** Capabilities advertised in the `register` reply: every remote action plus `handoff-json` (structured `RemoteHandoff` payloads). */
+const REMOTE_CAPABILITIES = [...REMOTE_ACTIONS, 'handoff-json'].join(' ');
 const SHORTENED = '\n[Display shortened; full text is saved in the transcript.]';
 /** Stays under the 4 MB frame bound even when JSON escapes some characters. */
 const ANSWER_LIMIT = 1_000_000;
@@ -115,7 +117,7 @@ export async function serveWindows(directory: string, children: Children, availa
             if (!window.completing) {
               disconnect = children.connectWindow(child, text => { send({ kind: 'event', name: 'message', text: shorten(text, ANSWER_LIMIT) }); return !socket.destroyed; }, { receives: !!window.receives });
             }
-            send({ kind: 'reply', id: frame.id, text: REMOTE_ACTIONS.join(' ') }); return;
+            send({ kind: 'reply', id: frame.id, text: REMOTE_CAPABILITIES }); return;
           } else if (frame.action === 'start') {
             if (child) throw new Error('This window already has a conversation');
             ready();
@@ -146,8 +148,17 @@ export async function serveWindows(directory: string, children: Children, availa
             if (frame.action === 'models') { send({ kind: 'reply', id: frame.id, text: children.models(frame.text || undefined) }); return; }
             if (frame.action === 'handoff') {
               phase = 'closing';
+              let payload: RemoteHandoff | undefined;
+              if (frame.text) {
+                try {
+                  const parsed: unknown = JSON.parse(frame.text);
+                  if (isRemoteHandoff(parsed)) payload = parsed;
+                } catch {}
+                payload ??= frame.text.trim() ? { text: frame.text.trim() } : undefined;
+              }
+              if (payload?.text !== undefined && !payload.text.trim()) delete payload.text;
               // Delivered (or saved for the next start) before the reply, so the window queues it if this owner fails it.
-              await children.endRemote(child, 'complete', frame.text?.trim() || undefined);
+              await children.endRemote(child, 'complete', payload);
               send({ kind: 'reply', id: frame.id }); return;
             }
             if (frame.action === 'answer') {
