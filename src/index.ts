@@ -643,7 +643,7 @@ export default function optchat(pi: ExtensionAPI) {
     },
   });
   pi.registerTool(modelsTool(provider => rpcWindow ? rpcWindow.delegate('models', provider) : required().children.models(provider)));
-  pi.registerTool({ name: 'tell', label: 'Tell background agent', description: 'Send a message to a subagent. A running one gets it at its next tool boundary. A finished one you started is resumed with its earlier conversation, and its new report arrives automatically.',
+  pi.registerTool({ name: 'tell', label: 'Tell background agent', description: 'Send a message to a subagent or connected window. A running one gets it at its next tool boundary. A finished subagent you started is resumed with its earlier conversation, and its new report arrives automatically.',
     parameters: Type.Object({ id: Type.String(), message: Type.String() }),
     async execute(_id, args) { return result(rpcWindow ? await rpcWindow.delegate('tell', JSON.stringify(args)) : await required().children.tell(args.id, args.message)); },
   });

@@ -4,7 +4,7 @@ import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { atomicWrite } from './store.ts';
 import { record } from './core/cache.ts';
-import { textContent } from './transcript.ts';
+import { REPORT_TYPE, textContent } from './transcript.ts';
 import { isFinishReason, readRun, type FinishReason, type Guidance, type RunInfo, type RunState } from './run-record.ts';
 
 export { readRun, runStates, type FinishReason, type Guidance, type RunInfo, type RunState } from './run-record.ts';
@@ -40,15 +40,19 @@ export function savedSession(run: RunInfo) {
 export function alive(pid: number) {
   try { process.kill(pid, 0); return true; } catch (error) { return record(error) && error.code === 'EPERM'; }
 }
-/** What a connected window in its own process tells the owner about itself (see `RunInfo.window`). */
-export type RemoteWindow = Pick<RunInfo, 'id' | 'task' | 'cwd' | 'model' | 'thinking' | 'title'> & NonNullable<RunInfo['window']>;
+/** What a connected window in its own process tells the owner about itself (see `RunInfo.window`).
+ * `receives`: the window handles incoming `message` events from the owner (absent on pi-optchat 0.12.2 and earlier).
+ * `completing`: `/complete` is already writing its handoff, so the owner must not send it guidance or reports. */
+export type RemoteWindow = Pick<RunInfo, 'id' | 'task' | 'cwd' | 'model' | 'thinking' | 'title'> & NonNullable<RunInfo['window']> & { receives?: boolean; completing?: boolean };
 /** A connected window still running in a Pi process of its own: only it can end its conversation. */
 export const runsElsewhere = (run: RunInfo) => !!run.window && isActiveRun(run);
 export function isRemoteWindow(value: unknown): value is RemoteWindow {
   return record(value) && ['id', 'task', 'cwd', 'model', 'thinking'].every(k => typeof value[k] === 'string') && /^[a-zA-Z0-9-]+$/.test(String(value.id))
     && Number.isSafeInteger(value.pid) && (value.title === undefined || typeof value.title === 'string')
     && (value.session === undefined || typeof value.session === 'string' && value.session.endsWith('.jsonl'))
-    && (value.after === undefined || typeof value.after === 'number');
+    && (value.after === undefined || typeof value.after === 'number')
+    && (value.receives === undefined || typeof value.receives === 'boolean')
+    && (value.completing === undefined || typeof value.completing === 'boolean');
 }
 /** A finished run's saved messages: for a window, only its own conversation (see `RunInfo.window`). */
 export function runMessages(run: RunInfo): AgentMessage[] {
@@ -77,7 +81,13 @@ export function queuedWindows(profileDirectory: string): QueuedWindow[] {
 export const isHandingOff = (run: RunInfo) => !isActiveRun(run) && !!run.handoff && !run.handoff.delivered;
 export const CUT_OFF = 'Pi closed before this agent finished. Its partial transcript is retained.';
 export function sessionMessages(file: string): AgentMessage[] {
-  return SessionManager.open(file).getEntries().flatMap(e => e.type === 'message' ? [e.message] : []);
+  return SessionManager.open(file).getEntries().flatMap(entry => {
+    if (entry.type === 'message') return [entry.message];
+    // Reports and main-agent guidance in a remote window are saved as `optchat-report` custom messages (rpc-window.ts).
+    if (entry.type === 'custom_message' && entry.customType === REPORT_TYPE)
+      return [{ role: 'user' as const, content: entry.content, timestamp: Date.parse(entry.timestamp) }];
+    return [];
+  });
 }
 
 /** Metadata sits beside the SDK's canonical child transcripts, inside this profile. */

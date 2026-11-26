@@ -145,7 +145,9 @@ const level = ({ depth, connected }: Pick<RunInfo, 'depth' | 'connected'>) => co
 export class Children {
   private readonly running = new Map<string, LiveRun>();
   /** Windows in their own Pi that are connected now, by run ID: see connectWindow(). */
-  private readonly windows = new Map<string, (text: string) => boolean>();
+  private readonly windows = new Map<string, { send: (text: string) => boolean; receives: boolean }>();
+  /** Remote windows currently writing their /complete handoff, so tell refuses them even if they reconnect. */
+  private readonly completingWindows = new Set<string>();
   readonly history: RunHistory;
   private readonly listeners = new Set<() => void>();
   private closing = false;
@@ -402,14 +404,18 @@ export class Children {
   /** A parent that takes its children's reports: a live run here, or a window in its own Pi while its socket is open. */
   private parentRun(id: string) { return this.running.get(id)?.info ?? (this.windows.has(id) ? this.history.records.get(id) : undefined); }
   /**
-   * Opens the way to a window in its own Pi (see serveWindows): its children's reports and messages go through `send`, which
-   * says false once the window can't take them. Returns the close.
+   * Opens the way to a window in its own Pi (see serveWindows): its children's reports and main-agent guidance go through `send`,
+   * which says false once the window can't take them. `receives`: whether the window handles incoming `message` events (absent on
+   * pi-optchat 0.12.2 and earlier). Returns the close.
    */
-  connectWindow(id: string, send: (text: string) => boolean) {
-    this.windows.set(id, send);
+  connectWindow(id: string, send: (text: string) => boolean, { receives = true } = {}) {
+    const entry = { send, receives };
+    this.windows.set(id, entry);
     void this.cutOffUnder(id, true).catch(error => this.warn(`Could not tell window ${id} about its stopped subagents: ${String(error)}`));
-    return () => { if (this.windows.get(id) === send) this.windows.delete(id); };
+    return () => { if (this.windows.get(id) === entry) this.windows.delete(id); };
   }
+  /** Records that a remote window has started /complete and is writing its handoff. */
+  markCompleting(id: string) { this.completingWindows.add(id); }
   /** A window's subagents that a Pi restart cut off (see resumeCutOff), named once it reconnects, whose tell resumes them (they stay
    * cut off till then, so their own cut-off agents are named to them as they resume), or once it has ended to the main chat. */
   private async cutOffUnder(id: string, open: boolean) {
@@ -423,7 +429,7 @@ export class Children {
   /** A report or message for a window in its own Pi: to it while it is open, else to the main chat, saying whose it was. */
   private async toWindow(id: string, text: string, count?: number) {
     const window = this.history.records.get(id);
-    if (window && runsElsewhere(window) && this.windows.get(id)?.(text)) return;
+    if (window && runsElsewhere(window) && this.windows.get(id)?.send(text)) return;
     await this.report(`${text}\n\n(For connected window ${id}, which has ended, so it reaches you instead.)`, { count });
   }
   /** A mid-run message to a child's parent: false if that parent is no longer running. */
@@ -593,9 +599,12 @@ export class Children {
     if (!live && run && runsElsewhere(run)) {
       const trimmed = message.trim();
       if (!trimmed) throw new Error('Message is empty.');
-      const send = this.windows.get(id);
+      if (this.completingWindows.has(id)) throw new Error(`${id} is finishing. Its handoff will arrive on its own.`);
+      const target = this.windows.get(id);
+      if (!target) throw new Error(`${id} is a connected window in its own Pi process and is not connected right now, so tell can't reach it. Its handoff arrives when it ends.`);
+      if (!target.receives) throw new Error(`${id} runs an older pi-optchat that can't receive tell messages. Update and restart that window to message it.`);
       const text = source === 'manager' ? `[Main agent guidance]\n${trimmed}` : trimmed;
-      if (!send?.(text)) throw new Error(`${id} is a connected window in its own Pi process and is not connected right now, so tell can't reach it. Its handoff arrives when it ends.`);
+      if (!target.send(text)) throw new Error(`${id} is a connected window in its own Pi process and is not connected right now, so tell can't reach it. Its handoff arrives when it ends.`);
       return 'Message sent to the connected window.';
     }
     if (!live && source === 'manager' && run) return this.track(this.resume(id, message, { caller }));
@@ -775,8 +784,9 @@ export class Children {
    * (see `RunInfo.window`). Its agent loop, tools and transcript stay there; this process keeps its record and delivers its handoff.
    */
   async adopt(window: RemoteWindow, { announce = true } = {}) {
-    const { id, task, cwd, model, thinking, title, pid, session, after } = window, known = this.history.records.get(id);
+    const { id, task, cwd, model, thinking, title, pid, session, after, completing } = window, known = this.history.records.get(id);
     if (known && !runsElsewhere(known)) throw new Error(`${id} is already a run in this profile`);
+    if (completing) this.completingWindows.add(id);
     const where = { pid, session, after };
     this.save(known ? { ...known, window: where } : { id, task, cwd, model, thinking, ...(title ? { title } : {}), parentSession: this.options.parentSession ?? '',
       depth: 1, started: Date.now(), state: 'running', guidance: [], connected: true, window: where });
@@ -784,6 +794,7 @@ export class Children {
   }
   /** A window in its own process has ended. `written`: the handoff it wrote itself (/complete); without one the compactor writes it from the window's transcript. */
   async endRemote(id: string, reason: FinishReason, written?: string) {
+    this.completingWindows.delete(id);
     const run = this.history.records.get(id);
     if (!run?.window || run.handoff) return;
     run.handoff = { reason }; run.ended = Date.now();

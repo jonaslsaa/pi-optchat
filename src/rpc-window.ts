@@ -71,7 +71,8 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
       // Its subagents' reports and messages, which its agent takes as the main agent takes reports.
       opened = await connectWindow(dir, event => {
         if (event.name !== 'message' || closed) return;
-        if (late) late.push(event.text); else pi.sendMessage({ customType: REPORT_TYPE, content: event.text, display: true }, { triggerTurn: true, deliverAs: 'steer' });
+        if (late) { if (!event.text.startsWith('[Main agent guidance]\n')) late.push(event.text); }
+        else pi.sendMessage({ customType: REPORT_TYPE, content: event.text, display: true }, { triggerTurn: true, deliverAs: 'steer' });
       }, () => {
         if (!opened || connection !== opened) return;
         connection = undefined; registered = false; publish();
@@ -82,7 +83,8 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
   };
   const self = (): RemoteWindow => {
     const model = ctx.model, session = ctx.sessionManager.getSessionFile();
-    return { id, task: task ?? '', cwd: ctx.cwd, model: model ? `${model.provider}/${model.id}` : 'unknown', thinking: pi.getThinkingLevel(), pid: process.pid, ...(session ? { session } : {}), ...(after === undefined ? {} : { after }) };
+    return { id, task: task ?? '', cwd: ctx.cwd, model: model ? `${model.provider}/${model.id}` : 'unknown', thinking: pi.getThinkingLevel(), pid: process.pid,
+      ...(session ? { session } : {}), ...(after === undefined ? {} : { after }), receives: true, ...(late ? { completing: true } : {}) };
   };
   /**
    * Connects, and registers with the owner once there is a request; without one reachable, queues itself so a kill can't lose the

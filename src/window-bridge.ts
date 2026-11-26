@@ -110,9 +110,11 @@ export async function serveWindows(directory: string, children: Children, availa
             if (!isRemoteWindow(window)) throw new Error('Invalid window registration');
             await children.adopt(window);
             child = window.id; remote = true;
-            // Its subagents' reports and messages: the window's agent gets them as it would a report (rpc-window.ts).
-            // Cut to fit a frame: the head names the agent, whose whole chat zoom reads.
-            disconnect = children.connectWindow(child, text => { send({ kind: 'event', name: 'message', text: shorten(text, ANSWER_LIMIT) }); return !socket.destroyed; });
+            // Its subagents' reports and main-agent guidance: the window's agent gets them as it would a report (rpc-window.ts).
+            // Cut to fit a frame: the head names the agent, whose whole chat zoom reads. A window already in /complete takes neither.
+            if (!window.completing) {
+              disconnect = children.connectWindow(child, text => { send({ kind: 'event', name: 'message', text: shorten(text, ANSWER_LIMIT) }); return !socket.destroyed; }, { receives: !!window.receives });
+            }
             send({ kind: 'reply', id: frame.id, text: REMOTE_ACTIONS.join(' ') }); return;
           } else if (frame.action === 'start') {
             if (child) throw new Error('This window already has a conversation');
@@ -139,8 +141,8 @@ export async function serveWindows(directory: string, children: Children, availa
               if (!record(tell) || typeof tell.id !== 'string' || typeof tell.message !== 'string') throw new Error('An agent ID and a message are required');
               send({ kind: 'reply', id: frame.id, text: await children.guide(child, tell.id, tell.message) }); return;
             }
-            // /complete has begun: from now on its subagents report to the main chat, as once it has ended.
-            if (frame.action === 'completing') { disconnect?.(); send({ kind: 'reply', id: frame.id }); return; }
+            // /complete has begun: from now on its subagents report to the main chat, and tell refuses guidance.
+            if (frame.action === 'completing') { disconnect?.(); children.markCompleting(child); send({ kind: 'reply', id: frame.id }); return; }
             if (frame.action === 'models') { send({ kind: 'reply', id: frame.id, text: children.models(frame.text || undefined) }); return; }
             if (frame.action === 'handoff') {
               phase = 'closing';
