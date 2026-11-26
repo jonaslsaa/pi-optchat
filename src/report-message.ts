@@ -1,6 +1,6 @@
 import { getMarkdownTheme, type ExtensionAPI, type Theme } from '@earendil-works/pi-coding-agent';
 import { Box, Markdown, Text } from '@earendil-works/pi-tui';
-import { REPORT_TYPE, textContent, withoutFullChat } from './transcript.ts';
+import { MAIN_GUIDANCE, REPORT_TYPE, textContent, withoutFullChat } from './transcript.ts';
 
 /** `[id]` or `[id · title]` (runs.ts `reportHead`); titles hold no brackets. */
 const HEAD = /^\[([0-9a-f]{8})(?: · ([^\]\n]*))?\] (?:(Message from subagent \(still running\)|Connected agent message): )?/;
@@ -12,7 +12,7 @@ export interface ReportDetails { count?: number }
 export function reportParts(text: string, count = 1) {
   text = withoutFullChat(text); // For the agent: the user has the Agents page.
   if (count > 1) return { label: `${count} subagent reports`, body: text };
-  if (text.startsWith('[Main agent guidance]\n')) return { label: 'main agent', body: text.slice('[Main agent guidance]\n'.length) };
+  if (text.startsWith(MAIN_GUIDANCE)) return { label: 'main agent', body: text.slice(MAIN_GUIDANCE.length) };
   const match = HEAD.exec(text);
   if (!match) return { label: 'subagent', body: text };
   const [, id, title, message] = match;

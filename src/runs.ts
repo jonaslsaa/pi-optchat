@@ -4,7 +4,7 @@ import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { atomicWrite } from './store.ts';
 import { record } from './core/cache.ts';
-import { REPORT_TYPE, textContent } from './transcript.ts';
+import { MAIN_GUIDANCE, REPORT_TYPE, textContent } from './transcript.ts';
 import { isFinishReason, readRun, type FinishReason, type Guidance, type RunInfo, type RunState } from './run-record.ts';
 
 export { readRun, runStates, type FinishReason, type Guidance, type RunInfo, type RunState } from './run-record.ts';
@@ -83,8 +83,9 @@ export const CUT_OFF = 'Pi closed before this agent finished. Its partial transc
 export function sessionMessages(file: string): AgentMessage[] {
   return SessionManager.open(file).getEntries().flatMap(entry => {
     if (entry.type === 'message') return [entry.message];
-    // Reports and main-agent guidance in a remote window are saved as `optchat-report` custom messages (rpc-window.ts).
-    if (entry.type === 'custom_message' && entry.customType === REPORT_TYPE)
+    // Main-agent guidance in a remote window is saved as an `optchat-report` custom message (rpc-window.ts); keep only that
+    // here so subagent reports aren't misattributed as user messages in handoffs or zoom.
+    if (entry.type === 'custom_message' && entry.customType === REPORT_TYPE && textContent(entry.content).startsWith(MAIN_GUIDANCE))
       return [{ role: 'user' as const, content: entry.content, timestamp: Date.parse(entry.timestamp) }];
     return [];
   });

@@ -11,7 +11,7 @@ import { placeView } from './core/messages.ts';
 import { connectWindow } from './window-client.ts';
 import { HANDOFF_TIMEOUT, handoffText } from './handoff.ts';
 import { queueWindow, readRun, runMessages, unqueueWindow, type FinishReason, type RemoteWindow } from './runs.ts';
-import { REPORT_TYPE, textContent } from './transcript.ts';
+import { MAIN_GUIDANCE, REPORT_TYPE, textContent } from './transcript.ts';
 
 /**
  * What this Pi is to its profile, for RPC hosts: `setStatus` with this key carries it as JSON (see `Role`).
@@ -51,6 +51,10 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
   let owns: string[] = [];
   /** Set by /complete: reports still on their way go into the handoff, not into its handoff turn; the owner sends later ones to the main chat. */
   let late: string[] | undefined;
+  /** Main-agent guidance that arrived after /complete began (in flight on the wire) or was queued while busy and aborted before the agent read it: kept as undelivered in the handoff. */
+  let lateGuidance: string[] | undefined;
+  /** Guidance texts handed to `pi.sendMessage(..., { deliverAs: 'steer' })`; checked on `/complete` so any that never reached the session are recorded as undelivered. */
+  const steeredGuidance: string[] = [];
   /** The first request, once there is one: until then there is nothing to register or hand off. */
   let task: string | undefined;
   /** The view goes before the request of the run it was read for, and stays there while it doesn't change, so the rest stays cached. */
@@ -71,8 +75,13 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
       // Its subagents' reports and messages, which its agent takes as the main agent takes reports.
       opened = await connectWindow(dir, event => {
         if (event.name !== 'message' || closed) return;
-        if (late) { if (!event.text.startsWith('[Main agent guidance]\n')) late.push(event.text); }
-        else pi.sendMessage({ customType: REPORT_TYPE, content: event.text, display: true }, { triggerTurn: true, deliverAs: 'steer' });
+        if (late) {
+          if (event.text.startsWith(MAIN_GUIDANCE)) lateGuidance?.push(event.text);
+          else late.push(event.text);
+        } else {
+          if (event.text.startsWith(MAIN_GUIDANCE)) steeredGuidance.push(event.text);
+          pi.sendMessage({ customType: REPORT_TYPE, content: event.text, display: true }, { triggerTurn: true, deliverAs: 'steer' });
+        }
       }, () => {
         if (!opened || connection !== opened) return;
         connection = undefined; registered = false; publish();
@@ -97,9 +106,12 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
       if (task === undefined || completed) return;
       if (connection && !registered) {
         try {
+          const wasCompleting = !!late;
           owns = (await connection.request('register', JSON.stringify(self())))?.split(' ') ?? [];
           registered = true;
           if (queued) { unqueueWindow(dir, id); queued = false; }
+          // `/complete` began while our `register` was in flight: tell the owner now so it stops accepting guidance/reports.
+          if (!wasCompleting && late && owns.includes('completing')) await connection.request('completing').catch(() => {});
         } catch (error) { if (!quiet) ctx.ui.notify(`OptChat could not register this window with the main one: ${error instanceof Error ? error.message : String(error)}`, 'warning'); }
       }
       if (!registered && !queued) { queueWindow(dir, self()); queued = true; }
@@ -161,7 +173,13 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
     /** Pi's messages with the view put in front of the request it was read for. */
     context<M extends AgentMessage>(messages: M[]) {
       // System messages carry the prompt and tool state (the first, then any changes), not the conversation: they all stay.
-      const own = after === undefined ? messages : messages.filter(message => message.role === 'system' || message.timestamp >= after);
+      let own = after === undefined ? messages : messages.filter(message => message.role === 'system' || message.timestamp >= after);
+      if (handingOff) {
+        // An aborted turn can leave a steered `optchat-report` message in Pi's steering queue, which `runLoop` drains after
+        // our hidden `HANDOFF_TYPE` prompt. Drop anything appended after the handoff request so the model answers the handoff.
+        const req = own.findLastIndex(message => message.role === 'custom' && message.customType === HANDOFF_TYPE);
+        if (req >= 0) own = own.filter((message, i) => i <= req || message.role !== 'custom' || message.customType !== REPORT_TYPE);
+      }
       if (view === undefined) return own;
       if (anchoring) { anchor = undefined; anchoring = false; }
       const placed = placeView(own, view, anchor);
@@ -188,12 +206,30 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
     /** /complete: the window writes its handoff as one more turn of its own (its context still cached), then hands it to the owner. */
     async complete(command: ExtensionCommandContext) {
       if (completed) { command.ui.notify('This conversation is already completed.', 'info'); return; }
-      if (!command.isIdle()) { command.abort(); await command.waitForIdle(); }
       let text: string | undefined;
-      late = [];
+      late = []; lateGuidance = [];
+      // Wait for an in-flight registration before notifying `completing`, so a reply landing now can't leave the owner writable.
+      if (syncing) await syncing;
       if (connection && registered && owns.includes('completing')) await connection.request('completing').catch(() => {});
-      if (task !== undefined) try { text = await writeHandoff(command); }
+      if (!command.isIdle()) { command.abort(); await command.waitForIdle(); }
+      // Any guidance steered into Pi's queue that never reached the session (aborted before the next tool boundary) is undelivered.
+      if (steeredGuidance.length) {
+        const read = new Map<string, number>();
+        for (const entry of command.sessionManager.getBranch()) {
+          if (entry.type === 'custom_message' && entry.customType === REPORT_TYPE && (after === undefined || Date.parse(entry.timestamp) >= after)) {
+            const body = textContent(entry.content);
+            if (body.startsWith(MAIN_GUIDANCE)) read.set(body, (read.get(body) ?? 0) + 1);
+          }
+        }
+        for (const item of steeredGuidance.splice(0)) {
+          const seen = read.get(item) ?? 0;
+          if (seen > 0) read.set(item, seen - 1);
+          else lateGuidance.push(item);
+        }
+      }
+      if (task !== undefined) try { text = await writeHandoff(command, lateGuidance); }
       catch (error) { command.ui.notify(`This window could not write its handoff, so the main window's compactor writes it: ${error instanceof Error ? error.message : String(error)}`, 'warning'); }
+      if (text && lateGuidance.length) text += `\nMessages queued but NOT delivered to the agent:\n${lateGuidance.join('\n')}`;
       if (text && late.length) text += `\n\nSubagent reports that arrived while this conversation ended:\n\n${late.join('\n\n')}`;
       await end('complete', text);
       pi.appendEntry(COMPLETED_TYPE, {});
@@ -209,13 +245,13 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
     },
   };
 
-  async function writeHandoff(command: ExtensionCommandContext) {
+  async function writeHandoff(command: ExtensionCommandContext, undelivered: string[]) {
     handingOff = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       // Hidden from the host's chat: it's OptChat's request, not the user's; the handoff that answers it shows.
       // Pi marks the run started before sendMessage returns, so waitForIdle waits for it.
-      pi.sendMessage({ customType: HANDOFF_TYPE, content: windowHandoff('complete', { undelivered: [], unread: [], stopped: [] }), display: false }, { triggerTurn: true });
+      pi.sendMessage({ customType: HANDOFF_TYPE, content: windowHandoff('complete', { undelivered, unread: [], stopped: [] }), display: false }, { triggerTurn: true });
       await Promise.race([command.waitForIdle(), new Promise<never>((_, reject) => {
         timer = setTimeout(() => { command.abort(); reject(new Error('timed out')); }, HANDOFF_TIMEOUT);
       })]);

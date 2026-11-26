@@ -14,7 +14,7 @@ export function fixtureProvider(sent: Sent[] = [], hold?: (request: string) => P
   return {
     baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
     models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
-    streamSimple(model, context) {
+    streamSimple(model, context, options) {
       const messages = context.messages.filter(m => m.role !== 'system'), system = JSON.stringify(context.messages.filter(m => m.role === 'system'));
       const last = messages.at(-1), text = textContent(last && 'content' in last ? last.content : '');
       // The view comes before the request in the same message.
@@ -25,7 +25,21 @@ export function fixtureProvider(sent: Sent[] = [], hold?: (request: string) => P
       const message: AssistantMessage = { role: 'assistant', content: [call ? { type: 'toolCall', id: `call-${sent.length}`, name: call[1], arguments: JSON.parse(call[2]) } : { type: 'text', text: reply.slice(0, 400) }],
         api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: call ? 'toolUse' : 'stop', usage: emptyUsage() };
       const stream = createAssistantMessageEventStream();
-      void Promise.resolve(hold?.(request)).then(() => { stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: call ? 'toolUse' : 'stop', message }); stream.end(); });
+      let done = false;
+      const abort = () => {
+        if (done) return;
+        done = true;
+        const aborted: AssistantMessage = { ...message, content: [], stopReason: 'aborted', errorMessage: 'aborted' };
+        stream.push({ type: 'error', reason: 'aborted', error: aborted }); stream.end();
+      };
+      options?.signal?.addEventListener('abort', abort, { once: true });
+      if (options?.signal?.aborted) { abort(); return stream; }
+      void Promise.resolve(hold?.(request)).then(() => {
+        options?.signal?.removeEventListener('abort', abort);
+        if (done) return;
+        done = true;
+        stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: call ? 'toolUse' : 'stop', message }); stream.end();
+      });
       return stream;
     },
   };

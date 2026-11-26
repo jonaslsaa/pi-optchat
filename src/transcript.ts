@@ -10,6 +10,8 @@ import { DEFAULT_SETTINGS } from './settings.ts';
 import { imageRef } from './images.ts';
 
 export const RUN_BOUNDARY = 'optchat.run';
+/** Sent on the wire and in Pi sessions for main-agent guidance delivered to connected windows. */
+export const MAIN_GUIDANCE = '[Main agent guidance]\n';
 /** Subagent traffic to the main agent: a custom message on screen, a plain user message to the model, `work` in memory. */
 export const REPORT_TYPE = 'optchat-report';
 export const REPORT_RECEIPT = 'report:';

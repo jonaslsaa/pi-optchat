@@ -427,6 +427,11 @@ test('the main agent can message a connected remote window with tell, keeps it i
     assert.equal(sent, 'Reply: Message sent to the connected window.');
     await until(() => window.sent.some(s => s.last === '[Main agent guidance]\nSkip the staging check.'));
 
+    // Also spawn a child subagent from the window so its report arrives in the window's session: it must not appear as USER in handoff or zoom.
+    await window.ask(`CALL spawn ${JSON.stringify({ tasks: [{ task: 'child work' }] })}`);
+    const [child] = readRuns(profilePath(name)).filter(run => run.task === 'child work');
+    await until(() => window.sent.some(s => s.last.startsWith(`[${child.id}] Reply:`)));
+
     // An older window (no `receives: true` in registration) is refused with an update/restart error instead of silently dropping guidance.
     const legacy = await connectWindow(profilePath(name), () => {}, () => {});
     try {
@@ -449,8 +454,10 @@ test('the main agent can message a connected remote window with tell, keeps it i
     } finally { off(); }
     const handoffInput = owner.sent.find(s => s.system.includes('handoff') && s.last.includes('Investigating the release.'))?.last ?? '';
     assert.match(handoffInput, /MAIN AGENT: \[Main agent guidance\]\nSkip the staging check\./);
+    assert.doesNotMatch(handoffInput, new RegExp(`USER: \\[${child.id}\\]`), 'child subagent reports are not attributed as USER');
     const zoomed = await owner.ask(`CALL zoom ${JSON.stringify({ id })}`);
     assert.match(zoomed ?? '', /user\|\[Main agent guidance\]\nSkip the staging check\./);
+    assert.doesNotMatch(zoomed ?? '', new RegExp(`user\\|\\[${child.id}\\]`), 'child subagent reports are not shown as user in zoom');
   } finally { await window.close(); await owner.close(); }
 });
 
@@ -489,7 +496,7 @@ test('tell refuses a disconnected remote window before reconnect and delivers on
   } finally { await unlock().catch(() => {}); await window.close(); await owner?.close(); }
 });
 
-test('tell refuses a remote window that is completing, even if it reconnects to a restarted owner mid-/complete', async () => {
+test('tell refuses a remote window that is completing, even after the real window reconnects to a restarted owner mid-/complete', async () => {
   const name = profile();
   let releaseHandoff = () => {};
   const handoff = new Promise<void>(resolve => { releaseHandoff = resolve; });
@@ -504,23 +511,55 @@ test('tell refuses a remote window that is completing, even if it reconnects to 
     await until(() => window.sent.some(s => s.last.startsWith(HANDOFF_REQUEST)));
     assert.match(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'Too late.' })}`) ?? '', /is finishing/);
 
-    // Owner restarts while the window is still writing its handoff: when the window reconnects, it advertises `completing`.
+    // Owner restarts while the real window is still writing its handoff: wait for the window's own reconnect timer to re-register with `completing`.
     await owner.close();
+    await until(() => { const r = window.role(); return r?.role === 'window' && !r.connected; });
     owner = await rpc(name);
-    const reconnected = await connectWindow(profilePath(name), () => {}, () => {});
-    try {
-      await reconnected.request('register', JSON.stringify({ id, task: 'Wrapping up.', cwd: root, model: 'fixture/fixture', thinking: 'off', pid: process.pid, receives: true, completing: true }));
-      assert.match(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'Still too late.' })}`) ?? '', /is finishing/);
-    } finally { reconnected.close(); }
+    await until(() => { const r = window.role(); return r?.role === 'window' && r.connected; });
+    assert.match(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'Still too late.' })}`) ?? '', /is finishing/);
 
     releaseHandoff();
     await completing;
     assert.ok(!window.sent.some(s => s.last.includes('Too late.') || s.last.includes('Still too late.')));
-    const handoffOf = (s: { last: string }) => new RegExp(`^\\[${id}\\] Connected conversation`).test(s.last);
+    const handoffOf = (s: { last: string }) => new RegExp(`^\\[${id}\\] Connected conversation completed by user`).test(s.last);
     await until(() => owner.sent.some(handoffOf));
     const delivered = owner.sent.find(handoffOf)!.last;
+    assert.match(delivered, /Handoff: the user asked about the colour/);
     assert.doesNotMatch(delivered, /Too late|Subagent reports that arrived/);
   } finally { releaseHandoff(); await window.close(); await owner.close(); }
+});
+
+test('tell guidance sent while a busy remote window starts /complete before reading it is kept as undelivered in its handoff', async () => {
+  const name = profile();
+  let releaseWork = () => {};
+  const work = new Promise<void>(resolve => { releaseWork = resolve; });
+  const owner = await rpc(name);
+  const window = await rpc(name, undefined, 'rpc', true, request => request === 'Slow step.' ? work : undefined);
+  try {
+    await window.ask('First turn.');
+    const role = window.role(), id = role?.role === 'window' ? role.id : '';
+    await until(() => readFileSync(join(profilePath(name), 'pending-reports.json'), 'utf8').includes(`[${id}] User started`));
+    await owner.ask('Drain start notice.');
+
+    // Start a busy turn in the window, send tell while it is busy (steered, not yet read), then /complete aborts the turn.
+    const busy = window.ask('Slow step.');
+    await until(() => window.sent.some(s => s.last === 'Slow step.'));
+    assert.equal(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'Check edge case X.' })}`), 'Reply: Message sent to the connected window.');
+    // Let the socket event reach the window and queue the steer, then /complete aborts the held turn.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const completing = window.ask('/complete');
+    await busy;
+    await completing;
+
+    // The handoff request itself names the undelivered guidance, and the window's final handoff includes it explicitly.
+    const handoffPrompt = window.sent.find(s => s.last.startsWith(HANDOFF_REQUEST))?.last ?? '';
+    assert.match(handoffPrompt, /Messages queued for you that you never got:\n\[Main agent guidance\]\nCheck edge case X\./);
+    assert.ok(!window.sent.some(s => s.last === '[Main agent guidance]\nCheck edge case X.'), 'the steered guidance never started a turn');
+    const handoffOf = (s: { last: string }) => new RegExp(`^\\[${id}\\] Connected conversation completed by user`).test(s.last);
+    await until(() => owner.sent.some(handoffOf));
+    const delivered = owner.sent.find(handoffOf)!.last;
+    assert.match(delivered, /Messages queued but NOT delivered to the agent:\n\[Main agent guidance\]\nCheck edge case X\./);
+  } finally { releaseWork(); await window.close(); await owner.close(); }
 });
 
 test('a window\'s spawn with no owner to reach fails and says so', async () => {
