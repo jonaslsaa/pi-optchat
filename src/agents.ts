@@ -590,7 +590,14 @@ export class Children {
   async tell(id: string, message: string, source: 'manager' | 'user' = 'manager', caller?: string) {
     if (this.deleting.has(id)) throw new Error(`${id} is being deleted by the user.`);
     const live = this.running.get(id), run = this.history.records.get(id);
-    if (!live && run && runsElsewhere(run)) throw new Error(`${id} is a connected window running in its own Pi process, which tell can't reach. Its handoff arrives when it ends.`);
+    if (!live && run && runsElsewhere(run)) {
+      const trimmed = message.trim();
+      if (!trimmed) throw new Error('Message is empty.');
+      const send = this.windows.get(id);
+      const text = source === 'manager' ? `[Main agent guidance]\n${trimmed}` : trimmed;
+      if (!send?.(text)) throw new Error(`${id} is a connected window in its own Pi process and is not connected right now, so tell can't reach it. Its handoff arrives when it ends.`);
+      return 'Message sent to the connected window.';
+    }
     if (!live && source === 'manager' && run) return this.track(this.resume(id, message, { caller }));
     if (live && !['running', 'waiting', 'paused'].includes(live.info.state)) throw new Error(`${id} is finishing. Its report will arrive on its own${live.info.connected || source === 'user' ? '' : '; tell it again after that to resume it'}.`);
     if (!live) throw new Error(`No running subagent ${id}.`);
@@ -773,7 +780,7 @@ export class Children {
     const where = { pid, session, after };
     this.save(known ? { ...known, window: where } : { id, task, cwd, model, thinking, ...(title ? { title } : {}), parentSession: this.options.parentSession ?? '',
       depth: 1, started: Date.now(), state: 'running', guidance: [], connected: true, window: where });
-    if (!known && announce) await this.report(`[${id}] User started a connected conversation in ${cwd}, in a Pi window of its own. That agent is handling this request with the user directly; don't do it yourself. Initial message: ${task}\n\nIt runs in another Pi process, so tell can't reach it. It sends a final handoff on completion or disconnect.`, { quiet: true });
+    if (!known && announce) await this.report(`[${id}] User started a connected conversation in ${cwd}, in a Pi window of its own. That agent is handling this request with the user directly; don't do it yourself. Initial message: ${task}\n\nUse tell with this agent ID only if you know something it needs. It sends a final handoff on completion or disconnect.`, { quiet: true });
   }
   /** A window in its own process has ended. `written`: the handoff it wrote itself (/complete); without one the compactor writes it from the window's transcript. */
   async endRemote(id: string, reason: FinishReason, written?: string) {

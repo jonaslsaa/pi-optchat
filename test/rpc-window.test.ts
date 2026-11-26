@@ -413,6 +413,30 @@ test('a window\'s agent messages the main agent with tell_main, which only a win
   } finally { await window.close(); await owner.close(); }
 });
 
+test('the main agent can message a connected remote window with tell, and gets a clear error when it is not connected', async () => {
+  const name = profile(), owner = await rpc(name), window = await rpc(name);
+  try {
+    await window.ask('Investigating the release.');
+    const role = window.role(), id = role?.role === 'window' ? role.id : '';
+    // The start notice reaches the main agent on its next turn and invites tell instead of saying it can't reach the window.
+    await until(() => readFileSync(join(profilePath(name), 'pending-reports.json'), 'utf8').includes(`[${id}] User started a connected conversation`));
+    await owner.ask('Anything new?');
+    assert.match(owner.sent.at(-1)!.messages.join('\n'), new RegExp(`\\[${id}\\] User started a connected conversation[\\s\\S]*Use tell with this agent ID`));
+
+    const sent = await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'Skip the staging check.' })}`);
+    assert.equal(sent, 'Reply: Message sent to the connected window.');
+    await until(() => window.sent.some(s => s.last === '[Main agent guidance]\nSkip the staging check.'));
+
+    // An owner restart leaves the window's record active while its socket is gone: tell refuses cleanly until it reconnects.
+    await owner.close();
+    const restarted = await rpc(name);
+    try {
+      const error = await restarted.ask(`CALL tell ${JSON.stringify({ id, message: 'Still there?' })}`);
+      assert.match(error ?? '', /not connected right now, so tell can't reach it/);
+    } finally { await restarted.close(); }
+  } finally { await window.close(); await owner.close(); }
+});
+
 test('a window\'s spawn with no owner to reach fails and says so', async () => {
   const name = profile(), owner = await rpc(name), window = await rpc(name);
   try {

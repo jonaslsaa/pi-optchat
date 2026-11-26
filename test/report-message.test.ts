@@ -22,6 +22,7 @@ test('subagent messages render as a dark labelled box, never in the user-message
   assert.deepEqual(reportParts('[8964a512] Message from subagent (still running): step 1 done'), { label: 'subagent 8964a512 · still running', body: 'step 1 done' });
   assert.deepEqual(reportParts('[8964a512] All done.'), { label: 'subagent 8964a512 · report', body: 'All done.' });
   assert.deepEqual(reportParts('[8964a512] Connected agent message: hi'), { label: 'subagent 8964a512 · connected window', body: 'hi' });
+  assert.deepEqual(reportParts('[Main agent guidance]\nSkip staging.'), { label: 'main agent', body: 'Skip staging.' });
   assert.deepEqual(reportParts('[8964a512 · Fix steering bug] All done.'), { label: 'subagent 8964a512 · Fix steering bug · report', body: 'All done.' });
   assert.deepEqual(reportParts('[8964a512 · Check CI] Message from subagent (still running): green'), { label: 'subagent 8964a512 · Check CI · still running', body: 'green' });
   assert.deepEqual(reportParts('no id'), { label: 'subagent', body: 'no id' });

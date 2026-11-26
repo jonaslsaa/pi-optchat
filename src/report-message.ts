@@ -12,6 +12,7 @@ export interface ReportDetails { count?: number }
 export function reportParts(text: string, count = 1) {
   text = withoutFullChat(text); // For the agent: the user has the Agents page.
   if (count > 1) return { label: `${count} subagent reports`, body: text };
+  if (text.startsWith('[Main agent guidance]\n')) return { label: 'main agent', body: text.slice('[Main agent guidance]\n'.length) };
   const match = HEAD.exec(text);
   if (!match) return { label: 'subagent', body: text };
   const [, id, title, message] = match;
