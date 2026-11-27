@@ -792,11 +792,7 @@ export class Children {
       depth: 1, started: Date.now(), state: 'running', guidance: [], connected: true, window: where });
     if (!known && announce) await this.report(`[${id}] User started a connected conversation in ${cwd}, in a Pi window of its own. That agent is handling this request with the user directly; don't do it yourself. Initial message: ${task}\n\nUse tell with this agent ID only if you know something it needs. It sends a final handoff on completion or disconnect.`, { quiet: true });
   }
-  /** A window in its own process has ended. `written`: the handoff it wrote itself (/complete), plus any guidance/reports it never read; without text the compactor writes it from the window's transcript. */
-  async endRemote(id: string, reason: FinishReason, written?: RemoteHandoff) {
-    this.completingWindows.delete(id);
-    const run = this.history.records.get(id);
-    if (!run?.window || run.handoff) return;
+  private prepareRemoteEnd(run: RunInfo, reason: FinishReason, written?: RemoteHandoff) {
     run.handoff = { reason, ...(written?.unread?.length ? { unread: written.unread } : {}) }; run.ended = Date.now();
     if (written?.undelivered?.length) {
       const now = Date.now();
@@ -804,12 +800,21 @@ export class Children {
     }
     transition(run, reason === 'complete' ? 'completed' : 'interrupted');
     this.save(run);
+  }
+  /** A window in its own process has ended. `written`: the handoff it wrote itself (/complete), plus any guidance/reports it never read; without text the compactor writes it from the window's transcript. */
+  async endRemote(id: string, reason: FinishReason, written?: RemoteHandoff) {
+    this.completingWindows.delete(id);
+    const run = this.history.records.get(id);
+    if (!run?.window || run.handoff) return;
+    this.prepareRemoteEnd(run, reason, written);
     const work = this.deliverHandoff(run, undefined, written?.text).then(() => this.cutOffUnder(id, false));
     this.completions.add(work);
     try { await work; } finally { this.completions.delete(work); this.changed(); }
   }
   async recoverHandoffs() {
     // Windows that found no owner queued themselves; one still running without a reason is left for later.
+    // Register every ended queued window up front so the status line, inspector and app see the full count while they fold.
+    const pending: { id: string; run: RunInfo; written: RemoteHandoff }[] = [];
     for (const window of queuedWindows(this.profileDirectory)) {
       if (!window.reason && alive(window.pid)) continue;
       const { reason = 'disconnected', text, undelivered: missed, unread, ...rest } = window, known = this.history.records.get(window.id);
@@ -818,19 +823,32 @@ export class Children {
           // Its own ending wins over the `owner-stopped` one a restart gave a record whose window was gone by then.
           if (known && !isActiveRun(known)) delete known.handoff;
           else await this.adopt(rest, { announce: false });
-          await this.endRemote(window.id, reason, { text, undelivered: missed, unread });
-        }
-        unqueueWindow(this.profileDirectory, window.id);
+          const run = this.history.records.get(window.id);
+          if (run?.window && !run.handoff) {
+            this.prepareRemoteEnd(run, reason, { text, undelivered: missed, unread });
+            pending.push({ id: window.id, run, written: { text, undelivered: missed, unread } });
+          } else unqueueWindow(this.profileDirectory, window.id);
+        } else unqueueWindow(this.profileDirectory, window.id);
       } catch (error) { this.warn(`Could not take the handoff of window ${window.id}: ${String(error)}`); }
     }
+    const pendingIds = new Set(pending.map(item => item.id));
     // A window in its own process that is still active is still running there.
-    const eligible = [...this.history.records.values()].filter(run => run.connected && !this.running.has(run.id) && !run.handoff?.delivered && !runsElsewhere(run));
+    const eligible = [...this.history.records.values()].filter(run => run.connected && !this.running.has(run.id) && !run.handoff?.delivered && !runsElsewhere(run) && !pendingIds.has(run.id));
+    for (const run of eligible) {
+      run.handoff ??= { reason: 'owner-stopped' };
+      transition(run, run.handoff.reason === 'complete' ? 'completed' : 'interrupted'); this.save(run);
+    }
     const recovery = (async () => {
-      for (const run of eligible) {
-        run.handoff ??= { reason: 'owner-stopped' };
-        transition(run, run.handoff.reason === 'complete' ? 'completed' : 'interrupted'); this.save(run);
-        await this.deliverHandoff(run);
+      for (const { id, run, written } of pending) {
+        try {
+          await this.deliverHandoff(run, undefined, written.text);
+          if (run.handoff?.delivered) {
+            await this.cutOffUnder(id, false);
+            unqueueWindow(this.profileDirectory, id);
+          }
+        } catch (error) { this.warn(`Could not take the handoff of window ${id}: ${String(error)}`); }
       }
+      for (const run of eligible) await this.deliverHandoff(run);
     })();
     this.completions.add(recovery);
     try { await recovery; } finally { this.completions.delete(recovery); this.changed(); }
