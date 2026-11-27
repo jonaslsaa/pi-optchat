@@ -5,12 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createServer, type Socket } from 'node:net';
-import { createAgentSession, DefaultResourceLoader, type ToolDefinition, SettingsManager, CustomMessageComponent, initTheme, ModelRegistry, ModelRuntime, type ExtensionAPI, type TerminalInputHandler, type ExtensionContext, type MessageRenderer, type Theme } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, type ToolDefinition, type AgentSession, SettingsManager, CustomMessageComponent, initTheme, ModelRegistry, ModelRuntime, type ExtensionAPI, type TerminalInputHandler, type ExtensionContext, type MessageRenderer, type Theme } from '@earendil-works/pi-coding-agent';
 import { Editor, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, TuiMainScreen, type Component, type Terminal } from '@earendil-works/pi-tui';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
 import { showAgentView } from '../src/agent-view.ts';
 import optchat from '../src/index.ts';
 import { Children } from '../src/agents.ts';
+import { readRun } from '../src/runs.ts';
 import { Memory } from '../src/memory.ts';
 import { emptyUsage, UsageLedger } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
@@ -120,6 +121,204 @@ async function fixture(contextWindow = 1_000_000, maxTokens = 64_000) {
   return { control, contexts, dir, memory, children, requests, summaries, summaryOptions, reports, warnings, registry, runtime, choice, options, ledger,
     async close() { await children.close(); await memory.close(); await unlock(); removeDir(dir); } };
 }
+
+function blockNextStart(session: AgentSession) {
+  const entered = Promise.withResolvers<void>(), released = Promise.withResolvers<void>();
+  const before = session.extensionRunner.emitBeforeAgentStart.bind(session.extensionRunner);
+  session.extensionRunner.emitBeforeAgentStart = async (...args) => {
+    session.extensionRunner.emitBeforeAgentStart = before;
+    entered.resolve();
+    await released.promise;
+    return before(...args);
+  };
+  return { entered: entered.promise, release: released.resolve };
+}
+
+for (const channel of ['guidance', 'skill guidance', 'parent report'] as const) test(`an external callback queues ${channel} once and keeps the connected conversation open`, async () => {
+  const f = await fixture();
+  let gate: ReturnType<typeof blockNextStart> | undefined, callback: Promise<void> | undefined;
+  try {
+    if (channel === 'skill guidance') {
+      mkdirSync(join(f.dir, '.pi', 'skills', 'review'), { recursive: true });
+      writeFileSync(join(f.dir, '.pi', 'skills', 'review', 'SKILL.md'), '---\nname: review\ndescription: Reviews code.\n---\nREVIEW_SKILL_BODY\n');
+    }
+    const [id] = await f.children.spawn([{ task: 'Investigate this repository.' }], f.dir, undefined, undefined, true);
+    await until(() => f.children.history.records.get(id)?.state === 'waiting');
+    const live = f.children.live(id)!;
+    if (channel === 'parent report') {
+      await f.children.tell(id, 'spawn one', 'user');
+      await until(() => live.info.state === 'waiting' && [...f.children.history.records.values()].some(run => run.parentId === id));
+    }
+    gate = blockNextStart(live.session);
+    callback = live.session.sendCustomMessage({ customType: 'background-task', content: 'Background task succeeded.', display: true }, { triggerTurn: true, deliverAs: 'followUp' });
+    await gate.entered;
+    assert.equal(live.session.isStreaming, true);
+    assert.equal(live.info.state, 'waiting', 'the callback has not emitted agent_start yet');
+    const marker = channel === 'parent report' ? 'Need a decision from the main agent.' : 'Check the background result.';
+    if (channel !== 'parent report') {
+      await live.session.steer('Earlier queued parent report.');
+      await f.children.tell(id, channel === 'skill guidance' ? `/skill:review ${marker}` : marker, channel === 'skill guidance' ? 'user' : 'manager');
+    } else {
+      const descendant = [...f.children.history.records.values()].find(run => run.parentId === id)!;
+      const tool = f.children.live(descendant.id)!.session.agent.state.tools.find(tool => tool.name === 'tell_parent')!;
+      await tool.execute('callback-report', { message: marker });
+    }
+    await until(() => live.session.getSteeringMessages().some(text => text.includes(marker)) || !!live.info.handoff);
+    assert.equal(live.info.handoff, undefined, 'dispatch must not fail while the SDK callback owns the run');
+    assert.equal(live.info.state, 'running');
+    assert.equal(live.session.isStreaming, true, 'queueing is not completion');
+    gate.release();
+    await callback;
+    await until(() => live.info.state === 'waiting' && !live.session.isStreaming && live.session.messages.some(m => m.role === 'user' && textContent(m.content).includes(marker)));
+    assert.equal(live.session.messages.filter(m => m.role === 'user' && textContent(m.content).includes(marker)).length, 1);
+    assert.equal(f.requests.filter(text => text.includes(marker)).length, 1);
+    if (channel !== 'parent report') {
+      assert.deepEqual(live.info.guidance.map(g => g.state), ['delivered']);
+      if (channel === 'skill guidance') assert.ok(live.info.guidance[0].sent?.includes('REVIEW_SKILL_BODY'));
+      else assert.equal(live.info.guidance[0].sent, undefined, 'an earlier queued report must not be attributed to the guidance');
+    }
+    const handoff = await f.children.finish(id, 'complete');
+    assert.equal(live.info.state, 'completed');
+    assert.equal(handoff?.reason, 'complete');
+  } finally { gate?.release(); await callback?.catch(() => {}); await f.close(); }
+});
+
+test('an external callback updates the connected lifecycle without manager guidance', async () => {
+  const f = await fixture();
+  try {
+    const [id] = await f.children.spawn([{ task: 'Investigate this repository.' }], f.dir, undefined, undefined, true);
+    await until(() => f.children.history.records.get(id)?.state === 'waiting');
+    const live = f.children.live(id)!, states: string[] = [];
+    const unsubscribe = f.children.subscribe(() => { if (live.session.isStreaming) states.push(live.info.state); });
+    try { await live.session.sendCustomMessage({ customType: 'background-task', content: 'Background task succeeded.', display: true }, { triggerTurn: true }); }
+    finally { unsubscribe(); }
+    await until(() => live.info.state === 'waiting' && !live.session.isStreaming);
+    assert.ok(states.includes('running'), 'an externally started run must not remain waiting');
+    assert.equal(live.info.handoff, undefined);
+    const handoff = await f.children.finish(id, 'disconnected');
+    assert.equal(live.info.state, 'interrupted');
+    assert.equal(handoff?.reason, 'disconnected');
+  } finally { await f.close(); }
+});
+
+test('an external callback provider error wakes the loop and ends the connected conversation with a failed handoff', async () => {
+  const f = await fixture();
+  try {
+    const [id] = await f.children.spawn([{ task: 'Investigate this repository.' }], f.dir, undefined, undefined, true);
+    await until(() => f.children.history.records.get(id)?.state === 'waiting');
+    await f.children.live(id)!.session.sendCustomMessage({ customType: 'background-task', content: 'provider-failure', display: true }, { triggerTurn: true });
+    await until(() => !f.children.live(id));
+    const run = readRun(f.dir, id);
+    assert.equal(run.state, 'interrupted');
+    assert.equal(run.handoff?.reason, 'failed');
+  } finally { await f.close(); }
+});
+
+test('interrupting a callback run held before agent_start delivers queued guidance as a fresh turn', async () => {
+  const f = await fixture();
+  let gate: ReturnType<typeof blockNextStart> | undefined, callback: Promise<void> | undefined;
+  try {
+    const [id] = await f.children.spawn([{ task: 'Investigate this repository.' }], f.dir, undefined, undefined, true);
+    await until(() => f.children.history.records.get(id)?.state === 'waiting');
+    const live = f.children.live(id)!;
+    gate = blockNextStart(live.session);
+    callback = live.session.sendCustomMessage({ customType: 'background-task', content: 'Background task succeeded.', display: true }, { triggerTurn: true });
+    await gate.entered;
+    await f.children.tell(id, 'Drop the callback and check tests instead.', 'user');
+    const interrupted = f.children.interrupt(id);
+    gate.release();
+    assert.equal(await interrupted, 'continued');
+    await callback;
+    await until(() => live.info.state === 'waiting' && !live.session.isStreaming && f.requests.some(text => text.includes('Drop the callback and check tests instead.')));
+    assert.equal(live.info.handoff, undefined);
+    assert.deepEqual(live.info.guidance.map(g => g.state), ['delivered']);
+  } finally { gate?.release(); await callback?.catch(() => {}); await f.close(); }
+});
+
+test('a second tell does not block behind a prompt still running before_agent_start', async () => {
+  const f = await fixture();
+  let gate: ReturnType<typeof blockNextStart> | undefined;
+  try {
+    const [id] = await f.children.spawn([{ task: 'Investigate this repository.' }], f.dir, undefined, undefined, true);
+    await until(() => f.children.history.records.get(id)?.state === 'waiting');
+    const live = f.children.live(id)!;
+    gate = blockNextStart(live.session);
+    await f.children.tell(id, 'First message.', 'user');
+    await gate.entered;
+    // A second tell while the first prompt is still in before_agent_start must return promptly, not wait for the gate.
+    const second = await Promise.race([
+      f.children.tell(id, 'Second message.', 'user'),
+      new Promise<'timed-out'>(resolve => setTimeout(() => resolve('timed-out'), 500)),
+    ]);
+    assert.notEqual(second, 'timed-out', 'tell must not block behind before_agent_start');
+    gate.release();
+    await until(() => live.info.state === 'waiting' && !live.session.isStreaming && live.info.guidance.every(g => g.state === 'delivered'));
+    assert.equal(live.session.messages.filter(m => m.role === 'user' && textContent(m.content).includes('First message.')).length, 1);
+    assert.equal(live.session.messages.filter(m => m.role === 'user' && textContent(m.content).includes('Second message.')).length, 1);
+  } finally { gate?.release(); await f.close(); }
+});
+
+test('a plain subagent waiting on its child keeps running when a child reports during an external callback', async () => {
+  const f = await fixture();
+  let gate: ReturnType<typeof blockNextStart> | undefined, callback: Promise<void> | undefined;
+  try {
+    const [parentId] = await f.children.spawn([{ task: 'spawn quick' }], f.dir);
+    await until(() => f.children.history.records.get(parentId)?.state === 'waiting'
+      && [...f.children.history.records.values()].some(run => run.parentId === parentId));
+    const parent = f.children.live(parentId)!;
+    const child = [...f.children.history.records.values()].find(run => run.parentId === parentId)!;
+    gate = blockNextStart(parent.session);
+    callback = parent.session.sendCustomMessage({ customType: 'background-task', content: 'Background task succeeded.', display: true }, { triggerTurn: true });
+    await gate.entered;
+    const tool = f.children.live(child.id)!.session.agent.state.tools.find(t => t.name === 'tell_parent')!;
+    await tool.execute('callback-child-report', { message: 'Child report during callback.' });
+    await until(() => parent.session.getSteeringMessages().some(text => text.includes('Child report during callback.')));
+    gate.release();
+    await callback;
+    await until(() => !f.children.live(parentId));
+    const run = readRun(f.dir, parentId);
+    assert.equal(run.state, 'completed');
+    assert.equal(f.requests.filter(text => text.includes('Child report during callback.')).length, 1);
+  } finally { gate?.release(); await callback?.catch(() => {}); await f.close(); }
+});
+
+test('a callback that finishes while steer() is still awaiting input hooks does not strand the message', async () => {
+  const f = await fixture();
+  let gate: ReturnType<typeof blockNextStart> | undefined, callback: Promise<void> | undefined;
+  const inputEntered = Promise.withResolvers<void>(), inputReleased = Promise.withResolvers<void>();
+  try {
+    const [id] = await f.children.spawn([{ task: 'Investigate this repository.' }], f.dir, undefined, undefined, true);
+    await until(() => f.children.history.records.get(id)?.state === 'waiting');
+    const live = f.children.live(id)!;
+    const runner = live.session.extensionRunner;
+    const origHas = runner.hasHandlers.bind(runner), origEmit = runner.emitInput.bind(runner);
+    let intercept = true;
+    runner.hasHandlers = (type: string) => (intercept && type === 'input') || origHas(type);
+    runner.emitInput = async (text, images, source) => {
+      if (intercept && text.includes('Survive callback end')) {
+        intercept = false;
+        inputEntered.resolve();
+        await inputReleased.promise;
+        return { action: 'continue' };
+      }
+      return origEmit(text, images, source);
+    };
+    gate = blockNextStart(live.session);
+    callback = live.session.sendCustomMessage({ customType: 'background-task', content: 'Background task succeeded.', display: true }, { triggerTurn: true });
+    await gate.entered;
+    await f.children.tell(id, 'Survive callback end', 'user');
+    await inputEntered.promise;
+    // Finish the callback run completely before steer() finishes its input hook.
+    gate.release();
+    await callback;
+    assert.equal(live.session.isStreaming, false);
+    inputReleased.resolve();
+    await until(() => live.info.state === 'waiting' && !live.session.isStreaming && f.requests.some(text => text.includes('Survive callback end')));
+    assert.equal(live.session.getSteeringMessages().length, 0);
+    assert.equal(f.requests.filter(text => text.includes('Survive callback end')).length, 1);
+    assert.deepEqual(live.info.guidance.map(g => g.state), ['delivered']);
+  } finally { gate?.release(); inputReleased.resolve(); await callback?.catch(() => {}); await f.close(); }
+});
 
 test('connected window keeps one real SDK conversation, communicates both ways, and completes its subtree with one handoff', async () => {
   const f = await fixture();
