@@ -72,7 +72,7 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
         if (late) late.push(event.text);
         else {
           steered.push(event.text);
-          pi.sendMessage({ customType: REPORT_TYPE, content: event.text, display: true }, { triggerTurn: true, deliverAs: 'steer' });
+          pi.sendMessage({ customType: REPORT_TYPE, content: event.text, display: true, details: { window: id } }, { triggerTurn: true, deliverAs: 'steer' });
         }
       }, () => {
         if (!opened || connection !== opened) return;
@@ -264,7 +264,7 @@ export async function openRemoteWindow(pi: ExtensionAPI, ctx: ExtensionContext, 
     try {
       // Hidden from the host's chat: it's OptChat's request, not the user's; the handoff that answers it shows.
       // Pi marks the run started before sendMessage returns, so waitForIdle waits for it.
-      pi.sendMessage({ customType: HANDOFF_TYPE, content: windowHandoff('complete', { undelivered, unread, stopped: [] }), display: false }, { triggerTurn: true });
+      pi.sendMessage({ customType: HANDOFF_TYPE, content: windowHandoff('complete', { undelivered, unread, stopped: [] }), display: false, details: { window: id } }, { triggerTurn: true });
       await Promise.race([command.waitForIdle(), new Promise<never>((_, reject) => {
         timer = setTimeout(() => { command.abort(); reject(new Error('timed out')); }, HANDOFF_TIMEOUT);
       })]);

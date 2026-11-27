@@ -629,6 +629,46 @@ test('delivered guidance stays in zoom and compactor fallback when an identical 
   } finally { await owner.close(); }
 });
 
+test('when two steered tells drain across an intermediate stop reply during a failing /complete, both stay undelivered only (#349)', async () => {
+  const name = profile();
+  let releaseWork = () => {}, handoffCalls = 0;
+  const work = new Promise<void>(resolve => { releaseWork = resolve; });
+  const owner = await rpc(name);
+  const window = await rpc(name, undefined, 'rpc', true, (request, lastRole) => {
+    if (request === 'Slow step.') return work;
+    // First handoff call succeeds (stop reply), then Pi drains the second steer (which context() hides, leaving the prior
+    // assistant reply at the tail); fail that second call so the owner's compactor fallback runs.
+    if (lastRole === 'assistant' && request.startsWith('Handoff:')) { handoffCalls++; return Promise.reject(new Error('handoff model down')); }
+    if (request.startsWith(HANDOFF_REQUEST)) { handoffCalls++; return undefined; }
+    return undefined;
+  });
+  try {
+    await window.ask('First turn.');
+    const role = window.role(), id = role?.role === 'window' ? role.id : '';
+    await until(() => readFileSync(join(profilePath(name), 'pending-reports.json'), 'utf8').includes(`[${id}] User started`));
+    await owner.ask('Drain start notice.');
+
+    const busy = window.ask('Slow step.');
+    await until(() => window.sent.some(s => s.last === 'Slow step.'));
+    assert.equal(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'First queued note.' })}`), 'Reply: Message sent to the connected window.');
+    assert.equal(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'Second queued note.' })}`), 'Reply: Message sent to the connected window.');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const completing = window.ask('/complete');
+    await busy;
+    await completing;
+
+    const handoffOf = (s: { last: string }) => new RegExp(`^\\[${id}\\] Connected conversation completed by user`).test(s.last);
+    await until(() => owner.sent.some(handoffOf));
+    assert.equal(handoffCalls, 2, 'Pi ran a second model call after draining the second steer past the first stop reply');
+    const compactorInput = owner.sent.find(s => s.system.includes('handoff') && s.last.includes(`AGENT ${id}`))?.last ?? '';
+    assert.match(compactorInput, /Messages queued but NOT delivered to this agent:[\s\S]*First queued note\.[\s\S]*Second queued note\./);
+    assert.doesNotMatch(compactorInput, /MAIN AGENT: \[Main agent guidance\]\nFirst queued note\./);
+    assert.doesNotMatch(compactorInput, /MAIN AGENT: \[Main agent guidance\]\nSecond queued note\./);
+    const zoomed = await owner.ask(`CALL zoom ${JSON.stringify({ id })}`);
+    assert.doesNotMatch(zoomed ?? '', /First queued note\.|Second queued note\./);
+  } finally { releaseWork(); await window.close(); await owner.close(); }
+});
+
 test('reopening a session after an interrupted /complete keeps subsequent delivered guidance in zoom and compactor fallback (#349)', async () => {
   const name = profile(), owner = await rpc(name), window = await rpc(name);
   try {

@@ -162,49 +162,49 @@ test('live zoom retains compacted evidence, its page offsets and the unsaved tai
   } finally { clearTimeout(deadline); releaseFirst(); releaseLast(); await children.close(); await memory.close(); removeDir(dir); }
 });
 
-test('sessionMessages drops guidance drained into a /complete handoff turn by position, never an earlier delivered copy (#349)', () => {
+test('sessionMessages drops guidance drained into a /complete handoff turn by position and window ID, never an earlier delivered copy (#349)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'optchat-session-messages-'));
   try {
     const manager = SessionManager.create(dir, dir);
     const guidance = `${MAIN_GUIDANCE}Check the lockfile.`;
+    const assistantStop = (text: string, timestamp: number) => ({
+      role: 'assistant' as const, content: [{ type: 'text' as const, text }], api: 'openai-completions' as const, provider: 'fixture', model: 'fixture',
+      stopReason: 'stop' as const, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, timestamp,
+    });
     manager.appendMessage({ role: 'user', content: 'First task', timestamp: 1 });
-    manager.appendCustomMessageEntry(REPORT_TYPE, guidance, true);
-    manager.appendCustomMessageEntry(REPORT_TYPE, '[abcd1234] Subagent finished.', true);
-    // Closing handoff turn: a steered guidance entry drained after HANDOFF_TYPE must be dropped, even with identical text,
-    // while the earlier delivered copy stays; non-report messages (e.g. a verification tool call/result) inside the handoff turn stay.
-    manager.appendCustomMessageEntry(HANDOFF_TYPE, 'Write the handoff.', false);
-    manager.appendCustomMessageEntry(REPORT_TYPE, guidance, true);
-    manager.appendMessage({ role: 'assistant', content: [{ type: 'toolCall', id: 't1', name: 'models', arguments: {} }], api: 'openai-completions', provider: 'fixture', model: 'fixture',
-      stopReason: 'toolUse', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, timestamp: 2 });
-    manager.appendMessage({ role: 'toolResult', toolCallId: 't1', toolName: 'models', content: [{ type: 'text', text: 'ok' }], isError: false, timestamp: 3 });
-    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}Still inside handoff after tool use.`, true);
+    manager.appendCustomMessageEntry(REPORT_TYPE, guidance, true, { window: 'win1' });
+    manager.appendCustomMessageEntry(REPORT_TYPE, '[abcd1234] Subagent finished.', true, { window: 'win1' });
+    // Closing handoff turn: multiple steered guidance entries (even across an intermediate stop reply or queued user steer)
+    // drained after HANDOFF_TYPE for the same window must be dropped, while the earlier delivered copy stays.
+    manager.appendCustomMessageEntry(HANDOFF_TYPE, 'Write the handoff.', false, { window: 'win1' });
+    manager.appendCustomMessageEntry(REPORT_TYPE, guidance, true, { window: 'win1' });
+    manager.appendMessage(assistantStop('First handoff reply.', 2));
+    manager.appendMessage({ role: 'user', content: 'Queued user steer.', timestamp: 3 });
+    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}Second drained steer in same handoff.`, true, { window: 'win1' });
     manager.appendCustomEntry(COMPLETED_TYPE, {});
     // A second conversation in the same session file after COMPLETED_TYPE resumes keeping delivered guidance.
     manager.appendMessage({ role: 'user', content: 'Second task', timestamp: 4 });
-    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}After complete.`, true);
-    // An interrupted /complete (no COMPLETED_TYPE marker) still ends the handoff filter when a new user turn begins or a final assistant reply lands.
-    manager.appendCustomMessageEntry(HANDOFF_TYPE, 'Interrupted handoff.', false);
-    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}Drained in interrupted handoff.`, true);
-    manager.appendMessage({ role: 'user', content: 'Reopened task', timestamp: 5 });
-    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}After reopen.`, true);
-    // Even without a user turn, a final (non-toolUse) assistant reply closes the handoff turn.
-    manager.appendCustomMessageEntry(HANDOFF_TYPE, 'Answered but not marked.', false);
-    manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Handoff reply.' }], api: 'openai-completions', provider: 'fixture', model: 'fixture',
-      stopReason: 'stop', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, timestamp: 6 });
-    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}After handoff reply.`, true);
+    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}After complete.`, true, { window: 'win2' });
+    // An interrupted /complete (no COMPLETED_TYPE marker) still keeps guidance delivered to a newly reopened window ID,
+    // even when the interrupted handoff was from a legacy untagged session or a tagged earlier window.
+    manager.appendCustomMessageEntry(HANDOFF_TYPE, 'Interrupted handoff.', false, { window: 'win2' });
+    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}Drained in interrupted handoff.`, true, { window: 'win2' });
+    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}After reopen with new window.`, true, { window: 'win3' });
+    // Legacy untagged handoff drops untagged drained guidance, but still keeps tagged reopened-window guidance.
+    manager.appendCustomMessageEntry(HANDOFF_TYPE, 'Legacy interrupted handoff.', false);
+    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}Legacy drained.`, true);
+    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}After legacy reopen.`, true, { window: 'win4' });
 
     const messages = sessionMessages(manager.getSessionFile()!);
     assert.deepEqual(messages.map(m => `${m.role}:${'content' in m ? textContent(m.content) : ''}`), [
       'user:First task',
       `user:${guidance}`,
-      'assistant:',
-      'toolResult:ok',
+      'assistant:First handoff reply.',
+      'user:Queued user steer.',
       'user:Second task',
       `user:${MAIN_GUIDANCE}After complete.`,
-      'user:Reopened task',
-      `user:${MAIN_GUIDANCE}After reopen.`,
-      'assistant:Handoff reply.',
-      `user:${MAIN_GUIDANCE}After handoff reply.`,
+      `user:${MAIN_GUIDANCE}After reopen with new window.`,
+      `user:${MAIN_GUIDANCE}After legacy reopen.`,
     ]);
   } finally { removeDir(dir); }
 });
