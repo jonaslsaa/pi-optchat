@@ -4,7 +4,7 @@ import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { atomicWrite } from './store.ts';
 import { record } from './core/cache.ts';
-import { MAIN_GUIDANCE, REPORT_TYPE, textContent } from './transcript.ts';
+import { COMPLETED_TYPE, HANDOFF_TYPE, MAIN_GUIDANCE, REPORT_TYPE, textContent } from './transcript.ts';
 import { isFinishReason, readRun, type FinishReason, type Guidance, type RunInfo, type RunState } from './run-record.ts';
 
 export { readRun, runStates, type FinishReason, type Guidance, type RunInfo, type RunState } from './run-record.ts';
@@ -56,7 +56,7 @@ export function isRemoteWindow(value: unknown): value is RemoteWindow {
 }
 /** A finished run's saved messages: for a window, only its own conversation (see `RunInfo.window`). */
 export function runMessages(run: RunInfo): AgentMessage[] {
-  const messages = run.sessionFile ? sessionMessages(run.sessionFile, undelivered(run)) : [], after = run.window?.after;
+  const messages = run.sessionFile ? sessionMessages(run.sessionFile) : [], after = run.window?.after;
   return after === undefined ? messages : messages.filter(message => message.timestamp >= after);
 }
 /** What a window that ended with `/complete` sends the owner (or queues for the next one): its handoff text plus any unread guidance/reports. */
@@ -88,33 +88,21 @@ export function queuedWindows(profileDirectory: string): QueuedWindow[] {
 export const isHandingOff = (run: RunInfo) => !isActiveRun(run) && !!run.handoff && !run.handoff.delivered;
 export const CUT_OFF = 'Pi closed before this agent finished. Its partial transcript is retained.';
 /**
- * Messages saved in a session file. `exclude` drops unread main-agent guidance that Pi's steering queue drained into a closing
- * handoff turn after `/complete` aborted an active turn, so the compactor and `zoom` don't show it as read conversation.
+ * Messages saved in a session file. Drops `optchat-report` entries between a remote window's `HANDOFF_TYPE` prompt and its
+ * `COMPLETED_TYPE` marker (or the end of the session): Pi's steering queue can drain unread guidance into that closing handoff
+ * turn after `/complete` aborts an active turn (hidden from the model by `rpc-window.ts`'s `context()`), so the compactor and
+ * `zoom` never mistake it for guidance the agent actually read.
  */
-export function sessionMessages(file: string, exclude: readonly string[] = []): AgentMessage[] {
+export function sessionMessages(file: string): AgentMessage[] {
   const entries = SessionManager.open(file).getEntries();
-  const skip = new Set<number>();
-  if (exclude.length) {
-    // Match from the end so an identical guidance message that really was read earlier stays in the transcript.
-    const remaining = new Map<string, number>();
-    for (const text of exclude) remaining.set(text, (remaining.get(text) ?? 0) + 1);
-    for (let i = entries.length - 1; i >= 0 && remaining.size; i--) {
-      const entry = entries[i];
-      if (entry.type !== 'custom_message' || entry.customType !== REPORT_TYPE) continue;
-      const body = textContent(entry.content);
-      const count = remaining.get(body) ?? 0;
-      if (count > 0) {
-        skip.add(i);
-        if (count === 1) remaining.delete(body); else remaining.set(body, count - 1);
-      }
-    }
-  }
-  return entries.flatMap((entry, i) => {
-    if (skip.has(i)) return [];
+  let inHandoff = false;
+  return entries.flatMap(entry => {
+    if (entry.type === 'custom_message' && entry.customType === HANDOFF_TYPE) { inHandoff = true; return []; }
+    if (entry.type === 'custom' && entry.customType === COMPLETED_TYPE) { inHandoff = false; return []; }
     if (entry.type === 'message') return [entry.message];
     // Main-agent guidance in a remote window is saved as an `optchat-report` custom message (rpc-window.ts); keep only that
     // here so subagent reports aren't misattributed as user messages in handoffs or zoom.
-    if (entry.type === 'custom_message' && entry.customType === REPORT_TYPE && textContent(entry.content).startsWith(MAIN_GUIDANCE))
+    if (!inHandoff && entry.type === 'custom_message' && entry.customType === REPORT_TYPE && textContent(entry.content).startsWith(MAIN_GUIDANCE))
       return [{ role: 'user' as const, content: entry.content, timestamp: Date.parse(entry.timestamp) }];
     return [];
   });

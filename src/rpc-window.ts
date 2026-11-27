@@ -11,7 +11,7 @@ import { placeView } from './core/messages.ts';
 import { connectWindow } from './window-client.ts';
 import { HANDOFF_TIMEOUT, handoffText } from './handoff.ts';
 import { queueWindow, readRun, runMessages, unqueueWindow, type FinishReason, type RemoteHandoff, type RemoteWindow } from './runs.ts';
-import { MAIN_GUIDANCE, REPORT_TYPE, textContent } from './transcript.ts';
+import { COMPLETED_TYPE, HANDOFF_TYPE, MAIN_GUIDANCE, REPORT_TYPE, textContent } from './transcript.ts';
 
 /**
  * What this Pi is to its profile, for RPC hosts: `setStatus` with this key carries it as JSON (see `Role`).
@@ -21,10 +21,6 @@ export const ROLE_STATUS = 'optchat.role';
 export type Role = { role: 'owner'; profile: string }
   | { role: 'window'; profile: string; id: string; connected: boolean; completed: boolean; after?: number };
 const RECONNECT_MS = 5000;
-/** The closing message that asks a window for its handoff (`windowHandoff`). */
-const HANDOFF_TYPE = 'optchat-handoff-request';
-/** Marks where a window's conversation completed in its Pi session (see `after`). */
-const COMPLETED_TYPE = 'optchat-window-completed';
 
 /**
  * A connected window whose agent runs here, in its own Pi process: an RPC host's second session on a profile another Pi owns.

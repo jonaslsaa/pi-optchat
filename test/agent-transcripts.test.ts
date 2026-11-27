@@ -5,14 +5,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
-import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime, SessionManager, SettingsManager } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { Children } from '../src/agents.ts';
 import { Memory } from '../src/memory.ts';
 import { PAGE } from '../src/core/memory.ts';
 import { memoryTools } from '../src/tools.ts';
 import { result } from '../src/core/tools.ts';
-import { runTranscript } from '../src/transcript.ts';
+import { sessionMessages } from '../src/runs.ts';
+import { COMPLETED_TYPE, HANDOFF_TYPE, MAIN_GUIDANCE, REPORT_TYPE, runTranscript, textContent } from '../src/transcript.ts';
 import { reportParts } from '../src/report-message.ts';
 import { removeDir } from './support.ts';
 
@@ -159,4 +160,36 @@ test('live zoom retains compacted evidence, its page offsets and the unsaved tai
     assert.equal(runTranscript(children.transcript(id)!), finished);
     assert.deepEqual(warnings, []);
   } finally { clearTimeout(deadline); releaseFirst(); releaseLast(); await children.close(); await memory.close(); removeDir(dir); }
+});
+
+test('sessionMessages drops guidance drained into a /complete handoff turn by position, never an earlier delivered copy (#349)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-session-messages-'));
+  try {
+    const manager = SessionManager.create(dir, dir);
+    const guidance = `${MAIN_GUIDANCE}Check the lockfile.`;
+    manager.appendMessage({ role: 'user', content: 'First task', timestamp: 1 });
+    manager.appendCustomMessageEntry(REPORT_TYPE, guidance, true);
+    manager.appendCustomMessageEntry(REPORT_TYPE, '[abcd1234] Subagent finished.', true);
+    // Closing handoff turn: a steered guidance entry drained after HANDOFF_TYPE must be dropped, even with identical text,
+    // while the earlier delivered copy stays; non-report messages (e.g. a verification tool result) inside the handoff turn stay.
+    manager.appendCustomMessageEntry(HANDOFF_TYPE, 'Write the handoff.', false);
+    manager.appendCustomMessageEntry(REPORT_TYPE, guidance, true);
+    manager.appendMessage({ role: 'toolResult', toolCallId: 't1', toolName: 'models', content: [{ type: 'text', text: 'ok' }], isError: false, timestamp: 2 });
+    manager.appendCustomEntry(COMPLETED_TYPE, {});
+    // A second conversation in the same session file after COMPLETED_TYPE resumes keeping delivered guidance,
+    // and an identical undelivered guidance that never landed in the session still preserves the earlier delivered copy.
+    manager.appendMessage({ role: 'user', content: 'Second task', timestamp: 3 });
+    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}After complete.`, true);
+    manager.appendCustomMessageEntry(HANDOFF_TYPE, 'Second handoff.', false);
+    manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}Drained in second handoff.`, true);
+
+    const messages = sessionMessages(manager.getSessionFile()!);
+    assert.deepEqual(messages.map(m => `${m.role}:${'content' in m ? textContent(m.content) : ''}`), [
+      'user:First task',
+      `user:${guidance}`,
+      'toolResult:ok',
+      'user:Second task',
+      `user:${MAIN_GUIDANCE}After complete.`,
+    ]);
+  } finally { removeDir(dir); }
 });
