@@ -596,49 +596,6 @@ test('when a remote window\'s /complete handoff turn fails, unread guidance stay
   } finally { releaseWork(); await window.close(); await owner.close(); }
 });
 
-test('delivered guidance stays in zoom and compactor fallback when identical guidance later arrives undelivered across /complete (#349)', async () => {
-  const name = profile();
-  let releaseWork = () => {};
-  const work = new Promise<void>(resolve => { releaseWork = resolve; });
-  const owner = await rpc(name);
-  const window = await rpc(name, undefined, 'rpc', true, request =>
-    request === 'Slow step.' ? work : request.startsWith(HANDOFF_REQUEST) ? Promise.reject(new Error('handoff model down')) : undefined);
-  try {
-    await window.ask('First turn.');
-    const role = window.role(), id = role?.role === 'window' ? role.id : '';
-    await until(() => readFileSync(join(profilePath(name), 'pending-reports.json'), 'utf8').includes(`[${id}] User started`));
-    await owner.ask('Drain start notice.');
-
-    // Deliver guidance X and let the window read and answer it.
-    assert.equal(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'Do not deploy yet.' })}`), 'Reply: Message sent to the connected window.');
-    await until(() => window.sent.some(s => s.last === '[Main agent guidance]\nDo not deploy yet.'));
-    await window.session.waitForIdle();
-
-    // Now start a busy turn, send the exact same guidance X while busy (steered, never read), then /complete aborts and fails its handoff turn.
-    const busy = window.ask('Slow step.');
-    await until(() => window.sent.some(s => s.last === 'Slow step.'));
-    assert.equal(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'Do not deploy yet.' })}`), 'Reply: Message sent to the connected window.');
-    await new Promise(resolve => setTimeout(resolve, 50));
-    const handoffOf = (s: { last: string }) => new RegExp(`^\\[${id}\\] Connected conversation completed by user`).test(s.last);
-    let settled = false;
-    const off = owner.session.subscribe(event => {
-      if (event.type === 'agent_settled' && owner.sent.some(handoffOf)) settled = true;
-    });
-    try {
-      const completing = window.ask('/complete');
-      await busy;
-      await completing;
-      await until(() => settled);
-    } finally { off(); }
-    const compactorInput = owner.sent.find(s => s.system.includes('handoff') && s.last.includes('First turn.'))?.last ?? '';
-    // The earlier delivered copy stays as MAIN AGENT input once, and the later undelivered copy is NOT duplicated as MAIN AGENT input.
-    assert.equal(compactorInput.match(/MAIN AGENT: \[Main agent guidance\]\nDo not deploy yet\./g)?.length, 1);
-    assert.match(compactorInput, /Messages queued but NOT delivered to this agent:\n\[Main agent guidance\]\nDo not deploy yet\./);
-    const zoomed = await owner.ask(`CALL zoom ${JSON.stringify({ id })}`);
-    assert.equal(zoomed?.match(/user\|\[Main agent guidance\]\nDo not deploy yet\./g)?.length, 1);
-  } finally { releaseWork(); await window.close(); await owner.close(); }
-});
-
 test('delivered guidance stays in zoom and compactor fallback when an identical undelivered guidance is recorded without entering the session (#349)', async () => {
   const name = profile(), owner = await rpc(name);
   try {

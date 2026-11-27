@@ -176,8 +176,7 @@ test('sessionMessages drops guidance drained into a /complete handoff turn by po
     manager.appendCustomMessageEntry(REPORT_TYPE, guidance, true);
     manager.appendMessage({ role: 'toolResult', toolCallId: 't1', toolName: 'models', content: [{ type: 'text', text: 'ok' }], isError: false, timestamp: 2 });
     manager.appendCustomEntry(COMPLETED_TYPE, {});
-    // A second conversation in the same session file after COMPLETED_TYPE resumes keeping delivered guidance,
-    // and an identical undelivered guidance that never landed in the session still preserves the earlier delivered copy.
+    // A second conversation in the same session file after COMPLETED_TYPE resumes keeping delivered guidance.
     manager.appendMessage({ role: 'user', content: 'Second task', timestamp: 3 });
     manager.appendCustomMessageEntry(REPORT_TYPE, `${MAIN_GUIDANCE}After complete.`, true);
     manager.appendCustomMessageEntry(HANDOFF_TYPE, 'Second handoff.', false);
