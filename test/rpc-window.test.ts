@@ -653,18 +653,24 @@ test('when two steered tells drain across an intermediate stop reply during a fa
     assert.equal(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'First queued note.' })}`), 'Reply: Message sent to the connected window.');
     assert.equal(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'Second queued note.' })}`), 'Reply: Message sent to the connected window.');
     await new Promise(resolve => setTimeout(resolve, 50));
-    const completing = window.ask('/complete');
-    await busy;
-    await completing;
-
     const handoffOf = (s: { last: string }) => new RegExp(`^\\[${id}\\] Connected conversation completed by user`).test(s.last);
-    await until(() => owner.sent.some(handoffOf));
+    let settled = false;
+    const off = owner.session.subscribe(event => {
+      if (event.type === 'agent_settled' && owner.sent.some(handoffOf)) settled = true;
+    });
+    try {
+      const completing = window.ask('/complete');
+      await busy;
+      await completing;
+      await until(() => settled);
+    } finally { off(); }
     assert.equal(handoffCalls, 2, 'Pi ran a second model call after draining the second steer past the first stop reply');
     const compactorInput = owner.sent.find(s => s.system.includes('handoff') && s.last.includes(`AGENT ${id}`))?.last ?? '';
     assert.match(compactorInput, /Messages queued but NOT delivered to this agent:[\s\S]*First queued note\.[\s\S]*Second queued note\./);
     assert.doesNotMatch(compactorInput, /MAIN AGENT: \[Main agent guidance\]\nFirst queued note\./);
     assert.doesNotMatch(compactorInput, /MAIN AGENT: \[Main agent guidance\]\nSecond queued note\./);
     const zoomed = await owner.ask(`CALL zoom ${JSON.stringify({ id })}`);
+    assert.match(zoomed ?? '', /user\|First turn\./);
     assert.doesNotMatch(zoomed ?? '', /First queued note\.|Second queued note\./);
   } finally { releaseWork(); await window.close(); await owner.close(); }
 });
