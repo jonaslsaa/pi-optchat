@@ -5,8 +5,8 @@ import { MAIN_GUIDANCE, REPORT_TYPE, textContent, withoutFullChat } from './tran
 /** `[id]` or `[id · title]` (runs.ts `reportHead`); titles hold no brackets. */
 const HEAD = /^\[([0-9a-f]{8})(?: · ([^\]\n]*))?\] (?:(Message from subagent \(still running\)|Connected agent message): )?/;
 
-/** Sent with a report: `count` subagent reports joined in one message, when one spawn's reports arrive together. */
-export interface ReportDetails { count?: number }
+/** Sent with a report: `count` subagent reports joined in one message; `window` marks a remote window's own session entries. */
+export interface ReportDetails { count?: number; window?: string }
 
 /** Split "[id] Message from subagent (still running): body" into a short label and the body. */
 export function reportParts(text: string, count = 1) {

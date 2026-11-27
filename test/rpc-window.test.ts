@@ -596,6 +596,116 @@ test('when a remote window\'s /complete handoff turn fails, unread guidance stay
   } finally { releaseWork(); await window.close(); await owner.close(); }
 });
 
+test('delivered guidance stays in zoom and compactor fallback when an identical undelivered guidance is recorded without entering the session (#349)', async () => {
+  const name = profile(), owner = await rpc(name);
+  try {
+    // Build a saved remote-window session that has one delivered guidance X (before /complete) and no drained copy.
+    const dir = mkdtempSync(join(root, 'late-'));
+    const manager = SessionManager.create(dir, dir);
+    const guidance = '[Main agent guidance]\nDo not deploy yet.';
+    manager.appendMessage({ role: 'user', content: 'First turn.', timestamp: 1 });
+    manager.appendCustomMessageEntry('optchat-report', guidance, true);
+    manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Understood.' }], api: 'openai-completions', provider: 'fixture', model: 'fixture',
+      stopReason: 'stop', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, timestamp: 2 });
+
+    // Hand it off over the window socket with `undelivered: [guidance]` (as when identical X arrived in `late` after `/complete` started) and no handoff text so the owner compactor runs.
+    const id = 'late0001';
+    const client = await connectWindow(profilePath(name), () => {}, () => {});
+    let settled = false;
+    const off = owner.session.subscribe(event => {
+      if (event.type === 'agent_settled' && owner.sent.some(s => s.last.includes(`[${id}] Connected conversation completed by user`))) settled = true;
+    });
+    try {
+      await client.request('register', JSON.stringify({ id, task: 'First turn.', cwd: dir, model: 'fixture/fixture', thinking: 'off', pid: process.pid, session: manager.getSessionFile(), receives: true }));
+      await client.request('handoff', undefined, undefined, { undelivered: [guidance] });
+      await until(() => settled);
+    } finally { off(); client.close(); }
+
+    const compactorInput = owner.sent.find(s => s.system.includes('handoff') && s.last.includes(`AGENT ${id}`))?.last ?? '';
+    assert.equal(compactorInput.match(/MAIN AGENT: \[Main agent guidance\]\nDo not deploy yet\./g)?.length, 1, 'earlier delivered guidance stays in compactor evidence');
+    assert.match(compactorInput, /Messages queued but NOT delivered to this agent:\n\[Main agent guidance\]\nDo not deploy yet\./, 'late undelivered copy is still reported as undelivered');
+    const zoomed = await owner.ask(`CALL zoom ${JSON.stringify({ id })}`);
+    assert.equal(zoomed?.match(/user\|\[Main agent guidance\]\nDo not deploy yet\./g)?.length, 1, 'earlier delivered guidance stays in zoom');
+  } finally { await owner.close(); }
+});
+
+test('when two steered tells drain across an intermediate stop reply during a failing /complete, both stay undelivered only (#349)', async () => {
+  const name = profile();
+  let releaseWork = () => {}, handoffCalls = 0;
+  const work = new Promise<void>(resolve => { releaseWork = resolve; });
+  const owner = await rpc(name);
+  const window = await rpc(name, undefined, 'rpc', true, (request, lastRole) => {
+    if (request === 'Slow step.') return work;
+    // First handoff call succeeds (stop reply), then Pi drains the second steer (which context() hides, leaving the prior
+    // assistant reply at the tail); fail that second call so the owner's compactor fallback runs.
+    if (lastRole === 'assistant' && request.startsWith('Handoff:')) { handoffCalls++; return Promise.reject(new Error('handoff model down')); }
+    if (request.startsWith(HANDOFF_REQUEST)) { handoffCalls++; return undefined; }
+    return undefined;
+  });
+  try {
+    await window.ask('First turn.');
+    const role = window.role(), id = role?.role === 'window' ? role.id : '';
+    await until(() => readFileSync(join(profilePath(name), 'pending-reports.json'), 'utf8').includes(`[${id}] User started`));
+    await owner.ask('Drain start notice.');
+
+    const busy = window.ask('Slow step.');
+    await until(() => window.sent.some(s => s.last === 'Slow step.'));
+    assert.equal(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'First queued note.' })}`), 'Reply: Message sent to the connected window.');
+    assert.equal(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'Second queued note.' })}`), 'Reply: Message sent to the connected window.');
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const handoffOf = (s: { last: string }) => new RegExp(`^\\[${id}\\] Connected conversation completed by user`).test(s.last);
+    let settled = false;
+    const off = owner.session.subscribe(event => {
+      if (event.type === 'agent_settled' && owner.sent.some(handoffOf)) settled = true;
+    });
+    try {
+      const completing = window.ask('/complete');
+      await busy;
+      await completing;
+      await until(() => settled);
+    } finally { off(); }
+    assert.equal(handoffCalls, 2, 'Pi ran a second model call after draining the second steer past the first stop reply');
+    const compactorInput = owner.sent.find(s => s.system.includes('handoff') && s.last.includes(`AGENT ${id}`))?.last ?? '';
+    assert.match(compactorInput, /Messages queued but NOT delivered to this agent:[\s\S]*First queued note\.[\s\S]*Second queued note\./);
+    assert.doesNotMatch(compactorInput, /MAIN AGENT: \[Main agent guidance\]\nFirst queued note\./);
+    assert.doesNotMatch(compactorInput, /MAIN AGENT: \[Main agent guidance\]\nSecond queued note\./);
+    const zoomed = await owner.ask(`CALL zoom ${JSON.stringify({ id })}`);
+    assert.match(zoomed ?? '', /user\|First turn\./);
+    assert.doesNotMatch(zoomed ?? '', /First queued note\.|Second queued note\./);
+  } finally { releaseWork(); await window.close(); await owner.close(); }
+});
+
+test('reopening a session after an interrupted /complete keeps subsequent delivered guidance in zoom and compactor fallback (#349)', async () => {
+  const name = profile(), owner = await rpc(name), window = await rpc(name);
+  try {
+    // Seed a saved session whose previous /complete wrote HANDOFF_TYPE but never wrote COMPLETED_TYPE.
+    window.session.sessionManager.appendMessage({ role: 'user', content: 'Earlier task.', timestamp: 1 });
+    window.session.sessionManager.appendCustomMessageEntry('optchat-handoff-request', 'Write the interrupted handoff.', false);
+    await window.ask('Continue after restart.');
+    const role = window.role(), id = role?.role === 'window' ? role.id : '';
+    assert.ok(id);
+    await owner.ask('Check in.');
+
+    assert.equal(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'A real instruction after reopening.' })}`), 'Reply: Message sent to the connected window.');
+    await until(() => window.sent.some(s => s.last === '[Main agent guidance]\nA real instruction after reopening.'));
+    await window.session.waitForIdle();
+
+    let settled = false;
+    const off = owner.session.subscribe(event => {
+      if (event.type === 'agent_settled' && owner.sent.some(s => s.last.includes(`[${id}] Connected conversation interrupted`))) settled = true;
+    });
+    try {
+      await window.close();
+      await until(() => settled);
+    } finally { off(); }
+
+    const compactorInput = owner.sent.find(s => s.system.includes('handoff') && s.last.includes(`AGENT ${id}`))?.last ?? '';
+    assert.match(compactorInput, /MAIN AGENT: \[Main agent guidance\]\nA real instruction after reopening\./, 'delivered guidance after reopening stays in compactor evidence');
+    const zoomed = await owner.ask(`CALL zoom ${JSON.stringify({ id })}`);
+    assert.match(zoomed ?? '', /user\|\[Main agent guidance\]\nA real instruction after reopening\./, 'delivered guidance after reopening stays in zoom');
+  } finally { await window.close(); await owner.close(); }
+});
+
 test('a child subagent report queued while a remote window is busy before /complete stays as an unread report in the handoff without steering it', async () => {
   const name = profile();
   let releaseChild = () => {}, releaseWork = () => {};

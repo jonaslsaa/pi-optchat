@@ -14,6 +14,10 @@ export const RUN_BOUNDARY = 'optchat.run';
 export const MAIN_GUIDANCE = '[Main agent guidance]\n';
 /** Subagent traffic to the main agent: a custom message on screen, a plain user message to the model, `work` in memory. */
 export const REPORT_TYPE = 'optchat-report';
+/** The closing message that asks a remote window for its handoff (`windowHandoff`). */
+export const HANDOFF_TYPE = 'optchat-handoff-request';
+/** Marks where a remote window's conversation completed in its Pi session (see `RunInfo.window.after`). */
+export const COMPLETED_TYPE = 'optchat-window-completed';
 export const REPORT_RECEIPT = 'report:';
 /** A report's receipt in memory: it marks the entry as `work` and keeps a restart from delivering the report twice. */
 export const reportReceipt = (text: string) => REPORT_RECEIPT + createHash('sha256').update(text).digest('hex');
