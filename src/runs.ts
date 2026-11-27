@@ -88,10 +88,11 @@ export function queuedWindows(profileDirectory: string): QueuedWindow[] {
 export const isHandingOff = (run: RunInfo) => !isActiveRun(run) && !!run.handoff && !run.handoff.delivered;
 export const CUT_OFF = 'Pi closed before this agent finished. Its partial transcript is retained.';
 /**
- * Messages saved in a session file. Drops `optchat-report` entries between a remote window's `HANDOFF_TYPE` prompt and its
- * `COMPLETED_TYPE` marker (or the end of the session): Pi's steering queue can drain unread guidance into that closing handoff
- * turn after `/complete` aborts an active turn (hidden from the model by `rpc-window.ts`'s `context()`), so the compactor and
- * `zoom` never mistake it for guidance the agent actually read.
+ * Messages saved in a session file. Drops `optchat-report` entries inside a remote window's closing `/complete` handoff turn:
+ * Pi's steering queue can drain unread guidance after `HANDOFF_TYPE` when `/complete` aborts an active turn (hidden from the
+ * model by `rpc-window.ts`'s `context()`), so the compactor and `zoom` never mistake it for guidance the agent actually read.
+ * A `COMPLETED_TYPE` marker, a new user message, or the final non-tool-use assistant reply ends the handoff turn so an
+ * interrupted `/complete` never hides guidance sent after the session is reopened.
  */
 export function sessionMessages(file: string): AgentMessage[] {
   const entries = SessionManager.open(file).getEntries();
@@ -99,7 +100,10 @@ export function sessionMessages(file: string): AgentMessage[] {
   return entries.flatMap(entry => {
     if (entry.type === 'custom_message' && entry.customType === HANDOFF_TYPE) { inHandoff = true; return []; }
     if (entry.type === 'custom' && entry.customType === COMPLETED_TYPE) { inHandoff = false; return []; }
-    if (entry.type === 'message') return [entry.message];
+    if (entry.type === 'message') {
+      if (entry.message.role === 'user' || (entry.message.role === 'assistant' && entry.message.stopReason !== 'toolUse')) inHandoff = false;
+      return [entry.message];
+    }
     // Main-agent guidance in a remote window is saved as an `optchat-report` custom message (rpc-window.ts); keep only that
     // here so subagent reports aren't misattributed as user messages in handoffs or zoom.
     if (!inHandoff && entry.type === 'custom_message' && entry.customType === REPORT_TYPE && textContent(entry.content).startsWith(MAIN_GUIDANCE))

@@ -629,6 +629,37 @@ test('delivered guidance stays in zoom and compactor fallback when an identical 
   } finally { await owner.close(); }
 });
 
+test('reopening a session after an interrupted /complete keeps subsequent delivered guidance in zoom and compactor fallback (#349)', async () => {
+  const name = profile(), owner = await rpc(name), window = await rpc(name);
+  try {
+    // Seed a saved session whose previous /complete wrote HANDOFF_TYPE but never wrote COMPLETED_TYPE.
+    window.session.sessionManager.appendMessage({ role: 'user', content: 'Earlier task.', timestamp: 1 });
+    window.session.sessionManager.appendCustomMessageEntry('optchat-handoff-request', 'Write the interrupted handoff.', false);
+    await window.ask('Continue after restart.');
+    const role = window.role(), id = role?.role === 'window' ? role.id : '';
+    assert.ok(id);
+    await owner.ask('Check in.');
+
+    assert.equal(await owner.ask(`CALL tell ${JSON.stringify({ id, message: 'A real instruction after reopening.' })}`), 'Reply: Message sent to the connected window.');
+    await until(() => window.sent.some(s => s.last === '[Main agent guidance]\nA real instruction after reopening.'));
+    await window.session.waitForIdle();
+
+    let settled = false;
+    const off = owner.session.subscribe(event => {
+      if (event.type === 'agent_settled' && owner.sent.some(s => s.last.includes(`[${id}] Connected conversation interrupted`))) settled = true;
+    });
+    try {
+      await window.close();
+      await until(() => settled);
+    } finally { off(); }
+
+    const compactorInput = owner.sent.find(s => s.system.includes('handoff') && s.last.includes(`AGENT ${id}`))?.last ?? '';
+    assert.match(compactorInput, /MAIN AGENT: \[Main agent guidance\]\nA real instruction after reopening\./, 'delivered guidance after reopening stays in compactor evidence');
+    const zoomed = await owner.ask(`CALL zoom ${JSON.stringify({ id })}`);
+    assert.match(zoomed ?? '', /user\|\[Main agent guidance\]\nA real instruction after reopening\./, 'delivered guidance after reopening stays in zoom');
+  } finally { await window.close(); await owner.close(); }
+});
+
 test('a child subagent report queued while a remote window is busy before /complete stays as an unread report in the handoff without steering it', async () => {
   const name = profile();
   let releaseChild = () => {}, releaseWork = () => {};
