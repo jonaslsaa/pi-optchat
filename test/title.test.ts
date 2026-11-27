@@ -9,6 +9,8 @@ import optchat from '../src/index.ts';
 import { createProfile, loadConfig, profilePath, saveConfig } from '../src/profiles.ts';
 import { mainTitle, statusState, TabTitle, windowTitle, type StatusState } from '../src/title.ts';
 import { COMPACT } from '../src/core/prompts.ts';
+import { HANDOFF } from '../src/prompts.ts';
+import { queueWindow } from '../src/runs.ts';
 import { emptyUsage } from '../src/usage.ts';
 import { textContent } from '../src/transcript.ts';
 import { removeDir } from './support.ts';
@@ -197,6 +199,80 @@ test('the status line clears pending summaries once background compaction finish
     assert.match(statuses.at(-1) ?? '', /^OptChat: fixture · 2 messages · 0 pending · 0 agents$/);
   } finally {
     releaseSummary();
+    if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
+    if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
+    removeDir(dir);
+  }
+});
+
+test('the status line shows and clears the handing-off count as background handoffs run', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'optchat-handoff-status-'));
+  const oldHome = process.env.OPTCHAT_HOME;
+  process.env.OPTCHAT_HOME = dir;
+  const gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+  const held = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+  let handoffCalls = 0;
+  let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | undefined;
+  try {
+    createProfile('fixture');
+    const profile = profilePath('fixture');
+    const config = loadConfig(profile);
+    saveConfig(profile, { ...config, compactor: { provider: 'fixture', model: 'fixture', thinking: 'off' } });
+    // Queue two ended remote windows before startup so recoverHandoffs() picks both up in the background.
+    for (const id of ['win-1', 'win-2']) {
+      queueWindow(profile, { id, task: `Task ${id}`, cwd: dir, model: 'fixture/fixture', thinking: 'off', pid: 999_999, reason: 'complete' });
+    }
+    const runtime = await ModelRuntime.create({ authPath: join(dir, 'auth.json'), modelsPath: null,
+      modelsStorePath: join(dir, 'models-cache.json'), refreshOnCreate: false });
+    runtime.registerProvider('fixture', {
+      baseUrl: 'https://invalid.local', apiKey: 'synthetic', api: 'openai-completions',
+      models: [{ id: 'fixture', name: 'Fixture', reasoning: false, input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+      streamSimple(model, context) {
+        const handoff = context.messages.some(m => m.role === 'system' && m.content === HANDOFF);
+        const call = handoff ? handoffCalls++ : -1;
+        const reply: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: handoff ? `Handoff summary ${call + 1}.` : 'Done.' }],
+          timestamp: Date.now(), stopReason: 'stop', api: model.api, provider: model.provider, model: model.id, usage: emptyUsage() };
+        const stream = createAssistantMessageEventStream();
+        void (async () => {
+          if (handoff && call < gates.length) {
+            stream.push({ type: 'start', partial: reply });
+            held[call].resolve();
+            await gates[call].promise;
+          }
+          stream.push({ type: 'done', reason: 'stop', message: reply });
+          stream.end();
+        })();
+        return stream;
+      },
+    });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: 'off', retry: { enabled: false } });
+    const loader = new DefaultResourceLoader({ cwd: dir, agentDir: join(dir, 'agent'), settingsManager,
+      noExtensions: true, noContextFiles: true, noSkills: true, noPromptTemplates: true, extensionFactories: [optchat] });
+    await loader.reload();
+    const manager = SessionManager.create(dir, join(dir, 'sessions'));
+    manager.appendCustomEntry('optchat.profile', { name: 'fixture' });
+    session = (await createAgentSession({ modelRuntime: runtime, model: runtime.getModel('fixture', 'fixture'),
+      resourceLoader: loader, settingsManager, sessionManager: manager, tools: ['zoom', 'date'] })).session;
+    const statuses: (string | undefined)[] = [];
+    const uiContext: ExtensionUIContext = { ...session.extensionRunner.getUIContext(),
+      setStatus: (key, text) => { if (key === 'optchat') statuses.push(text); } };
+    await session.bindExtensions({ uiContext });
+
+    await held[0].promise;
+    await until(() => / · 2 handing off$/.test(statuses.at(-1) ?? ''));
+    assert.match(statuses.at(-1) ?? '', /^OptChat: fixture · \d+ messages · \d+ pending · 0 agents · 2 handing off$/);
+
+    gates[0].resolve();
+    await held[1].promise;
+    await until(() => / · 1 handing off$/.test(statuses.at(-1) ?? ''));
+    assert.match(statuses.at(-1) ?? '', /^OptChat: fixture · \d+ messages · \d+ pending · 0 agents · 1 handing off$/);
+
+    gates[1].resolve();
+    await until(() => !/handing off/.test(statuses.at(-1) ?? ''));
+    assert.match(statuses.at(-1) ?? '', /^OptChat: fixture · \d+ messages · \d+ pending · 0 agents$/);
+  } finally {
+    for (const gate of gates) gate.resolve();
     if (session) { await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' }); session.dispose(); }
     if (oldHome === undefined) delete process.env.OPTCHAT_HOME; else process.env.OPTCHAT_HOME = oldHome;
     removeDir(dir);

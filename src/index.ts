@@ -20,7 +20,7 @@ import { registerReportRenderer, type ReportDetails } from './report-message.ts'
 import { memoryTools } from './tools.ts';
 import { result, searchTool } from './core/tools.ts';
 import { Children, loadedBuiltins, modelsTool, refreshContextFiles, TASKS, type ReportOptions } from './agents.ts';
-import { isActiveRun, type RunInfo } from './runs.ts';
+import { isActiveRun, isHandingOff, type RunInfo } from './runs.ts';
 import { exportBrowser } from './browser.ts';
 import { Inbox } from './inbox.ts';
 import { checkpoint } from './checkpoint.ts';
@@ -190,7 +190,8 @@ export default function optchat(pi: ExtensionAPI) {
     let note = '';
     try { note = importing ? ' · importing' : pendingImport(a.dir) ? ' · import paused: /optchat import' : ''; }
     catch { note = ' · import journal invalid'; }
-    ctx.ui.setStatus('optchat', `OptChat: ${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending · ${a.children.ids.length} agents${note}`);
+    const handingOff = [...a.children.history.records.values()].filter(isHandingOff).length;
+    ctx.ui.setStatus('optchat', `OptChat: ${a.name} · ${a.memory.root.length} messages · ${a.memory.pending} pending · ${a.children.ids.length} agents${handingOff ? ` · ${handingOff} handing off` : ''}${note}`);
   };
   // `steered` describes this process's Pi queue, so it is not journaled.
   const saveReports = () => { if (active) atomicWrite(join(active.dir, 'pending-reports.json'), JSON.stringify(reports, (key, value: unknown) => key === 'steered' ? undefined : value)); };
